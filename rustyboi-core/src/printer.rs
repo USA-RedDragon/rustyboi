@@ -32,7 +32,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Print head width in pixels; every band is 20 tiles wide.
-pub const PRINT_WIDTH: usize = 160;
+pub(crate) const PRINT_WIDTH: usize = 160;
 /// Stripe RAM: 0x1680 bytes = 9 bands of 0x280 = one full 160x144 screen.
 const BUFFER_CAPACITY: usize = 0x1680;
 /// Inter-byte packet timeout. Pan Docs: the printer abandons packet reception
@@ -97,7 +97,7 @@ enum PacketState {
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
-pub struct GbPrinter {
+pub(crate) struct GbPrinter {
     state: PacketState,
     command: u8,
     compression: bool,
@@ -129,14 +129,14 @@ impl GbPrinter {
     /// The byte the printer would shift out during the next exchange. Latched
     /// by the serial unit at transfer start (the real shift register's
     /// contents), so mid-transfer SB reads reconstruct the correct bits.
-    pub fn preloaded_response(&self) -> u8 {
+    pub(crate) fn preloaded_response(&self) -> u8 {
         self.next_response
     }
 
     /// Completed byte exchange: the GB shifted `tx` out (and already received
     /// the previously preloaded response). `cc` is the master clock at
     /// completion; used only for deterministic timeouts/busy modeling.
-    pub fn receive_byte(&mut self, tx: u8, cc: u64) {
+    pub(crate) fn receive_byte(&mut self, tx: u8, cc: u64) {
         if self.busy_until_cc != 0 && cc >= self.busy_until_cc {
             self.busy_until_cc = 0;
             self.status &= !STATUS_PRINTING;
@@ -314,7 +314,7 @@ impl GbPrinter {
     }
 
     /// Drain completed prints (oldest first).
-    pub fn take_completed(&mut self) -> Vec<PrintSheet> {
+    pub(crate) fn take_completed(&mut self) -> Vec<PrintSheet> {
         std::mem::take(&mut self.completed)
     }
 
@@ -343,7 +343,7 @@ fn decompress_rle(data: &[u8]) -> Vec<u8> {
 
 /// Minimal deterministic PNG encoder: 8-bit grayscale, filter 0, zlib stream
 /// with stored (uncompressed) deflate blocks. No external deps, wasm-safe.
-pub fn encode_gray8_png(width: u32, height: u32, gray: &[u8]) -> Vec<u8> {
+pub(crate) fn encode_gray8_png(width: u32, height: u32, gray: &[u8]) -> Vec<u8> {
     assert_eq!(gray.len(), width as usize * height as usize);
     let mut png = Vec::with_capacity(gray.len() + gray.len() / 32 + 128);
     png.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);

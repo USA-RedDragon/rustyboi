@@ -62,7 +62,7 @@ const TMA_OFF: u64 = 3;
 // The APU frame sequencer is driven by a single closed-form (update-to-cc) path.
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct Timer {
+pub(crate) struct Timer {
     tima: u8,
     tma: u8,
     tac: u8,
@@ -206,19 +206,19 @@ impl Timer {
     }
 
     /// Arm/clear the halt-woken DIV/TIMA read re-anchor (see `halt_read_bias`).
-    pub fn set_halt_read_bias(&mut self, bias: u32) {
+    pub(crate) fn set_halt_read_bias(&mut self, bias: u32) {
         self.halt_read_bias = bias;
     }
 
     /// Set the AGB (GBA-in-GBC-mode) hardware flag. Propagated from
     /// `Mmio::set_agb` at construction.
-    pub fn set_agb(&mut self, agb: bool) {
+    pub(crate) fn set_agb(&mut self, agb: bool) {
         self.is_agb = agb;
     }
 
     /// The cc the most recent still-undispatched TIMA IRQ became deliverable, or
     /// `None`. Cleared at dispatch via `clear_fire_cc`.
-    pub fn pending_fire_cc(&self) -> Option<u64> {
+    pub(crate) fn pending_fire_cc(&self) -> Option<u64> {
         if self.last_fire_cc != DISABLED_TIME {
             Some(self.last_fire_cc)
         } else {
@@ -228,7 +228,7 @@ impl Timer {
 
 
     /// The EARLY (EI-loop) gate cc for the undispatched timer IRQ, or `None`.
-    pub fn pending_fire_cc_ei(&self) -> Option<u64> {
+    pub(crate) fn pending_fire_cc_ei(&self) -> Option<u64> {
         if self.last_fire_cc_ei != DISABLED_TIME {
             Some(self.last_fire_cc_ei)
         } else {
@@ -237,16 +237,18 @@ impl Timer {
     }
 
     /// Clear the recorded fire cc after the CPU dispatches the IRQ.
-    pub fn clear_fire_cc(&mut self) {
+    pub(crate) fn clear_fire_cc(&mut self) {
         self.last_fire_cc = DISABLED_TIME;
         self.last_fire_cc_ei = DISABLED_TIME;
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// The delivery cc of the next scheduled timer overflow (the cc at which its IF
     /// bit will be raised: `next_irq_event_time + CC_OFF`), or `None` if disabled.
     /// Used by the EI-loop fast-dispatch to promote an imminent overflow so the
     /// non-halt service runs on the correct phase rather than CC_OFF late.
-    pub fn next_overflow_deliver_cc(&self) -> Option<u64> {
+    pub(crate) fn next_overflow_deliver_cc(&self) -> Option<u64> {
         if self.tac & TAC_ENABLE != 0 && self.next_irq_event_time != DISABLED_TIME {
             Some(self.next_irq_event_time.wrapping_add(CC_OFF as u64))
         } else {
@@ -260,7 +262,7 @@ impl Timer {
     /// The min-event idle fast path lands precisely on this cc so the overflow
     /// fires at the identical cc the per-dot crank would have. `None` when the
     /// timer is disabled / no overflow scheduled.
-    pub fn next_overflow_fire_cc(&self, cpu_halted: bool) -> Option<u64> {
+    pub(crate) fn next_overflow_fire_cc(&self, cpu_halted: bool) -> Option<u64> {
         if self.tac & TAC_ENABLE == 0 || self.next_irq_event_time == DISABLED_TIME {
             return None;
         }
@@ -272,7 +274,7 @@ impl Timer {
     /// Early (EI-loop) anchor cc of the next scheduled overflow:
     /// `next_irq_event_time + IF_OFF`.
     /// The non-halt fast dispatch fires the overflow once the boundary reaches this.
-    pub fn next_overflow_ei_cc(&self) -> Option<u64> {
+    pub(crate) fn next_overflow_ei_cc(&self) -> Option<u64> {
         if self.tac & TAC_ENABLE != 0 && self.next_irq_event_time != DISABLED_TIME {
             Some(self.next_irq_event_time.wrapping_add(IF_OFF as u64))
         } else {
@@ -284,14 +286,14 @@ impl Timer {
         self.abs_cc
     }
 
-    pub fn div_reset_count(&self) -> u64 {
+    pub(crate) fn div_reset_count(&self) -> u64 {
         self.div_reset_count
     }
 
     /// The APU-visible divider anchor of the most recent DIV write. The APU
     /// divider-reset fold runs at this cc, matching the master counter it folds
     /// on. Currently equal to `div_anchor` for every write.
-    pub fn div_anchor_apu(&self) -> u64 {
+    pub(crate) fn div_anchor_apu(&self) -> u64 {
         self.div_anchor_apu
     }
 
@@ -331,7 +333,7 @@ impl Timer {
 
     /// cc at which a CPU register access resolves: the raw master cc. This is the
     /// per-access cc the timer, serial, and APU all resolve register accesses on.
-    pub fn access_cc(&self) -> u64 {
+    pub(crate) fn access_cc(&self) -> u64 {
         // The CPU positions `abs_cc` at the access M-cycle start before any tick,
         // so `abs_cc` is the access cc.
         self.abs_cc
@@ -341,7 +343,7 @@ impl Timer {
     /// sub-quantum phase from the read `access_cc()`: the APU/serial trigger
     /// boundary math rounds differently from the read event, so it carries its
     /// own offset (`WRITE_CC_OFF`).
-    pub fn write_access_cc(&self) -> u64 {
+    pub(crate) fn write_access_cc(&self) -> u64 {
         (self.abs_cc as i64 + WRITE_CC_OFF) as u64
     }
 
@@ -406,7 +408,7 @@ impl Timer {
     /// wins the collision on the same M-cycle. Leaves the IF raise to the caller
     /// (`take_pending_irq`); records the dispatch bookkeeping like the per-dot
     /// delivery so a surviving (re-set) bit keeps its fire-cc gate.
-    pub fn flush_overflow_for_ifreg_write(&mut self) {
+    pub(crate) fn flush_overflow_for_ifreg_write(&mut self) {
         if self.tac & TAC_ENABLE == 0 {
             return;
         }
@@ -427,7 +429,7 @@ impl Timer {
     /// Mirrors `update_irq_delivery` but keyed on the early anchor. Returns true if
     /// it fired one. Idempotent vs the per-dot path: `do_irq_event` advances
     /// `next_irq_event_time`, so the later `CC_OFF` delivery will not re-fire it.
-    pub fn force_ei_delivery(&mut self, boundary: u64) -> bool {
+    pub(crate) fn force_ei_delivery(&mut self, boundary: u64) -> bool {
         if self.tac & TAC_ENABLE == 0 {
             return false;
         }
@@ -455,7 +457,7 @@ impl Timer {
     /// `force_ei_delivery`, cleared on HALT entry)? When true the unserviced
     /// overflow IF-set uses the early anchor and timer-bit reads sample at the
     /// access cc, so the ISR's IF write/read/re-trigger all resolve on that grid.
-    pub fn isr_on_early_grid(&self) -> bool {
+    pub(crate) fn isr_on_early_grid(&self) -> bool {
         self.isr_on_early_grid && self.tac & TAC_ENABLE != 0
     }
 
@@ -663,7 +665,7 @@ impl Timer {
     /// 65KHz/16KHz clocks (TAC&3 >= 2); the 4KHz/262KHz clocks are revision-common.
     /// See `div_reset_split_hold`. STOP DIV reset — Pan Docs: Timer and Divider
     /// Registers — https://gbdev.io/pandocs/Timer_and_Divider_Registers.html
-    pub fn stop_div_reset(&mut self, cgb_de: bool) {
+    pub(crate) fn stop_div_reset(&mut self, cgb_de: bool) {
         let anchor_cc = self.abs_cc;
         let de_hold = if cgb_de && (self.tac & TAC_FREQUENCY_MASK) >= 2 { 4 } else { 0 };
         self.div_reset_split_hold(anchor_cc, anchor_cc, de_hold);
@@ -672,7 +674,7 @@ impl Timer {
 
     /// Initialize the timer's internal 16-bit counter (used at boot to seed the
     /// divider: the low 16 bits of `abs_cc - div_anchor`).
-    pub fn set_internal_counter(&mut self, value: u16) {
+    pub(crate) fn set_internal_counter(&mut self, value: u16) {
         self.abs_cc = value as u64;
         self.div_anchor = 0;
         self.div_anchor_apu = 0;
@@ -680,14 +682,14 @@ impl Timer {
         self.last_apu_cc = self.abs_cc;
     }
 
-    pub fn internal_counter(&self) -> u16 {
+    pub(crate) fn internal_counter(&self) -> u16 {
         self.divider()
     }
 
     /// CGB STOP speed switch. Pulls the timer's tick anchor (and the scheduled IRQ
     /// time) back by 4 T-cycles for an enabled fast-frequency timer
     /// (`tac & 0x07 >= 0x05`), in either speed direction.
-    pub fn speed_change(&mut self) {
+    pub(crate) fn speed_change(&mut self) {
         let fast = (self.tac & 0x07) >= 0x05;
         if fast {
             self.tima_last_update = self.tima_last_update.wrapping_sub(4);
@@ -699,14 +701,14 @@ impl Timer {
 
     /// Raise the pending TIMA IRQ (if any) into `mmio`. Called from `step` and
     /// immediately after a write that may have flagged a glitch IRQ.
-    pub fn flush_pending_irq(&mut self, mmio: &mut mmio::Mmio) {
+    pub(crate) fn flush_pending_irq(&mut self, mmio: &mut mmio::Mmio) {
         if self.pending_irq {
             self.pending_irq = false;
             mmio.request_interrupt(cpu::registers::InterruptFlag::Timer);
         }
     }
 
-    pub fn take_pending_irq(&mut self) -> bool {
+    pub(crate) fn take_pending_irq(&mut self) -> bool {
         let p = self.pending_irq;
         self.pending_irq = false;
         p
@@ -715,7 +717,7 @@ impl Timer {
     /// A HALT (entry or wakeup) ends any prior EI fast-dispatch stream — the next
     /// ISR is HALT-driven and observes the IF re-flag on the late grid. Clears the
     /// early-grid stick.
-    pub fn clear_isr_early_grid(&mut self) {
+    pub(crate) fn clear_isr_early_grid(&mut self) {
         self.isr_on_early_grid = false;
     }
 
@@ -779,14 +781,14 @@ impl Timer {
     /// step (the closed-form count over the widened span is still 0 + later
     /// edges).
     #[inline]
-    pub fn bump_cc_one(&mut self) {
+    pub(crate) fn bump_cc_one(&mut self) {
         self.abs_cc = self.abs_cc.wrapping_add(1);
     }
 
     /// n-dot variant of `bump_cc_one`; every bumped dot must lie strictly
     /// below `quiet_until`.
     #[inline]
-    pub fn bump_cc_by(&mut self, n: u64) {
+    pub(crate) fn bump_cc_by(&mut self, n: u64) {
         self.abs_cc = self.abs_cc.wrapping_add(n);
     }
 
@@ -794,7 +796,7 @@ impl Timer {
     /// increment: the earlier of the next scheduled overflow delivery cc and
     /// the next APU frame-sequencer edge cc. A pending undelivered IRQ or a
     /// due event yields `abs_cc` (no quiet span).
-    pub fn quiet_until(&self, cpu_halted: bool) -> u64 {
+    pub(crate) fn quiet_until(&self, cpu_halted: bool) -> u64 {
         if self.pending_irq {
             return self.abs_cc;
         }
@@ -823,7 +825,7 @@ impl Timer {
     /// invoked when the world is provably idle except for the timer (LCD off, no
     /// DMA/HDMA, audio off, serial idle), so no other peripheral's per-dot state is
     /// skipped.
-    pub fn step_to(&mut self, target_abs_cc: u64, mmio: &mut mmio::Mmio) {
+    pub(crate) fn step_to(&mut self, target_abs_cc: u64, mmio: &mut mmio::Mmio) {
         if target_abs_cc <= self.abs_cc {
             return;
         }

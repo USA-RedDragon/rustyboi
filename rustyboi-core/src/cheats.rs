@@ -51,11 +51,15 @@ pub struct GameShark {
     pub value: u8,
 }
 
+#[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
 /// Turn a hex character into its 0-15 value, or `None` if not a hex digit.
 fn hex_nibble(c: char) -> Option<u8> {
     c.to_digit(16).map(|d| d as u8)
 }
 
+#[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
 /// Strip separators and decode a code string into hex nibbles. Whitespace,
 /// `-` and `:` are ignored; any other non-hex character fails.
 fn nibbles(code: &str) -> Option<Vec<u8>> {
@@ -65,10 +69,12 @@ fn nibbles(code: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+#[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
 /// Decode a Game Genie code (`ABC-DEF` or `ABC-DEF-GHI`, separators optional)
 /// into a [`GameGenie`]. Returns `None` for any input that is not 6 or 9 valid
 /// hex nibbles. See the module docs for the exact layout.
-pub fn decode_game_genie(code: &str) -> Option<GameGenie> {
+pub(crate) fn decode_game_genie(code: &str) -> Option<GameGenie> {
     let n = nibbles(code)?;
     if n.len() != 6 && n.len() != 9 {
         return None;
@@ -97,9 +103,11 @@ pub fn decode_game_genie_nibbles(n: &[u8]) -> Option<GameGenie> {
     Some(GameGenie { addr, value, compare })
 }
 
+#[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
 /// Decode an 8-nibble GameShark code (`ABCDEFGH`, separators optional) into a
 /// [`GameShark`]. Returns `None` unless it is exactly 8 valid hex nibbles.
-pub fn decode_gameshark(code: &str) -> Option<GameShark> {
+pub(crate) fn decode_gameshark(code: &str) -> Option<GameShark> {
     let n = nibbles(code)?;
     if n.len() != 8 {
         return None;

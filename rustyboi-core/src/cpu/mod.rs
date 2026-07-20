@@ -3,5 +3,5 @@ pub mod sm83;
 mod opcodes;
 pub mod registers;
 
-pub use bus::Bus;
-pub use sm83::SM83;
+pub(crate) use bus::Bus;
+pub(crate) use sm83::SM83;

@@ -46,11 +46,11 @@ pub enum Hardware {
 }
 
 /// The DMG's crystal: 4.194304 MHz. Every model but the SGB1 runs at this rate.
-pub const DMG_CPU_HZ: u32 = 4_194_304;
+pub(crate) const DMG_CPU_HZ: u32 = 4_194_304;
 /// NTSC SGB1: the NTSC SNES master clock (21.477270 MHz) / 5. ~2.4% fast.
-pub const SGB_NTSC_CPU_HZ: u32 = 21_477_270 / 5;
+pub(crate) const SGB_NTSC_CPU_HZ: u32 = 21_477_270 / 5;
 /// PAL SGB1: the PAL SNES master clock (21.281370 MHz) / 5. ~1.5% fast.
-pub const SGB_PAL_CPU_HZ: u32 = 21_281_370 / 5;
+pub(crate) const SGB_PAL_CPU_HZ: u32 = 21_281_370 / 5;
 
 impl Hardware {
     /// The machine's CPU/dot clock in Hz — a **real-time** quantity only. The
@@ -76,13 +76,13 @@ impl Hardware {
     /// AGB (GBA-in-GBC-mode) hardware. AGB behaves like CGB everywhere except
     /// the small AGB-vs-CGB diff set (PPU line-153/last-line/LYC timing,
     /// APU ch3 wave-RAM, GBA_FLAG power-on registers).
-    pub fn is_agb(self) -> bool {
+    pub(crate) fn is_agb(self) -> bool {
         matches!(self, Hardware::AGB)
     }
 
     /// Whether this hardware runs the CGB feature set (CGB or AGB). Used to
     /// decide CGB-vs-DMG behavior; AGB is a CGB for all CGB-feature purposes.
-    pub fn is_cgb_like(self) -> bool {
+    pub(crate) fn is_cgb_like(self) -> bool {
         matches!(self, Hardware::CGB0 | Hardware::CGBB | Hardware::CGB | Hardware::CGBE | Hardware::AGB)
     }
 
@@ -91,7 +91,7 @@ impl Hardware {
     /// fires regardless of the written bit-6 value ("current value is
     /// irrelevant on CGB-B and older"). SameSuite
     /// channel_*_extra_length_clocking-cgb0B/-cgb0/-cgbB validate this fork.
-    pub fn is_cgb_b_or_earlier(self) -> bool {
+    pub(crate) fn is_cgb_b_or_earlier(self) -> bool {
         matches!(self, Hardware::CGB0 | Hardware::CGBB)
     }
 
@@ -100,7 +100,7 @@ impl Hardware {
     /// `CGBE` models the CPU-CGB-D/E silicon SameSuite was validated on.
     /// AGB intentionally stays on the C side: rustyboi's AGB model is pinned
     /// to the AGB reference oracle (a strict revision order would place AGB > CGB_E).
-    pub fn is_cgb_d_or_later(self) -> bool {
+    pub(crate) fn is_cgb_d_or_later(self) -> bool {
         matches!(self, Hardware::CGBE)
     }
 }
@@ -122,7 +122,7 @@ pub enum Compatibility {
 
 /// Classify how `cartridge` pairs with `hardware`. Pure function of the
 /// cartridge header's CGB flag and the hardware model.
-pub fn cartridge_compatibility(hardware: Hardware, cartridge: &cartridge::Cartridge) -> Compatibility {
+pub(crate) fn cartridge_compatibility(hardware: Hardware, cartridge: &cartridge::Cartridge) -> Compatibility {
     match (hardware, cartridge.get_cgb_support()) {
         (h, cartridge::CgbSupport::Only) if !h.is_cgb_like() => Compatibility::CgbOnlyOnDmg,
         (h, cartridge::CgbSupport::Compatible) if !h.is_cgb_like() => Compatibility::DmgModeFallback,
@@ -224,7 +224,7 @@ impl DmgPaletteChoice {
     /// The model's default base palette: Green for the DMG-01, the Game Boy
     /// Pocket's grey for the MGB, neutral grey elsewhere (SGB has no LCD; CGB/AGB
     /// only hit this as a mono fallback).
-    pub fn default_for(hardware: Hardware) -> Self {
+    pub(crate) fn default_for(hardware: Hardware) -> Self {
         match hardware {
             Hardware::DMG | Hardware::DMG0 => Self::Green,
             Hardware::MGB => Self::Pocket,
@@ -350,7 +350,7 @@ impl SgbPaletteChoice {
     /// The same four colours as [`shades`](Self::shades), still as the RGB555
     /// words the firmware stores. The SGB border compositor works in RGB555,
     /// so it takes this form directly.
-    pub fn shades_rgb555(
+    pub(crate) fn shades_rgb555(
         self,
         title: &[u8; 16],
         old_licensee: u8,
@@ -397,10 +397,12 @@ impl SgbPaletteChoice {
     }
 }
 
+#[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
 /// The four DMG-shade colours for a model's default palette under `correction`.
 /// The single source of truth for mono → RGB in the media sweep (which has no
 /// user palette override); frontends use a user-selected [`DmgPaletteChoice`].
-pub fn mono_shades(hardware: Hardware, correction: ppu::ColorCorrection) -> [[u8; 3]; 4] {
+pub(crate) fn mono_shades(hardware: Hardware, correction: ppu::ColorCorrection) -> [[u8; 3]; 4] {
     DmgPaletteChoice::default_for(hardware).shades(correction)
 }
 
@@ -417,7 +419,7 @@ const REGISTERED_MARK_TILE: [u8; 0x10] = [
 /// Savestate container magic: the first 4 bytes of every buffer
 /// [`GB::to_state_bytes`] produces. Distinguishes a rustyboi savestate from an
 /// unrelated file before any of it reaches bincode.
-pub const STATE_MAGIC: &[u8; 4] = b"RBST";
+pub(crate) const STATE_MAGIC: &[u8; 4] = b"RBST";
 
 /// Savestate wire-format version, stored little-endian right after
 /// [`STATE_MAGIC`].
@@ -434,10 +436,10 @@ pub const STATE_MAGIC: &[u8; 4] = b"RBST";
 /// The project is pre-release, so old states are not migrated: a version
 /// mismatch is rejected by name in [`GB::from_state_bytes`] rather than
 /// deserialized into a plausible-but-wrong machine.
-pub const STATE_VERSION: u32 = 1;
+pub(crate) const STATE_VERSION: u32 = 1;
 
 /// Bytes [`STATE_MAGIC`] + [`STATE_VERSION`] occupy ahead of the bincode payload.
-pub const STATE_HEADER_LEN: usize = STATE_MAGIC.len() + core::mem::size_of::<u32>();
+pub(crate) const STATE_HEADER_LEN: usize = STATE_MAGIC.len() + core::mem::size_of::<u32>();
 
 impl GB {
     pub fn new(hardware: Hardware) -> Self {
@@ -994,10 +996,12 @@ impl GB {
         compatibility
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// How the currently-inserted cartridge pairs with the current hardware.
     ///
     /// Returns [`Compatibility::Full`] when no cartridge is loaded.
-    pub fn cartridge_compatibility(&self) -> Compatibility {
+    pub(crate) fn cartridge_compatibility(&self) -> Compatibility {
         match self.mmio.get_cartridge() {
             Some(cartridge) => cartridge_compatibility(self.hardware, cartridge),
             None => Compatibility::Full,
@@ -1256,7 +1260,7 @@ impl GB {
     /// The raw DMG shade indices (0..=3) of the current frame — the
     /// correction/palette-independent representation the test suite compares.
     /// Meaningful only for a monochrome frame (see [`GB::frame_renders_color`]).
-    pub fn dmg_shade_frame(&self) -> &[u8; ppu::FRAMEBUFFER_SIZE] {
+    pub(crate) fn dmg_shade_frame(&self) -> &[u8; ppu::FRAMEBUFFER_SIZE] {
         self.ppu.dmg_shade_frame()
     }
 
@@ -1446,9 +1450,11 @@ impl GB {
         self.ppu.set_cgb_color_conversion(conversion);
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// The four DMG-shade colours (index 0 = lightest) for this machine's model
     /// and colour-correction setting; see [`mono_shades`].
-    pub fn mono_shades(&self) -> [[u8; 3]; 4] {
+    pub(crate) fn mono_shades(&self) -> [[u8; 3]; 4] {
         mono_shades(self.hardware, self.ppu.cgb_color_conversion())
     }
 
@@ -1530,13 +1536,17 @@ impl GB {
         b.mmio.attach_link(pb);
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Plug one end of a link cable into this instance (the other end goes to
     /// a second instance, possibly owned by another window/process transport).
-    pub fn attach_link_peer(&mut self, peer: crate::serial::LinkPeer) {
+    pub(crate) fn attach_link_peer(&mut self, peer: crate::serial::LinkPeer) {
         self.mmio.attach_link(peer);
     }
 
-    pub fn link_attached(&self) -> bool {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    pub(crate) fn link_attached(&self) -> bool {
         self.mmio.link_attached()
     }
 
@@ -1545,70 +1555,90 @@ impl GB {
         self.mmio.detach_serial_device();
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Point two GBC instances' IR ports at each other (Pan Docs "GBC Infrared
     /// Communication"). Each side's emitter (RP bit 0) illuminates the other's
     /// receiver (RP bit 1). The harness pumps both instances (any interleave);
     /// the shared channel carries the emitter level between their timelines. Use
     /// for GBC<->GBC IR: Pokémon G/S/C Mystery Gift, TCG "Card Pop", Pokémon
     /// Pinball score exchange, Bomberman trades.
-    pub fn connect_ir(a: &mut GB, b: &mut GB) {
+    pub(crate) fn connect_ir(a: &mut GB, b: &mut GB) {
         let (la, lb) = crate::ir::IrLink::pair();
         a.mmio.attach_ir(la);
         b.mmio.attach_ir(lb);
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Plug one end of a shared IR channel into this instance (the other end
     /// goes to a second instance, possibly behind a socket/process transport).
-    pub fn attach_ir_peer(&mut self, link: crate::ir::IrLink) {
+    pub(crate) fn attach_ir_peer(&mut self, link: crate::ir::IrLink) {
         self.mmio.attach_ir(link);
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Diagnostic self-test: make this instance's IR port see its own emitter.
-    pub fn set_ir_loopback(&mut self) {
+    pub(crate) fn set_ir_loopback(&mut self) {
         self.mmio.set_ir_loopback();
     }
 
-    pub fn ir_attached(&self) -> bool {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    pub(crate) fn ir_attached(&self) -> bool {
         self.mmio.ir_attached()
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Unplug the IR partner (back to a lone GBC that never sees light).
-    pub fn detach_ir(&mut self) {
+    pub(crate) fn detach_ir(&mut self) {
         self.mmio.detach_ir();
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Connect 2-4 Game Boys through a 4-Player Adapter (DMG-07). The adapter is
     /// the clock master, so each Game Boy uses external-clock serial; the shared
     /// hub runs the Pan Docs ping/transmission protocol. The frontend pumps all
     /// instances (any interleave), exactly like [`GB::connect_link`]. Player IDs
     /// are assigned by attach order (1..N).
-    pub fn connect_four_player(gbs: &mut [&mut GB]) {
+    pub(crate) fn connect_four_player(gbs: &mut [&mut GB]) {
         let ports = crate::dmg07::FourPlayerPort::hub(gbs.len());
         for (gb, port) in gbs.iter_mut().zip(ports) {
             gb.mmio.attach_four_player(port);
         }
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Plug one DMG-07 port into this instance (the other ports go to other
     /// instances, possibly behind a socket/process transport).
-    pub fn attach_four_player_port(&mut self, port: crate::dmg07::FourPlayerPort) {
+    pub(crate) fn attach_four_player_port(&mut self, port: crate::dmg07::FourPlayerPort) {
         self.mmio.attach_four_player(port);
     }
 
-    pub fn four_player_attached(&self) -> bool {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    pub(crate) fn four_player_attached(&self) -> bool {
         self.mmio.four_player_attached()
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Plug a Mobile Adapter GB into the link port. The adapter answers the
     /// libmobile packet protocol (session begin/end, config read/write); live
     /// networking is out of scope (see `crate::mobile`).
-    pub fn attach_mobile_adapter(&mut self) {
+    pub(crate) fn attach_mobile_adapter(&mut self) {
         self.mmio.attach_mobile_adapter(crate::mobile::MobileAdapter::new());
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// True once a game has completed the START "NINTENDO" handshake with an
     /// attached Mobile Adapter (i.e. detected it and begun a session).
-    pub fn mobile_session_started(&self) -> bool {
+    pub(crate) fn mobile_session_started(&self) -> bool {
         self.mmio.mobile_adapter().is_some_and(|m| m.session_started())
     }
 
@@ -1616,9 +1646,11 @@ impl GB {
         self.mmio.printer().is_some()
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Debug/test: the in-flight serial transfer's completion event cc
     /// (None while idle or while a link transfer holds for the peer).
-    pub fn serial_transfer_complete_at(&self) -> Option<u64> {
+    pub(crate) fn serial_transfer_complete_at(&self) -> Option<u64> {
         self.mmio.serial_transfer_complete_at()
     }
 
@@ -1747,7 +1779,11 @@ impl GB {
             .map(|c| c.detach_rom())
     }
 
-    pub fn to_state_file(&mut self, path: &str) -> Result<(), io::Error> {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    // `&mut self` is forced by `to_state_bytes`, which syncs lazy subsystems first.
+    #[allow(clippy::wrong_self_convention)]
+    pub(crate) fn to_state_file(&mut self, path: &str) -> Result<(), io::Error> {
         fs::write(path, self.to_state_bytes()?)?;
         Ok(())
     }

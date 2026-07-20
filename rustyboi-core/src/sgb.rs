@@ -90,31 +90,31 @@ mod cmd {
 /// clock difference is already modelled and is orthogonal — it only rescales the
 /// GB APU's `cycles_per_sample`, while the SNES APU has its own crystal.
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug, PartialEq, Eq)]
-pub struct SgbSound {
+pub(crate) struct SgbSound {
     /// Sound Effect A code (port 1, decrescendo). See Pan Docs' Effect A table.
-    pub effect_a: u8,
+    pub(crate) effect_a: u8,
     /// Sound Effect B code (port 2, sustain). See Pan Docs' Effect B table.
-    pub effect_b: u8,
+    pub(crate) effect_b: u8,
     /// Effect A pitch 0-3 (low..high).
-    pub a_pitch: u8,
+    pub(crate) a_pitch: u8,
     /// Effect A volume 0-2 (high..low); 3 means "mute on" (see `mute`).
-    pub a_volume: u8,
+    pub(crate) a_volume: u8,
     /// Effect B pitch 0-3 (low..high).
-    pub b_pitch: u8,
+    pub(crate) b_pitch: u8,
     /// Effect B volume 0-2 (high..low); 3 is "not used".
-    pub b_volume: u8,
+    pub(crate) b_volume: u8,
     /// Mute the BGM: set only when the Effect A volume field is 3 (Pan Docs
     /// note 1: mute is active only when both attribute bits D2 and D3 are 1).
     pub mute: bool,
     /// Music Score Code (byte 4); 0 when unused.
-    pub music_score: u8,
+    pub(crate) music_score: u8,
     /// True once at least one SOUND command has been received.
     pub active: bool,
 }
 
 /// Screen-mask mode set by MASK_EN. Applied to the GB output frame.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum MaskMode {
+pub(crate) enum MaskMode {
     /// Normal: GB screen shown as-is.
     #[default]
     Cancel,
@@ -169,7 +169,7 @@ pub struct Sgb {
     joypad_index: u8,
 
     // ---- MASK_EN ----
-    pub mask: MaskMode,
+    pub(crate) mask: MaskMode,
 
     // ---- Palettes (SGB system palettes 0-3, four colors each, RGB555) ----
     /// The four active SGB palettes, each 4 colors, stored as RGB555 (0..0x7FFF).
@@ -178,7 +178,7 @@ pub struct Sgb {
     #[serde(default = "default_attr", with = "serde_bytes")]
     attr: Vec<u8>,
     /// True once any palette command has run (so we know to colorize output).
-    pub colorized: bool,
+    pub(crate) colorized: bool,
 
     // ---- VRAM transfer (_TRN) pending flag ----
     /// A *_TRN command is waiting for the next VBlank to read a 4KB block from
@@ -289,19 +289,23 @@ impl Sgb {
 
     /// Apply the header unlock gate: `true` makes the packet receiver ignore
     /// all JOYP traffic (non-SGB cart), `false` restores normal reception.
-    pub fn set_locked(&mut self, locked: bool) {
+    pub(crate) fn set_locked(&mut self, locked: bool) {
         self.locked = locked;
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// The state requested by the most recent SGB SOUND command (effect codes,
     /// pitch, volume, mute). Nothing in-tree consumes it — it is the read side
     /// of the deferred-audio seam described on [`SgbSound`].
-    pub fn sound(&self) -> SgbSound {
+    pub(crate) fn sound(&self) -> SgbSound {
         self.sound
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Number of players currently selected by MLT_REQ (1/2/3-glitch/4).
-    pub fn players(&self) -> u8 {
+    pub(crate) fn players(&self) -> u8 {
         self.players
     }
 
@@ -310,7 +314,7 @@ impl Sgb {
     /// low nibble: player 1 (index 0) reads 0x0F, player 2 -> 0x0E, etc. The
     /// button/direction bits are ANDed on top by the caller. In single-player
     /// mode `index` is always 0 so this is 0x0F (a no-op mask).
-    pub fn joypad_id_nibble(&self) -> u8 {
+    pub(crate) fn joypad_id_nibble(&self) -> u8 {
         0x0F - (self.joypad_index & 0x0F)
     }
 
@@ -320,7 +324,7 @@ impl Sgb {
     /// Data-bit values are sampled at the both-high return (last pulse wins),
     /// which is what the real-SGB sgb-ext-test reference pins for all 27
     /// adversarial framing variants (see the state-machine field docs).
-    pub fn write_p1(&mut self, value: u8) {
+    pub(crate) fn write_p1(&mut self, value: u8) {
         // Header unlock gate: a non-SGB cart's JOYP writes are never
         // interpreted as SGB packets (Pan Docs "SGB Unlocking").
         if self.locked {
@@ -793,12 +797,12 @@ impl Sgb {
 
     /// True if a _TRN command is pending a VBlank VRAM read. The caller feeds the
     /// 4KB VRAM block via `apply_trn` and clears this.
-    pub fn take_pending_trn(&mut self) -> Option<u8> {
+    pub(crate) fn take_pending_trn(&mut self) -> Option<u8> {
         self.pending_trn.take()
     }
 
     /// Consume a 4KB VRAM block ($8000..$9000) for a pending _TRN command.
-    pub fn apply_trn(&mut self, command: u8, vram: &[u8]) {
+    pub(crate) fn apply_trn(&mut self, command: u8, vram: &[u8]) {
         match command {
             cmd::PAL_TRN => {
                 // PAL_TRN loads 512 system palettes, 4 colors each (RGB555 LE).
@@ -868,7 +872,7 @@ impl Sgb {
     /// `pals` carries all 8 SNES BG palettes (128 colours) rather than the 64
     /// a PCT_TRN delivers; [`border`](Self::border)'s consumers key off that
     /// length. See [`crate::sgb_firmware::SgbBorder::pals`].
-    pub fn seed_default_border(&mut self, tiles: &[u8], map: &[u8], pals: &[u16]) {
+    pub(crate) fn seed_default_border(&mut self, tiles: &[u8], map: &[u8], pals: &[u16]) {
         self.border_tiles = tiles.to_vec();
         self.border_map = map.to_vec();
         self.border_pals = pals.to_vec();
@@ -900,14 +904,14 @@ impl Sgb {
 
     /// The shared backdrop color (SNES CGRAM entry 0 = every palette's color
     /// 0): what transparent border pixels outside the GB window show.
-    pub fn backdrop(&self) -> u16 {
+    pub(crate) fn backdrop(&self) -> u16 {
         self.palettes[0][0]
     }
 
     /// Look up the RGB555 color for a DMG shade index (0-3) at attribute cell
     /// (col,row) in the 20x18 grid. Returns None if not colorized (caller keeps
     /// grayscale).
-    pub fn color_for(&self, col: usize, row: usize, shade: u8) -> Option<u16> {
+    pub(crate) fn color_for(&self, col: usize, row: usize, shade: u8) -> Option<u16> {
         if !self.colorized {
             return None;
         }

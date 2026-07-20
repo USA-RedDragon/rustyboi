@@ -29,7 +29,7 @@
 
 /// The 32 system palettes in menu order (`1-A`..`4-H`), four RGB555 words each
 /// (index 0 = lightest DMG shade .. 3 = darkest). Firmware `0x10000`.
-pub const SGB_SYSTEM_PALETTES: [[u16; 4]; 32] = [
+pub(crate) const SGB_SYSTEM_PALETTES: [[u16; 4]; 32] = [
     // 1-A  #FFEECD #DE944A #AC2920 #311852
     [0x67BF, 0x265B, 0x10B5, 0x2866],
     // 1-B  #DEDEC5 #CDB473 #B45210 #000000
@@ -98,7 +98,7 @@ pub const SGB_SYSTEM_PALETTES: [[u16; 4]; 32] = [
 
 /// `1-A`: the palette a real SGB powers on with, and the fallback for any cart
 /// the recognition table does not name.
-pub const DEFAULT_INDEX: u8 = 0;
+pub(crate) const DEFAULT_INDEX: u8 = 0;
 
 const LABELS: [&str; 32] = [
     "1-A", "1-B", "1-C", "1-D", "1-E", "1-F", "1-G", "1-H",
@@ -169,7 +169,7 @@ static GAME_PALETTE_TABLE: &[(&[u8], u8)] = &[
 /// only Nintendo-published carts (`$014B == $01`, or `$33` with new-licensee
 /// `"01"`) are eligible, and anything unrecognized gets [`DEFAULT_INDEX`].
 /// `title` is `$0134-$0143`, NUL-padded as the header stores it.
-pub fn select_auto(title: &[u8; 16], old_licensee: u8, new_licensee: [u8; 2]) -> u8 {
+pub(crate) fn select_auto(title: &[u8; 16], old_licensee: u8, new_licensee: [u8; 2]) -> u8 {
     let nintendo = if old_licensee == 0x33 {
         new_licensee == *b"01"
     } else {

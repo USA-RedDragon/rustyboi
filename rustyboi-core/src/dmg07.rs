@@ -52,7 +52,7 @@ enum Phase {
 /// Shared DMG-07 state. Up to four Game Boy ports attach to one hub; each port
 /// pumps its own timeline and pulls bytes through [`Dmg07::exchange`].
 #[derive(Default)]
-pub struct Dmg07 {
+pub(crate) struct Dmg07 {
     phase: Phase,
     /// bit4..bit7 set = player 1..4 present and ACKing (the STAT upper nibble).
     connected: u8,
@@ -95,7 +95,7 @@ impl Dmg07 {
     /// Advance the protocol for `player`'s transfer: the Game Boy shifted out
     /// `reply` (its SB) and the adapter returns the byte it shifts in. Ports
     /// pull independently; the packet content (STAT / broadcast data) is shared.
-    pub fn exchange(&mut self, player: usize, reply: u8) -> u8 {
+    pub(crate) fn exchange(&mut self, player: usize, reply: u8) -> u8 {
         // Track AA/FF runs from this port's replies for the phase transitions.
         self.aa_run[player] = if reply == XMIT_ENTER_REQ { self.aa_run[player] + 1 } else { 0 };
         self.ff_run[player] = if reply == PING_RESTART { self.ff_run[player] + 1 } else { 0 };
@@ -231,7 +231,7 @@ impl Dmg07 {
 /// unit; clones/savestates sever it (a cloned instance must not drive the hub),
 /// behaving like an unplugged adapter.
 #[derive(Serialize, Deserialize)]
-pub struct FourPlayerPort {
+pub(crate) struct FourPlayerPort {
     // The live hub is a connection, not persistable state: savestates sever it
     // (default = a fresh, partnerless hub), exactly like the link cable.
     #[serde(skip)]
@@ -242,10 +242,12 @@ pub struct FourPlayerPort {
 }
 
 impl FourPlayerPort {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Mint a hub and hand back `n` ports (2-4). Attach each to a Game Boy via
     /// [`crate::gb::GB::attach_four_player_port`] (or
     /// [`crate::gb::GB::connect_four_player`], which does both).
-    pub fn hub(n: usize) -> Vec<FourPlayerPort> {
+    pub(crate) fn hub(n: usize) -> Vec<FourPlayerPort> {
         let n = n.clamp(2, 4);
         let hub = Arc::new(Mutex::new(Dmg07::default()));
         (0..n)
@@ -254,7 +256,7 @@ impl FourPlayerPort {
     }
 
     /// Track the Game Boy's SB write (its outgoing reply).
-    pub fn mirror_sb(&mut self, sb: u8) {
+    pub(crate) fn mirror_sb(&mut self, sb: u8) {
         self.reply = sb;
     }
 

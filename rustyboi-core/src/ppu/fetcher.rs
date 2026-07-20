@@ -38,9 +38,9 @@ pub(crate) struct FetcherDebugEvent {
 /// Per-step position/scroll context for the fetcher.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct FetchPos {
-    pub window_line: u8,
-    pub display_x: u8,
-    pub pending_discard: u8,
+    pub(crate) window_line: u8,
+    pub(crate) display_x: u8,
+    pub(crate) pending_discard: u8,
     pub scy: u8,
     pub scx: u8,
 }
@@ -48,7 +48,7 @@ pub(crate) struct FetchPos {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FetcherLcdcState {
     pub lcdc: u8,
-    pub cgb_tile_index_is_tile_data: bool,
+    pub(crate) cgb_tile_index_is_tile_data: bool,
     // DMG window bus-glitch OR-read: when set, this substep's VRAM read
     // coincides with an LCDC.6/LCDC.4 bus transition (the CPU write's address
     // lines change mid-read), and the read returns the bitwise OR of the bytes
@@ -56,17 +56,17 @@ pub(crate) struct FetcherLcdcState {
     // post-transition bits; `or_lcdc` the pre-transition ones. Derived from the
     // mealybug m3_lcdc_win_map_change / m3_lcdc_tile_sel_win_change DMG
     // reference captures (both pulse edges show the union of both sources).
-    pub or_lcdc: Option<u8>,
+    pub(crate) or_lcdc: Option<u8>,
     // DMG BG-path SCY bus state (see bg_wg_apply): the SCY value in effect at
     // this substep's reconstructed hardware dot. None = use the live `scy`
     // argument.
-    pub scy_bus: Option<u8>,
+    pub(crate) scy_bus: Option<u8>,
     // DMG BG-path SCX bus state (see bg_wg_apply): the SCX value in effect at
     // the tile's reconstructed hardware TileNumber dot. Used for the tile-map
     // column so a sprite-stalled tile reads SCX as-of its true hardware fetch
     // dot instead of the stall-displaced live dot (mealybug m3_scx_high_5_bits).
     // None = use the live `scx` argument.
-    pub scx_bus: Option<u8>,
+    pub(crate) scx_bus: Option<u8>,
 }
 
 // Tile data addressing constants
@@ -80,7 +80,7 @@ const TILE_MAP_9C00_BASE: u16 = 0x9C00; // Tile map area 1
 #[derive(Serialize, Deserialize, Clone)]
 pub(super) struct Fetcher {
     state: State,
-    pub pixel_fifo: fifo::Fifo,
+    pub(crate) pixel_fifo: fifo::Fifo,
 
     tile_num: u8,
     tile_index: u8,

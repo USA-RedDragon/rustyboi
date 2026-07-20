@@ -241,7 +241,7 @@ impl<'a> Recorder<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplayResult {
     /// Stable hash of the final produced frame; the golden-regression key.
-    pub final_frame_hash: u64,
+    pub(crate) final_frame_hash: u64,
     /// Per-frame hashes (`inputs.len()` entries) when requested, else empty.
     pub frame_hashes: Vec<u64>,
     /// True if the final frame is non-blank (rendered something).
@@ -328,6 +328,8 @@ pub fn frame_is_non_blank(gb: &GB, frame: &Frame) -> bool {
 // Scripted rendering-test DSL
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
 /// A fluent builder for scripted, deterministic rendering scenarios: pick
 /// hardware, insert a ROM, optionally hold buttons across `skip_bios` (to drive
 /// the CGB boot palette combo), then run N frames and inspect the final frame.
@@ -340,23 +342,29 @@ pub fn frame_is_non_blank(gb: &GB, frame: &Frame) -> bool {
 ///     .run_frames(1)
 ///     .frame();
 /// ```
-pub struct Scenario {
+pub(crate) struct Scenario {
     gb: GB,
     held: ButtonState,
 }
 
 impl Scenario {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Start a scenario on the given hardware (no ROM inserted yet).
     pub fn new(hardware: Hardware) -> Self {
         Scenario { gb: GB::new(hardware), held: ButtonState::default() }
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Insert a cartridge.
     pub fn insert(mut self, cartridge: crate::cartridge::Cartridge) -> Self {
         self.gb.insert(cartridge);
         self
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Hold a button combo. Applied to the machine immediately, so if called
     /// before [`Scenario::skip_bios`] the buttons are "held during boot" and
     /// drive the CGB compatibility-palette combo override.
@@ -366,6 +374,8 @@ impl Scenario {
         self
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Run the synthetic post-boot seed. Buttons set via [`Scenario::hold`]
     /// beforehand act as a boot-time combo (CGB palette override).
     pub fn skip_bios(mut self) -> Self {
@@ -375,8 +385,10 @@ impl Scenario {
         self
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Advance exactly `n` frames with the currently-held input.
-    pub fn run_frames(mut self, n: usize) -> Self {
+    pub(crate) fn run_frames(mut self, n: usize) -> Self {
         for _ in 0..n {
             self.gb.set_input_state(self.held);
             self.gb.run_until_frame(false);
@@ -384,22 +396,30 @@ impl Scenario {
         self
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// The current frame (for assertions).
     pub fn frame(&mut self) -> Frame {
         self.gb.get_current_frame()
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// The current frame's canonical hash (colour by RGB, mono by shade index).
     pub fn frame_hash(&mut self) -> u64 {
         let f = self.gb.get_current_frame();
         frame_hash(&self.gb, &f)
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Borrow the underlying `GB` (palette/memory accessors for assertions).
     pub fn gb(&self) -> &GB {
         &self.gb
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Mutably borrow the underlying `GB`.
     pub fn gb_mut(&mut self) -> &mut GB {
         &mut self.gb

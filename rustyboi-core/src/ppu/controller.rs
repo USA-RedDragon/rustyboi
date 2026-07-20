@@ -29,7 +29,7 @@ pub const SGB_FRAME_SIZE: usize = SGB_FRAME_WIDTH * SGB_FRAME_HEIGHT;
 /// The grayscale ramp `Sgb` powers on with (the SGB boot palette). Only used
 /// as the composited centre's shades when no SGB system palette applies, i.e.
 /// the user explicitly chose `Grayscale`.
-pub const SGB_BOOT_SHADES: [u16; 4] = [0x7FFF, 0x56B5, 0x294A, 0x0000];
+pub(crate) const SGB_BOOT_SHADES: [u16; 4] = [0x7FFF, 0x56B5, 0x294A, 0x0000];
 
 /// Convert an SGB/CGB RGB555 color word (bits: r=0-4, g=5-9, b=10-14) to RGB888
 /// using the linear 5-bit->8-bit scaling the emulator uses for CGB `Linear`.
@@ -490,9 +490,9 @@ mod color_tests {
 }
 
 // OAM constants
-pub const OAM_SPRITE_COUNT: usize = 40; // 40 sprites total in OAM
-pub const OAM_BYTES_PER_SPRITE: usize = 4; // 4 bytes per sprite
-pub const MAX_SPRITES_PER_LINE: usize = 10; // Maximum 10 sprites per scanline
+pub(crate) const OAM_SPRITE_COUNT: usize = 40; // 40 sprites total in OAM
+pub(crate) const OAM_BYTES_PER_SPRITE: usize = 4; // 4 bytes per sprite
+pub(crate) const MAX_SPRITES_PER_LINE: usize = 10; // Maximum 10 sprites per scanline
 
 const DMG_PIXEL_TRANSFER_ARM_DOT: u128 = 80;
 const CGB_PIXEL_TRANSFER_ARM_DOT: u128 = 82;
@@ -704,10 +704,10 @@ impl WgSubDot {
 
 /// Machine configuration for a CPU VRAM/OAM access-window query.
 #[derive(Clone, Copy)]
-pub struct AccessEnv {
+pub(crate) struct AccessEnv {
     pub is_cgb: bool,
-    pub cgb_de: bool,
-    pub double_speed: bool,
+    pub(crate) cgb_de: bool,
+    pub(crate) double_speed: bool,
 }
 
 const WY1_DELAY: i64 = 2;
@@ -841,7 +841,7 @@ const LINE_153_LY_ZERO_DOT: u128 = 6;
 
 // Sprite attribute flags (from byte 3 of sprite data)
 #[derive(Clone, Copy, Serialize, Deserialize)]
-pub struct SpriteAttributes {
+pub(crate) struct SpriteAttributes {
     pub priority: bool,    // 0 = above BG, 1 = behind BG colors 1-3
     pub y_flip: bool,      // 0 = normal, 1 = vertically mirrored
     pub x_flip: bool,      // 0 = normal, 1 = horizontally mirrored
@@ -850,7 +850,7 @@ pub struct SpriteAttributes {
 }
 
 impl SpriteAttributes {
-    pub fn from_byte(byte: u8) -> Self {
+    pub(crate) fn from_byte(byte: u8) -> Self {
         SpriteAttributes {
             priority: (byte & 0x80) != 0,
             y_flip: (byte & 0x40) != 0,
@@ -867,8 +867,8 @@ pub struct Sprite {
     pub y: u8,
     pub x: u8,
     pub tile_index: u8,
-    pub attributes: SpriteAttributes,
-    pub oam_index: u8, // For priority resolution
+    pub(crate) attributes: SpriteAttributes,
+    pub(crate) oam_index: u8, // For priority resolution
 }
 
 // Live mode-3 per-sprite fetch record (parallel to `sprites_on_line`, same
@@ -954,7 +954,7 @@ struct CapturedWinTile {
 // `change(cc)` (on CPU OAM writes and at DMA start/end) caps the next walk via
 // `last_change`. The per-line sprite list is built from `buf` at mode-2-END.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct OamReader {
+pub(crate) struct OamReader {
     // posbuf_: Y at even index, X at odd index, for each of 40 sprites.
     #[serde(with = "serde_bytes")]
     buf: [u8; 2 * OAM_SPRITE_COUNT],
@@ -1212,7 +1212,7 @@ impl OamReader {
     }
 }
 
-pub enum LCDCFlags {
+pub(crate) enum LCDCFlags {
     BGDisplay = 1<<0,
     SpriteDisplayEnable = 1<<1,
     SpriteSize = 1<<2,
@@ -1294,7 +1294,7 @@ pub enum ColorCorrection {
 /// converts it to the unified always-RGB [`crate::gb::Frame`] using the DMG
 /// palette + colour correction, while the shade indices remain available
 /// (correction-independent) via [`Ppu::dmg_shade_frame`] for the test suite.
-pub enum RenderedFrame {
+pub(crate) enum RenderedFrame {
     Monochrome(Box<[u8; FRAMEBUFFER_SIZE]>),
     Color(Box<[u8; FRAMEBUFFER_SIZE * 3]>),
 }
@@ -2406,11 +2406,11 @@ impl Ppu {
         self.cgb_color_conversion = conversion;
     }
 
-    pub fn cgb_color_conversion(&self) -> ColorCorrection {
+    pub(crate) fn cgb_color_conversion(&self) -> ColorCorrection {
         self.cgb_color_conversion
     }
 
-    pub fn sync_lcdc_from_mmio(&mut self, mmio: &mmio::Mmio) {
+    pub(crate) fn sync_lcdc_from_mmio(&mut self, mmio: &mmio::Mmio) {
         self.set_lcdc_visible(mmio.read(LCD_CONTROL), mmio.is_cgb_features_enabled(), mmio.is_double_speed_mode());
         self.pending_lcdc_events.clear();
     }
@@ -2422,7 +2422,7 @@ impl Ppu {
     /// LY=153 (DMG), NOT at a fresh LY=0 OAM search. Mirror that here so the very
     /// first instruction's LY/STAT reads (display_startstate tests) match real
     /// hardware. Must run after LCDC=0x91 and `sync_lcdc_from_mmio`.
-    pub fn set_post_bios_state(&mut self, mmio: &mut mmio::Mmio, dmg0: bool) {
+    pub(crate) fn set_post_bios_state(&mut self, mmio: &mut mmio::Mmio, dmg0: bool) {
         // LCD must be on for this to apply (skip_bios writes LCDC=0x91 first).
         if self.lcdc & (LCDCFlags::DisplayEnable as u8) == 0 {
             return;
@@ -2517,11 +2517,11 @@ impl Ppu {
 
     /// True while the renderer is in pixel transfer (mode 3) — consumer: the
     /// bus's sticky mid-m3 LCDC-writer marker (CGB halt-exit stall scoping).
-    pub fn in_pixel_transfer(&self) -> bool {
+    pub(crate) fn in_pixel_transfer(&self) -> bool {
         self.state == State::PixelTransfer
     }
 
-    pub fn handle_lcdc_write(&mut self, value: u8, mmio: &mmio::Mmio) {
+    pub(crate) fn handle_lcdc_write(&mut self, value: u8, mmio: &mmio::Mmio) {
         let display_enable = LCDCFlags::DisplayEnable as u8;
         let old_lcdc = self.lcdc;
         let display_stays_enabled = (old_lcdc & display_enable) != 0 && (value & display_enable) != 0;
@@ -2837,7 +2837,7 @@ impl Ppu {
     /// dots after a CPU FF40 write, so the hot path is the empty check alone;
     /// the drain loop lives out of line.
     #[inline]
-    pub fn step_lcdc_events(&mut self, mmio: &mmio::Mmio) {
+    pub(crate) fn step_lcdc_events(&mut self, mmio: &mmio::Mmio) {
         if self.pending_lcdc_events.is_empty() {
             return;
         }
@@ -4587,7 +4587,7 @@ impl Ppu {
     /// (`ppu_blocks` / `get_stat` fallback mode + `cpu_access_blocked`) sees the
     /// access in the un-carried fetcher geometry (the carry moved the LY time
     /// boundaries but not the fetcher's lock window). 0 when no carry is live.
-    pub fn render_carry_skew(&self) -> i64 {
+    pub(crate) fn render_carry_skew(&self) -> i64 {
         self.render_carry_skew_cc
     }
 
@@ -4666,7 +4666,7 @@ impl Ppu {
 
     /// True when this frame should be rendered to the RGB color framebuffer:
     /// either full CGB mode or DMG-compat-on-CGB.
-    pub fn renders_color(&self, mmio: &mmio::Mmio) -> bool {
+    pub(crate) fn renders_color(&self, mmio: &mmio::Mmio) -> bool {
         mmio.is_cgb_features_enabled() || self.is_cgb_compat_dmg(mmio)
     }
 
@@ -4678,7 +4678,7 @@ impl Ppu {
     // the exact DMG latch column, so DMG keeps it. With no mid-line write the CGB
     // history is a single seed == the delayed register, so the steady-state output is
     // identical either way.
-    pub fn get_palette_color(&self, mmio: &mmio::Mmio, idx: u8, sx: u8) -> u8 {
+    pub(crate) fn get_palette_color(&self, mmio: &mmio::Mmio, idx: u8, sx: u8) -> u8 {
         let bgp = if mmio.is_cgb() {
             Self::pal_at(&self.bgp_history, sx, self.bgp_delayed)
         } else {
@@ -4692,7 +4692,7 @@ impl Ppu {
     // stall between a BGP write and a column delays that column's pop, so the
     // dot-space model (write applies at `ticks+latency`; pixel pops later) is exact
     // where the column model over/under-shoots.
-    pub fn get_palette_color_at_tick(&self, idx: u8, pop_tick: u128) -> u8 {
+    pub(crate) fn get_palette_color_at_tick(&self, idx: u8, pop_tick: u128) -> u8 {
         let bgp = Self::pal_at_tick(&self.bgp_dot_history, pop_tick, self.bgp_delayed);
         Self::bgp_shade(bgp, idx)
     }
@@ -4711,7 +4711,7 @@ impl Ppu {
     // true-color palette-RAM pipeline). Used by the
     // CGB and DMG-compat sprite mixers. DMG-hardware sprites use
     // `dmg_sprite_palette_shade` (a per-SPRITE latch, not per-pixel).
-    pub fn get_sprite_palette_color(&self, _mmio: &mmio::Mmio, idx: u8, palette: bool, sx: u8) -> u8 {
+    pub(crate) fn get_sprite_palette_color(&self, _mmio: &mmio::Mmio, idx: u8, palette: bool, sx: u8) -> u8 {
         if idx == 0 {
             return 0; // Transparent for sprites
         }
@@ -4888,7 +4888,7 @@ impl Ppu {
     /// step cost `((1 + xpos166_advance) << ds)`. `None` when no closed-form master
     /// exists (window mid-line / first line / VBlank), where no faithful event cc
     /// is available and the halt-exit fixup is skipped.
-    pub fn m0_irq_event_cc_master(&self, mmio: &mmio::Mmio) -> Option<u64> {
+    pub(crate) fn m0_irq_event_cc_master(&self, mmio: &mmio::Mmio) -> Option<u64> {
         if self.internal_ly() as u32 >= stat_irq::LCD_VRES {
             return None;
         }
@@ -4908,7 +4908,7 @@ impl Ppu {
     /// (`line_cycle`/`internal_ly`) is in speed-independent dot units and stays
     /// put, but every scheduled event time carried the old `ds` cc-factor, so
     /// recompute them from the live `abs_cc` under the new speed.
-    pub fn speed_change(&mut self, mmio: &mmio::Mmio) {
+    pub(crate) fn speed_change(&mut self, mmio: &mmio::Mmio) {
         if self.disabled || self.lcdc & (LCDCFlags::DisplayEnable as u8) == 0 {
             return;
         }
@@ -4924,7 +4924,7 @@ impl Ppu {
     /// Our per-dot stepper realizes only `8 >> ds` of those dots through the 8
     /// returned cycles, so this injects the remaining bridge dots so the LCD
     /// lands on the same dot hardware does after the 0x20000-cycle window.
-    pub fn stop_bridge_advance(&mut self, mmio: &mut mmio::Mmio, dots: u32) {
+    pub(crate) fn stop_bridge_advance(&mut self, mmio: &mut mmio::Mmio, dots: u32) {
         for _ in 0..dots {
             self.step_scheduled_stat_events(mmio);
             // The bridge injects render dots the CPU's returned cycles did not
@@ -4940,7 +4940,7 @@ impl Ppu {
     /// Mark that a DS->SS speed switch just occurred, so the closed-form the LY time
     /// drops its `+1` the LY counter correction (the whole-dot bridge already lands
     /// the counter one master-cc high). See ENGINE_LAZY_PPU.md bug #2.
-    pub fn set_dsss_lytime_adjust(&mut self) {
+    pub(crate) fn set_dsss_lytime_adjust(&mut self) {
         self.lytime_no_plus1 = true;
     }
 
@@ -4951,28 +4951,28 @@ impl Ppu {
     /// `stat_phase_carry` (p_now) path. This tracks the OAM/HBlank switches that have
     /// no such carry: their accumulated parity determines whether a post-STOP boundary
     /// LY read lands one sub-dot early (anticipated) or late (stale).
-    pub fn bump_dsss_ly_phase(&mut self) {
+    pub(crate) fn bump_dsss_ly_phase(&mut self) {
         self.dsss_ly_phase_count += 1;
     }
     /// Register any DS->SS switch (including mode-3) for the total-parity accumulator.
-    pub fn bump_dsss_ly_total(&mut self) {
+    pub(crate) fn bump_dsss_ly_total(&mut self) {
         self.dsss_ly_total_count += 1;
     }
     fn dsss_ly_total_par(&self) -> i64 {
         (self.dsss_ly_total_count % 2) as i64
     }
-    pub fn dsss_ly_phase_par(&self) -> i64 {
+    pub(crate) fn dsss_ly_phase_par(&self) -> i64 {
         (self.dsss_ly_phase_count % 2) as i64
     }
     /// True once any post-STOP DS->SS switch has accumulated a sub-dot phase.
-    pub fn dsss_ly_phase_active(&self) -> bool {
+    pub(crate) fn dsss_ly_phase_active(&self) -> bool {
         self.dsss_ly_phase_count > 0
     }
 
     /// Latch the SS->DS-during-mode3 FF44 (LY) read phase advance. Consumed only
     /// by `get_ly_reg_at_cc` to resolve the LY-register anticipation window against
     /// the hardware re-anchored LY time (the renderer/STAT/m0 phase is unaffected).
-    pub fn set_ssds_mode3_ly_advance(&mut self) {
+    pub(crate) fn set_ssds_mode3_ly_advance(&mut self) {
         self.ssds_mode3_ly_advance = true;
         self.ssds_mode3_frames = 0;
     }
@@ -5027,7 +5027,7 @@ impl Ppu {
     /// reproducing the accumulated reference `now -= 1` half-dot. Stop-count
     /// invariant by construction (the carry depends only on the running count,
     /// not on any single STOP's integer-cc). Returns 0 on the odd switches.
-    pub fn register_dsss_mode3_stop(&mut self) -> u32 {
+    pub(crate) fn register_dsss_mode3_stop(&mut self) -> u32 {
         let before = self.dsss_mode3_stop_count / 2;
         self.dsss_mode3_stop_count += 1;
         let after = self.dsss_mode3_stop_count / 2;
@@ -5040,7 +5040,7 @@ impl Ppu {
     /// then the line-phase step, then `step_lcdc_events`) but the render latch
     /// (`self.ticks`/`self.x`/FIFO/mode-3 fetch) stays PUT. With `dots == 0` this
     /// is a no-op.
-    pub fn stat_phase_carry(&mut self, mmio: &mut mmio::Mmio, dots: u32) {
+    pub(crate) fn stat_phase_carry(&mut self, mmio: &mut mmio::Mmio, dots: u32) {
         for _ in 0..dots {
             self.step_scheduled_stat_events(mmio);
             let dot_cc = 1i64 << mmio.is_double_speed_mode() as u32;
@@ -5079,7 +5079,7 @@ impl Ppu {
     /// intermediate cc (`abs_cc - 1`, i.e. one M-cycle before the next render
     /// dot's post-increment value) without advancing the renderer's clock.
     #[inline]
-    pub fn step_subdot(&mut self, mmio: &mut mmio::Mmio) {
+    pub(crate) fn step_subdot(&mut self, mmio: &mut mmio::Mmio) {
         if self.disabled {
             return;
         }
@@ -5137,7 +5137,7 @@ impl Ppu {
     /// write-pending signal all live there), so the skipped preamble pieces
     /// resume per-dot processing on the very next dot.
     #[inline]
-    pub fn invalidate_fast_span(&mut self) {
+    pub(crate) fn invalidate_fast_span(&mut self) {
         self.fast_dots_left = 0;
         self.fast_hold = 8;
     }
@@ -5173,7 +5173,7 @@ impl Ppu {
     /// least (dots to next line start) + mode 2 (80) + minimal mode 3, kept
     /// very conservative at +200 render dots past the line wrap. With no
     /// closed-form anchor (window / first line) batching is refused outright.
-    pub fn next_stat_irq_lower_bound_master(&self, now: u64, ds: bool) -> u64 {
+    pub(crate) fn next_stat_irq_lower_bound_master(&self, now: u64, ds: bool) -> u64 {
         if self.disabled {
             return u64::MAX;
         }
@@ -5210,7 +5210,7 @@ impl Ppu {
     /// One-compare pre-gate for `skip_inert_dots`: only mode 0/1/2 interiors
     /// can be inert, so mode-3 dots skip the full-call attempt entirely.
     #[inline]
-    pub fn maybe_inert_state(&self) -> bool {
+    pub(crate) fn maybe_inert_state(&self) -> bool {
         matches!(self.state, State::HBlank | State::VBlank | State::OAMSearch)
     }
 
@@ -5245,7 +5245,7 @@ impl Ppu {
     /// - `abs_cc` is advanced with the skip: the CPU register-write hooks
     ///   (`write_cc`) and the exact-cc override compares read it at the very
     ///   next access boundary, before any real step would re-derive it.
-    pub fn skip_inert_dots(&mut self, mmio: &mut mmio::Mmio, max_render_dots: u32) -> u32 {
+    pub(crate) fn skip_inert_dots(&mut self, mmio: &mut mmio::Mmio, max_render_dots: u32) -> u32 {
         const INTERIOR_START: u32 = 8;
         const INTERIOR_END: u32 = 448;
         if self.disabled || self.bgp_defer_countdown > 0 || max_render_dots == 0 {
@@ -5366,7 +5366,7 @@ impl Ppu {
     /// under per-dot stepping (frame-loop return points stay dot-exact).
     /// While the LCD is off there is no wrap (the caller's global cap
     /// bounds the batch instead).
-    pub fn dots_until_frame_wrap_conservative(&self, ds: bool) -> u64 {
+    pub(crate) fn dots_until_frame_wrap_conservative(&self, ds: bool) -> u64 {
         if self.disabled {
             return u64::MAX;
         }
@@ -6058,14 +6058,14 @@ impl Ppu {
     /// Record the sub-PPU-dot parity of the CPU write about to be resolved, so
     /// the STAT/LYC change hooks can place the event on the correct half-dot at
     /// double speed. `phase` is the persistent CPU T-phase at write resolution.
-    pub fn set_write_subdot(&mut self, phase: u64) {
+    pub(crate) fn set_write_subdot(&mut self, phase: u64) {
         self.write_subdot = (phase % 2) as u8;
     }
 
     /// FF4A (WY) write hook. Hardware applies the write to `wy2` (the value the
     /// window-Y gate reads) delayed by `6 - double_speed` cc after the write.
     /// Schedule that delayed apply against the resolving write's absolute clock.
-    pub fn on_wy_write(&mut self, value: u8, mmio: &mmio::Mmio) {
+    pub(crate) fn on_wy_write(&mut self, value: u8, mmio: &mmio::Mmio) {
         if self.disabled {
             self.wy2 = value;
             self.wy2_apply_cc = wy2_disabled();
@@ -6104,7 +6104,7 @@ impl Ppu {
     /// per-column draw resolves it via `bgp_at`. Only while pixel transfer is active
     /// for this line — a write outside mode 3 just lands in the seed at the next
     /// mode-3 entry. Steady-state (no mid-mode-3 write) is unaffected.
-    pub fn on_bgp_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
+    pub(crate) fn on_bgp_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
         // A BGP write in the OAM scan (mode 2) just before mode 3 is the leading edge
         // of a two-write spike pair when a mode-3 write follows within the cadence
         // window: it settles the glitch palette so the mode-3 partner's transition
@@ -6271,7 +6271,7 @@ impl Ppu {
     }
 
     /// FF48 (OBP0) write hook. See `on_bgp_write`; affects sprite palette 0.
-    pub fn on_obp0_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
+    pub(crate) fn on_obp0_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
         if self.state != State::PixelTransfer || self.disabled {
             return;
         }
@@ -6284,7 +6284,7 @@ impl Ppu {
     }
 
     /// FF49 (OBP1) write hook. See `on_bgp_write`; affects sprite palette 1.
-    pub fn on_obp1_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
+    pub(crate) fn on_obp1_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
         if self.state != State::PixelTransfer || self.disabled {
             return;
         }
@@ -6405,7 +6405,7 @@ impl Ppu {
     /// write-side analog of the wy1/wy2 delayed latches: rustyboi otherwise
     /// resolves the write pre-tick and the fetcher re-reads it live one M-cycle
     /// too early vs hardware. Schedule the delayed apply against the write cc.
-    pub fn on_scy_write(&mut self, value: u8, mmio: &mmio::Mmio) {
+    pub(crate) fn on_scy_write(&mut self, value: u8, mmio: &mmio::Mmio) {
         if self.disabled {
             self.scy_delayed = value;
             self.scy_apply_cc = wy2_disabled();
@@ -6456,7 +6456,7 @@ impl Ppu {
     }
 
     /// FF43 (SCX) write hook. See `on_scy_write`.
-    pub fn on_scx_write(&mut self, value: u8, mmio: &mmio::Mmio) {
+    pub(crate) fn on_scx_write(&mut self, value: u8, mmio: &mmio::Mmio) {
         if self.disabled {
             self.scx_delayed = value;
             self.scx_apply_cc = wy2_disabled();
@@ -6579,7 +6579,7 @@ impl Ppu {
         }
     }
 
-    pub fn on_stat_register_write(&mut self, mmio: &mut mmio::Mmio) {
+    pub(crate) fn on_stat_register_write(&mut self, mmio: &mut mmio::Mmio) {
         // The DMG STAT-write bug fires on any FF41 write, even one that leaves
         // the enable bits unchanged. Track whether this was an FF41 write so the
         // unchanged-value case still runs lcdstat_change below.
@@ -6941,7 +6941,7 @@ impl Ppu {
         (ly_time - ((456 - (80 - ds)) << ds)).max(0) as u64
     }
 
-    pub fn step_scheduled_stat_events(&mut self, mmio: &mut mmio::Mmio) {
+    pub(crate) fn step_scheduled_stat_events(&mut self, mmio: &mut mmio::Mmio) {
         // FF41 mode-bit read-back anticipation: in the last 3 dots of an
         // HBlank line (or of line 153) FF41 reports mode 2 (the next line's
         // mode). Match the hardware STAT resolve's `line cycles >= 453` threshold by
@@ -9145,7 +9145,7 @@ impl Ppu {
     /// active only while the PPU is in PixelTransfer (mode 3) and the LCD is on —
     /// the only window in which the fetcher drives VRAM. Outside it a VRAM-source
     /// OAM-DMA read sees true VRAM (the clean HBlank/mode-0 identity window).
-    pub fn update_dma_fetcher_bus(&self, mmio: &mut mmio::Mmio) {
+    pub(crate) fn update_dma_fetcher_bus(&self, mmio: &mut mmio::Mmio) {
         let lcd_on = !self.disabled && (self.lcdc & (LCDCFlags::DisplayEnable as u8)) != 0;
         let locked = lcd_on && self.state == State::PixelTransfer;
         let (addr, bank) = self.fetcher.last_vram_bus();
@@ -9192,7 +9192,7 @@ impl Ppu {
     /// The completed DMG shade-index frame (the back buffer `get_frame`
     /// serves). The SGB *_TRN readout captures from this: the real SGB
     /// re-digitizes the displayed video signal, not the GB's VRAM.
-    pub fn dmg_shade_frame(&self) -> &[u8; FRAMEBUFFER_SIZE] {
+    pub(crate) fn dmg_shade_frame(&self) -> &[u8; FRAMEBUFFER_SIZE] {
         &self.fb_b
     }
 
@@ -9204,7 +9204,7 @@ impl Ppu {
     /// This is the grading-correct mono domain: it mirrors the non-colour
     /// branches of [`get_frame`](Self::get_frame). Colour models (incl. colorized
     /// SGB) are graded by RGB instead and never take this path.
-    pub fn presented_dmg_shades(&self, mmio: &mmio::Mmio) -> Box<[u8; FRAMEBUFFER_SIZE]> {
+    pub(crate) fn presented_dmg_shades(&self, mmio: &mmio::Mmio) -> Box<[u8; FRAMEBUFFER_SIZE]> {
         if let Some(sgb) = mmio.sgb() {
             return match self.sgb_frame(sgb) {
                 RenderedFrame::Monochrome(m) => m,
@@ -9229,7 +9229,7 @@ impl Ppu {
     /// for the whole STOP; drawing resumes into the live front buffer on
     /// wake. LCD-off STOP (the recommended sequence) leaves the already-blank
     /// panel untouched.
-    pub fn enter_stop_mode_panel(&mut self, mmio: &mmio::Mmio) {
+    pub(crate) fn enter_stop_mode_panel(&mut self, mmio: &mmio::Mmio) {
         if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
             return;
         }
@@ -9264,7 +9264,7 @@ impl Ppu {
             && mmio.master_cc().wrapping_sub(self.last_drive_cc) <= window
     }
 
-    pub fn get_frame(&mut self, mmio: &mmio::Mmio) -> RenderedFrame {
+    pub(crate) fn get_frame(&mut self, mmio: &mmio::Mmio) -> RenderedFrame {
         self.have_frame = false;
         // Hardware panel blank: the LCD off state and the first frame after an
         // enable both show "whiter than white" (blank), not the framebuffer. The
@@ -9474,7 +9474,7 @@ impl Ppu {
     }
 
     // Debug methods
-    pub fn get_fetcher_pixel_buffer(&self) -> [u8; 8] {
+    pub(crate) fn get_fetcher_pixel_buffer(&self) -> [u8; 8] {
         self.fetcher.get_pixel_buffer()
     }
 
@@ -9505,7 +9505,7 @@ impl Ppu {
     /// Whether the PPU has processed its LCD-off transition. False means the PPU
     /// still holds its running state (used to force the disable dot before an
     /// idle bulk-skip so the transition is never jumped over).
-    pub fn is_lcd_disabled(&self) -> bool { self.disabled }
+    pub(crate) fn is_lcd_disabled(&self) -> bool { self.disabled }
 
     /// DMG OAM-bug support: the OAM row (0..19) the PPU is scanning when a CPU
     /// OAM-bus access COMPLETES, else None. During mode 2 the PPU reads one of the
@@ -9519,7 +9519,7 @@ impl Ppu {
     /// mode-2 trigger window M-cycle-exact (validated by blargg 4-scanline_timing's
     /// 1-M-cycle "just before / at first corruption" boundary). Returns None when
     /// the LCD is off or the PPU is not in mode 2. This is the WRITE/IDU path row.
-    pub fn oam_bug_mode2_row(&self) -> Option<u8> {
+    pub(crate) fn oam_bug_mode2_row(&self) -> Option<u8> {
         if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
             return None;
         }
@@ -9549,7 +9549,7 @@ impl Ppu {
     /// Splitting the exemption by access type reconciles age oam-read (read prologue
     /// clean) with blargg oam_bug (write prologue corrupts) — the row-only function
     /// alone cannot satisfy both.
-    pub fn oam_bug_mode2_row_read(&self) -> Option<u8> {
+    pub(crate) fn oam_bug_mode2_row_read(&self) -> Option<u8> {
         let base = self.oam_bug_mode2_row()?;
         // Mode-2 prologue: reads sample the held row-0 (accessed_oam_row < 8), clean.
         if self.line_cycle < 6 {
@@ -9564,7 +9564,7 @@ impl Ppu {
     /// line end to run a block (`dot + 3 + 3*ds < line-end`). Returns None when
     /// no closed-form mode-0 dot is available (window/first line after enable),
     /// so callers can fall back to the STAT mode-edge model. Read-only.
-    pub fn hdma_period(&self, double_speed: bool) -> Option<bool> {
+    pub(crate) fn hdma_period(&self, double_speed: bool) -> Option<bool> {
         if self.disabled {
             return None;
         }
@@ -9582,6 +9582,8 @@ impl Ppu {
         Some(dot > m0n && dot + 3 + 3 * ds < 456)
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// DEFERRED-HDMA-FIRE late-HBlank predicate for the FF55-kick / unhalt
     /// resolution paths only (NOT the per-dot edge machine). Mirrors the hardware
     /// `the HDMA-enable path` -> `the HDMA-active check at cc+4` where `the current line's mode-0 (HBlank) time` returns
@@ -9606,7 +9608,7 @@ impl Ppu {
     /// is past the FF55-enable kick boundary (cctracer: SS depth 196 reflags /
     /// 200 does not; DS 398 reflags / 402 does not), so it carries its own limit.
     /// Returns None when no closed-form mode-0 anchor exists (caller falls back).
-    pub fn hdma_period_unhalt(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
+    pub(crate) fn hdma_period_unhalt(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
         self.hdma_period_unhalt_adj(access_cc, double_speed, 0)
     }
 
@@ -9615,7 +9617,7 @@ impl Ppu {
     /// HALT-entry HDMA capture to derive a per-period "block already served" signal
     /// (the live `hdma_block_done_this_period` flag is reset too early by the per-dot
     /// period falling edge — see `Mmio::on_cpu_halt_with_period_done`).
-    pub fn m0_time_master_cc(&self) -> Option<u64> {
+    pub(crate) fn m0_time_master_cc(&self) -> Option<u64> {
         self.m0_time_master
     }
 
@@ -9630,7 +9632,7 @@ impl Ppu {
     /// too (hardware reflags) — which a m0t shift would wrongly push past the
     /// start bracket. `limit_adj == 0` is byte-identical to the calibrated
     /// baseline.
-    pub fn hdma_period_unhalt_adj(
+    pub(crate) fn hdma_period_unhalt_adj(
         &self,
         access_cc: u64,
         double_speed: bool,
@@ -9662,7 +9664,7 @@ impl Ppu {
     /// -> Low -> reflag -> 2 blocks) pairs: SS depth 206/204 in, 210/208 out -> 208;
     /// DS depth 408/407 in, 412/411 out -> 410. Returns None when no closed-form
     /// mode-0 anchor exists (caller falls back to the cached per-step period).
-    pub fn hdma_period_halt(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
+    pub(crate) fn hdma_period_halt(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
         if self.disabled {
             return None;
         }
@@ -9693,7 +9695,7 @@ impl Ppu {
     /// AT unhalt / before pushes) decision so the service can suppress+reorder the
     /// latter. Anchored on `m0_time_master` (shares the access cc phase). None when
     /// no closed-form mode-0 anchor exists (caller keeps the synchronous fire).
-    pub fn hdma_unhalt_fires_before_pushes(
+    pub(crate) fn hdma_unhalt_fires_before_pushes(
         &self,
         access_cc: u64,
         double_speed: bool,
@@ -9718,7 +9720,7 @@ impl Ppu {
         Some(in_start && in_end)
     }
 
-    pub fn hdma_period_kick(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
+    pub(crate) fn hdma_period_kick(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
         if self.disabled {
             return None;
         }
@@ -9795,7 +9797,7 @@ impl Ppu {
     /// SS scx5 _1=12939 _2=12943 m0t=12949 edge=12943 (m0t-6)
     /// DS _1=158392 _2=158396 m0t=158398 edge=158394 (m0t-4)
     /// DS scx5 _1=158400 _2=158404 m0t=158408 edge=158404 (m0t-4)
-    pub fn hdma_disable_fires(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
+    pub(crate) fn hdma_disable_fires(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
         if self.disabled {
             return None;
         }
@@ -9836,7 +9838,7 @@ impl Ppu {
     /// returned as a value. The STOP path uses it to measure how far before the
     /// stop the block's edge was crossed (deciding the halted-vs-completing FF55
     /// readback for `hdma_late_m3speedchange_hdma5_scx*_2` vs `_3`).
-    pub fn hdma_m0_edge(&self, double_speed: bool) -> Option<i64> {
+    pub(crate) fn hdma_m0_edge(&self, double_speed: bool) -> Option<i64> {
         let m0t = self.m0_time_master? as i64;
         let gap: i64 = if double_speed { 4 } else { 6 };
         Some(m0t - gap)
@@ -9889,7 +9891,7 @@ impl Ppu {
     /// mode 2|3 for oam). The cycle-exact predictor only refines the mode-3->0
     /// END boundary against `scheduled_mode0_dot` (the hardware current-line mode-0 (HBlank) time);
     /// the start stays on the renderer's mode set, which is window-independent.
-    pub fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, env: AccessEnv, access_cc: u64) -> Option<bool> {
+    pub(crate) fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, env: AccessEnv, access_cc: u64) -> Option<bool> {
         let AccessEnv { is_cgb, cgb_de, double_speed } = env;
         if self.disabled {
             return Some(false);
@@ -10181,7 +10183,7 @@ impl Ppu {
     /// mode-3 lock just past it (late_gdma_pc_7ffe_2: line cycles 80 -> locked).
     /// Returns None when no closed-form mode-0 time exists (window / first line after
     /// enable) so the caller falls back to the renderer-mode lock.
-    pub fn vram_readable_at_cc(&self, cc: u64, is_cgb: bool, ds: bool) -> Option<bool> {
+    pub(crate) fn vram_readable_at_cc(&self, cc: u64, is_cgb: bool, ds: bool) -> Option<bool> {
         if self.disabled || self.internal_ly_val >= 144 {
             return Some(true);
         }
@@ -10232,7 +10234,7 @@ impl Ppu {
     /// (now hardware-exact) persisted boundary at single speed and adds correct
     /// sub-dot resolution at double speed, where the CPU samples FF41 at an odd
     /// master cc that the per-dot renderer would otherwise round.
-    pub fn get_stat_mode3to0_at_cc(&self, access_cc: u64, ds: bool) -> Option<u8> {
+    pub(crate) fn get_stat_mode3to0_at_cc(&self, access_cc: u64, ds: bool) -> Option<u8> {
         if self.disabled || self.internal_ly_val >= 144 {
             return None;
         }
@@ -10270,7 +10272,7 @@ impl Ppu {
     /// register still serves every mid-frame mode 0/2/3 read. Returns None when the
     /// access cc does not resolve into the mode-1 window (then the bus keeps the
     /// renderer register).
-    pub fn get_stat_mode_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<u8> {
+    pub(crate) fn get_stat_mode_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<u8> {
         if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
             return None;
         }
@@ -10648,7 +10650,7 @@ impl Ppu {
     /// current line (first line after enable, window-start / WX-invalidated
     /// mid-mode-3 lines): there the renderer register is the correct emergent
     /// value and the caller defers to it. Everywhere else this is authoritative.
-    pub fn get_stat(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<u8> {
+    pub(crate) fn get_stat(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<u8> {
         if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
             return None;
         }
@@ -10673,7 +10675,7 @@ impl Ppu {
     /// the flag at the read's master cc via `the LYC-compare-LY calc`:
     /// stat |= lycflag iff the LYC register == LYC compare.ly && LYC compare.time-to-next-LY > 2
     /// (the AGB `2 - 1` term is dropped: rustyboi targets DMG/CGB only).
-    pub fn get_lyc_flag_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<bool> {
+    pub(crate) fn get_lyc_flag_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<bool> {
         if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
             return None;
         }
@@ -10754,7 +10756,7 @@ impl Ppu {
     /// the value here from the LY counter phase at the read's access cc.
     ///
     /// Returns None when the LCD is off (the bus keeps the renderer register).
-    pub fn get_ly_reg_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<u8> {
+    pub(crate) fn get_ly_reg_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<u8> {
         if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
             return None;
         }
@@ -11047,7 +11049,7 @@ impl Ppu {
     /// True when the PPU is currently in PixelTransfer (STAT mode 3, active
     /// rendering). Used by the CGB STOP speed-switch bridge to gate the
     /// mode-3-specific dot correction.
-    pub fn is_in_pixel_transfer(&self) -> bool {
+    pub(crate) fn is_in_pixel_transfer(&self) -> bool {
         !self.disabled && self.state == State::PixelTransfer
     }
 
@@ -11058,7 +11060,7 @@ impl Ppu {
     /// compensates), so the STOP bridge drops 2 dots and arms the pullback marker.
     /// VBlank lines (LY 143-tail..152) and the LCD-off path keep the full 8 — there
     /// the renderer is not advancing a mode-3 window, so no overshoot occurs.
-    pub fn is_on_rendering_line(&self) -> bool {
+    pub(crate) fn is_on_rendering_line(&self) -> bool {
         !self.disabled
             && (self.lcdc & (LCDCFlags::DisplayEnable as u8)) != 0
             && self.internal_ly_val < 144

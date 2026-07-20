@@ -2,35 +2,35 @@ use serde::{Deserialize, Serialize};
 use crate::audio::{wave, square, noise};
 use crate::memory::Addressable;
 
-pub const NR10: u16 = 0xFF10; // Channel 1 sweep register
-pub const NR11: u16 = 0xFF11; // Channel 1 sound length/wave pattern duty
-pub const NR12: u16 = 0xFF12; // Channel 1 volume and envelope
+pub(crate) const NR10: u16 = 0xFF10; // Channel 1 sweep register
+pub(crate) const NR11: u16 = 0xFF11; // Channel 1 sound length/wave pattern duty
+pub(crate) const NR12: u16 = 0xFF12; // Channel 1 volume and envelope
 pub(crate) const NR13: u16 = 0xFF13; // Channel 1 period low
-pub const NR14: u16 = 0xFF14; // Channel 1 period high and control
+pub(crate) const NR14: u16 = 0xFF14; // Channel 1 period high and control
 
-pub const NR21: u16 = 0xFF16; // Channel 2 sound length/wave pattern duty
-pub const NR22: u16 = 0xFF17; // Channel 2 volume and envelope
+pub(crate) const NR21: u16 = 0xFF16; // Channel 2 sound length/wave pattern duty
+pub(crate) const NR22: u16 = 0xFF17; // Channel 2 volume and envelope
 pub(crate) const NR23: u16 = 0xFF18; // Channel 2 period low
-pub const NR24: u16 = 0xFF19; // Channel 2 period high and control
+pub(crate) const NR24: u16 = 0xFF19; // Channel 2 period high and control
 
-pub const NR30: u16 = 0xFF1A; // Channel 3 dac enable
-pub const NR31: u16 = 0xFF1B; // Channel 3 sound length
-pub const NR32: u16 = 0xFF1C; // Channel 3 output level
-pub const NR33: u16 = 0xFF1D; // Channel 3 period low
-pub const NR34: u16 = 0xFF1E; // Channel 3 period high and control
+pub(crate) const NR30: u16 = 0xFF1A; // Channel 3 dac enable
+pub(crate) const NR31: u16 = 0xFF1B; // Channel 3 sound length
+pub(crate) const NR32: u16 = 0xFF1C; // Channel 3 output level
+pub(crate) const NR33: u16 = 0xFF1D; // Channel 3 period low
+pub(crate) const NR34: u16 = 0xFF1E; // Channel 3 period high and control
 
-pub const NR41: u16 = 0xFF20; // Channel 4 sound length
-pub const NR42: u16 = 0xFF21; // Channel 4 volume and envelope
-pub const NR43: u16 = 0xFF22; // Channel 4 frequency and randomness
-pub const NR44: u16 = 0xFF23; // Channel 4 control
+pub(crate) const NR41: u16 = 0xFF20; // Channel 4 sound length
+pub(crate) const NR42: u16 = 0xFF21; // Channel 4 volume and envelope
+pub(crate) const NR43: u16 = 0xFF22; // Channel 4 frequency and randomness
+pub(crate) const NR44: u16 = 0xFF23; // Channel 4 control
 
-pub const NR50: u16 = 0xFF24; // master volume, VIN panning
-pub const NR51: u16 = 0xFF25; // Sound panning
+pub(crate) const NR50: u16 = 0xFF24; // master volume, VIN panning
+pub(crate) const NR51: u16 = 0xFF25; // Sound panning
 pub const NR52: u16 = 0xFF26; // Audio master control
 
-pub const WAV_START: u16 = 0xFF30; // Channel 3 wave pattern RAM start
-pub const WAV_LENGTH: usize = 16; // Channel 3 wave pattern RAM length
-pub const WAV_END: u16 = WAV_START + WAV_LENGTH as u16 - 1; // Channel 3 wave pattern RAM end
+pub(crate) const WAV_START: u16 = 0xFF30; // Channel 3 wave pattern RAM start
+pub(crate) const WAV_LENGTH: usize = 16; // Channel 3 wave pattern RAM length
+pub(crate) const WAV_END: u16 = WAV_START + WAV_LENGTH as u16 - 1; // Channel 3 wave pattern RAM end
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Audio {
@@ -338,7 +338,7 @@ impl Audio {
     /// part of cc. The DIV-reset fold preserves the upper cc bits (the length
     /// `cc>>13` / frame-sequencer boundaries) and shifts only the duty unit by
     /// the resulting delta.
-    pub fn sync_cc(
+    pub(crate) fn sync_cc(
         &mut self,
         abs_cc: u64,
         div_resets: u64,
@@ -682,7 +682,7 @@ impl Audio {
     /// Base in TCAGBD (§5.1.1 double-speed uses the next DIV bit; §10 sound
     /// frequency is unaffected by double speed); this STOP speed-switch cc-fold
     /// is a novel refinement, not in Pan Docs, TCAGBD, or GBCTR.
-    pub fn psg_speed_change_at(&mut self, old_ds: bool, stop_cc: u64) {
+    pub(crate) fn psg_speed_change_at(&mut self, old_ds: bool, stop_cc: u64) {
         if !self.clock_anchored {
             return;
         }
@@ -720,7 +720,7 @@ impl Audio {
 
     /// Advance only the wave channel's fetch counter to the current cc, for the
     /// CPU read path. Does not run square envelope/length events.
-    pub fn sync_wave_for_read(&mut self) {
+    pub(crate) fn sync_wave_for_read(&mut self) {
         if self.audio_enabled {
             self.channel3.sync_for_read();
             self.channel4.sync_for_read();
@@ -737,7 +737,7 @@ impl Audio {
     /// `self.cc`/`last_update`/duty, so the NR52 length-expiry boundary
     /// (`((cc>>13)+len)<<13` vs the read cc) resolves at the same access cc as
     /// the timer.
-    pub fn set_read_len_cc(&mut self, read_abs_cc: u64) {
+    pub(crate) fn set_read_len_cc(&mut self, read_abs_cc: u64) {
         if !self.clock_anchored {
             return;
         }
@@ -774,7 +774,7 @@ impl Audio {
     /// Unlike the read overlay this LEAVES `len_cc` set: the immediately-
     /// following `audio.write` consumes it, and the next per-dot `push_cc`
     /// restores the steady-state base. Duty/envelope (`self.cc`) are untouched.
-    pub fn set_write_len_cc(&mut self, write_abs_cc: u64) {
+    pub(crate) fn set_write_len_cc(&mut self, write_abs_cc: u64) {
         if !self.clock_anchored {
             return;
         }
@@ -795,7 +795,7 @@ impl Audio {
 
     /// Restore the steady-state length cc after a write overlay, so a later
     /// per-dot poll doesn't see a stale ahead value before the next `push_cc`.
-    pub fn restore_len_cc(&mut self) {
+    pub(crate) fn restore_len_cc(&mut self) {
         if !self.clock_anchored {
             return;
         }
@@ -809,7 +809,7 @@ impl Audio {
     /// Record the CGB/DMG flag (and seed it into channel 4) before the boot
     /// `sync_cc` anchors the APU clock, so the post-boot clock high-bit
     /// constant is chosen correctly.
-    pub fn set_boot_cgb(&mut self, cgb: bool) {
+    pub(crate) fn set_boot_cgb(&mut self, cgb: bool) {
         self.boot_cgb = cgb;
         self.channel4.set_cgb(cgb);
     }
@@ -831,7 +831,7 @@ impl Audio {
         self.cycles_per_sample
     }
 
-    pub fn set_cgb_de(&mut self, de: bool) {
+    pub(crate) fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
         self.channel1.set_cgb_de(de);
         self.channel2.set_cgb_de(de);
@@ -841,7 +841,7 @@ impl Audio {
     /// Seed the CGB-B-or-earlier APU revision gate (CGB with model <= CGB-B)
     /// into all four channels' NRx4 length-glitch
     /// fork. Called once from `GB::new` for Hardware::CGB0/CGBB.
-    pub fn set_cgb_le_b(&mut self, le_b: bool) {
+    pub(crate) fn set_cgb_le_b(&mut self, le_b: bool) {
         self.channel1.set_cgb_le_b(le_b);
         self.channel2.set_cgb_le_b(le_b);
         self.channel3.set_cgb_le_b(le_b);
@@ -849,13 +849,13 @@ impl Audio {
     }
 
     /// CPU-CGB-A/B (Hardware::CGBB) wave first-glitch-write swallow.
-    pub fn set_cgb_b(&mut self, b: bool) {
+    pub(crate) fn set_cgb_b(&mut self, b: bool) {
         self.channel3.set_cgb_b(b);
     }
 
     /// CGB-C-and-older PCM read glitch (the pcm_mask applied for
     /// model <= CGB-C; excludes AGB and CGB-D/E).
-    pub fn set_pcm_c_glitch(&mut self, on: bool) {
+    pub(crate) fn set_pcm_c_glitch(&mut self, on: bool) {
         self.channel1.set_pcm_c_glitch(on);
         self.channel2.set_pcm_c_glitch(on);
     }
@@ -863,13 +863,13 @@ impl Audio {
     /// NRx4 sample-index step-back parity gate for the two square channels
     /// (true for CGB0/CGBB/AGB; the step-back is gated on
     /// `sample_countdown & 1` for those, unconditional on CGB-D/E).
-    pub fn set_step_back_parity(&mut self, on: bool) {
+    pub(crate) fn set_step_back_parity(&mut self, on: bool) {
         self.channel1.set_step_back_parity(on);
         self.channel2.set_step_back_parity(on);
     }
 
     /// Seed the AGB flag into the wave channel.
-    pub fn set_agb(&mut self, agb: bool) {
+    pub(crate) fn set_agb(&mut self, agb: bool) {
         self.channel3.set_agb(agb);
     }
 
@@ -879,7 +879,7 @@ impl Audio {
     /// hand off with channel 1 still running (bit 0 = 1); the SGB boot ROM
     /// plays no chime on the Game Boy side, so it hands off with channel 1
     /// already disabled (NR52 reads 0xF0, not 0xF1).
-    pub fn set_post_bios_state(&mut self, cgb: bool, ch1_active: bool) {
+    pub(crate) fn set_post_bios_state(&mut self, cgb: bool, ch1_active: bool) {
         self.audio_enabled = true;
         self.nr50 = 0x77;
         self.nr51 = 0xF3;
@@ -903,7 +903,7 @@ impl Audio {
     /// Clock the frame sequencer one step. Called by the timer at the exact dot
     /// of each DIV-bit-12 (bit-13 in double speed) falling edge, so the sequencer
     /// stays phase-locked to DIV (and reacts to DIV writes).
-    pub fn clock_frame_sequencer(&mut self) {
+    pub(crate) fn clock_frame_sequencer(&mut self) {
         if self.audio_enabled {
             // Length/envelope/sweep are cc-event driven; the step counter and the
             // channels' fs_step mirrors are serialized savestate fields, so they
@@ -921,19 +921,19 @@ impl Audio {
     /// only bulk-skips dots when audio is OFF, because a powered APU steps its
     /// channel duty/freq counters per dot (`step`), which is not
     /// span-collapsible like the frame sequencer.
-    pub fn is_powered(&self) -> bool {
+    pub(crate) fn is_powered(&self) -> bool {
         self.audio_enabled
     }
 
-    pub fn get_master_volume_left(&self) -> u8 {
+    pub(crate) fn get_master_volume_left(&self) -> u8 {
         (self.nr50 >> 4) & 0x07
     }
 
-    pub fn get_master_volume_right(&self) -> u8 {
+    pub(crate) fn get_master_volume_right(&self) -> u8 {
         self.nr50 & 0x07
     }
 
-    pub fn is_channel_left_enabled(&self, channel: u8) -> bool {
+    pub(crate) fn is_channel_left_enabled(&self, channel: u8) -> bool {
         match channel {
             1 => (self.nr51 >> 4) & 0x01 != 0,
             2 => (self.nr51 >> 5) & 0x01 != 0,
@@ -943,7 +943,7 @@ impl Audio {
         }
     }
 
-    pub fn is_channel_right_enabled(&self, channel: u8) -> bool {
+    pub(crate) fn is_channel_right_enabled(&self, channel: u8) -> bool {
         match channel {
             1 => self.nr51 & 0x01 != 0,
             2 => (self.nr51 >> 1) & 0x01 != 0,
@@ -958,7 +958,7 @@ impl Audio {
     /// / power gating is applied by the caller in `mmio.rs`.
     /// Pan Docs: Audio details, PCM registers —
     /// https://gbdev.io/pandocs/Audio_details.html
-    pub fn pcm12(&self) -> u8 {
+    pub(crate) fn pcm12(&self) -> u8 {
         if !self.audio_enabled {
             return 0;
         }
@@ -974,7 +974,7 @@ impl Audio {
 
     /// CGB PCM34 register (0xFF77): low nibble = channel 3, high nibble =
     /// channel 4.
-    pub fn pcm34(&self) -> u8 {
+    pub(crate) fn pcm34(&self) -> u8 {
         if !self.audio_enabled {
             return 0;
         }
@@ -993,7 +993,7 @@ impl Audio {
     /// but not synthesised ([`crate::sgb::SgbSound`]); adding them later means
     /// summing into this stream here or at a downstream sink, with no change to
     /// the channels below.
-    pub fn get_mixed_output(&self) -> (f32, f32) {
+    pub(crate) fn get_mixed_output(&self) -> (f32, f32) {
         if !self.audio_enabled {
             return (0.0, 0.0);
         }
@@ -1040,7 +1040,7 @@ impl Audio {
         (left_mix / 4.0, right_mix / 4.0)
     }
 
-    pub fn generate_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
+    pub(crate) fn generate_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
         let mut samples = Vec::new();
 
         // Channels are caught up lazily via `sync_cc` (the caller syncs the

@@ -40,7 +40,7 @@ impl<const START: u16, const SIZE: usize> Memory<START, SIZE> {
     }
 
     /// Mutable raw view of the backing bytes.
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.data
     }
 }

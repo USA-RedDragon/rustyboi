@@ -2,23 +2,23 @@ use crate::{cpu::opcodes, cpu::registers, memory, memory::Addressable};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct SM83 {
+pub(crate) struct SM83 {
     pub registers: registers::Registers,
-    pub halted: bool,
+    pub(crate) halted: bool,
     pub stopped: bool,
     #[serde(default)]
-    pub ime_enable_delay: u8,
+    pub(crate) ime_enable_delay: u8,
     /// T-cycles remaining in the post-STOP-speed-switch stall.
     /// While non-zero, `step` returns short slices without fetching, so the
     /// surrounding `step_instruction` loop continues to advance peripherals.
     #[serde(default)]
-    pub stop_unhalt_cycles: u32,
+    pub(crate) stop_unhalt_cycles: u32,
     /// Opcode prefetched at the previous instruction's boundary; `prefetched` is
     /// true once that fetch has happened and the opcode awaits execute/discard.
     #[serde(default)]
     pub opcode: u8,
     #[serde(default)]
-    pub prefetched: bool,
+    pub(crate) prefetched: bool,
     /// HALT-bug prefetch marker. The HALT bug (IME=0 + pending IRQ) peeks the byte
     /// after HALT without charging its fetch M-cycle, unlike the normal
     /// end-of-instruction prefetch. When that peeked opcode is consumed its fetch
@@ -27,21 +27,21 @@ pub struct SM83 {
     /// the immediate) has ticked to. Set only by the HALT-bug peek.
     /// Pan Docs: halt bug — https://gbdev.io/pandocs/halt.html
     #[serde(default)]
-    pub halt_bug_prefetch: bool,
+    pub(crate) halt_bug_prefetch: bool,
     /// HALT-exit +4: an m2-woken wake charged its extra M-cycle as a real stall
     /// (the `return 4` below), so the woken stream is already at the hardware cc
     /// and the timer-read facet must not re-add the advance.
     /// Base extra-4-clock HALT exit: TCAGBD §4.9. The per-wake-source split
     /// (m2 vs LYC/m1 vs serial) is from test-ROM refs, not in Pan Docs or GBCTR.
     #[serde(default)]
-    pub m2_halt_stall_charged: bool,
+    pub(crate) m2_halt_stall_charged: bool,
     /// CGB LCD-woken HALT-exit +4: the LYC/m1-woken CGB wake charged its extra
     /// M-cycle as a real stall (the `return 4` below). One-shot guard so the
     /// still-halted re-entry does not stall again; taken at unhalt.
     /// Base extra-4-clock HALT exit: TCAGBD §4.9. The CGB LYC/m1 per-wake-source
     /// split is from test-ROM refs, not in Pan Docs or GBCTR.
     #[serde(default)]
-    pub cgb_lcd_halt_stall_charged: bool,
+    pub(crate) cgb_lcd_halt_stall_charged: bool,
     /// CGB HDMA dma-due deferral: a Requested multi-block HDMA at CGB HALT-exit
     /// with a pending IME=1 interrupt fires its block at unhalt, then executes ONE
     /// post-HALT instruction BEFORE the interrupt is serviced (the block's DMA
@@ -51,7 +51,7 @@ pub struct SM83 {
     /// Not in Pan Docs, TCAGBD, or GBCTR; CGB HDMA-vs-interrupt HALT-exit
     /// ordering from test-ROM refs.
     #[serde(default)]
-    pub hdma_dma_due_defer_service: bool,
+    pub(crate) hdma_dma_due_defer_service: bool,
 }
 
 impl Default for SM83 {
@@ -827,7 +827,7 @@ impl SM83 {
         }
     }
 
-    pub fn set_interrupt_flag(&mut self, flag: registers::InterruptFlag, value: bool, mmio: &mut memory::mmio::Mmio) {
+    pub(crate) fn set_interrupt_flag(&mut self, flag: registers::InterruptFlag, value: bool, mmio: &mut memory::mmio::Mmio) {
         if value {
             mmio.write(registers::INTERRUPT_FLAG, mmio.read(registers::INTERRUPT_FLAG) | flag as u8);
         } else {
@@ -835,11 +835,11 @@ impl SM83 {
         }
     }
 
-    pub fn get_interrupt_flag(&self, flag: registers::InterruptFlag, mmio: &memory::mmio::Mmio) -> bool {
+    pub(crate) fn get_interrupt_flag(&self, flag: registers::InterruptFlag, mmio: &memory::mmio::Mmio) -> bool {
         (mmio.read(registers::INTERRUPT_FLAG) & (flag as u8)) != 0
     }
 
-    pub fn get_interrupt_enable_flag(&self, flag: registers::InterruptFlag, mmio: &memory::mmio::Mmio) -> bool {
+    pub(crate) fn get_interrupt_enable_flag(&self, flag: registers::InterruptFlag, mmio: &memory::mmio::Mmio) -> bool {
         (mmio.read(registers::INTERRUPT_ENABLE) & (flag as u8)) != 0
     }
 

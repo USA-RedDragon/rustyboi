@@ -78,7 +78,7 @@ enum State {
 
 /// A Mobile Adapter GB plugged into the link port. See the module docs.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct MobileAdapter {
+pub(crate) struct MobileAdapter {
     state: State,
     /// Received-packet header `[command, 0, len_hi, len_lo]`; reused to hold the
     /// response header while clocking the reply out.
@@ -127,13 +127,13 @@ impl MobileAdapter {
 
     /// The byte the adapter shifts back on the current transfer (loaded from the
     /// previous transfer's processing). Mirrors the printer's `preloaded_response`.
-    pub fn preloaded_response(&self) -> u8 {
+    pub(crate) fn preloaded_response(&self) -> u8 {
         self.out
     }
 
     /// Feed the byte the Game Boy just shifted out; the adapter advances its
     /// state machine and preloads the response for the next transfer.
-    pub fn receive_byte(&mut self, tx: u8) {
+    pub(crate) fn receive_byte(&mut self, tx: u8) {
         self.out = self.transfer(tx);
     }
 
@@ -407,8 +407,10 @@ impl MobileAdapter {
         (CMD_ERROR, vec![command, code])
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Test/inspection: has a session been started (adapter detected + handshook)?
-    pub fn session_started(&self) -> bool {
+    pub(crate) fn session_started(&self) -> bool {
         self.session_started
     }
 }
