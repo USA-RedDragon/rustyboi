@@ -103,6 +103,17 @@ impl ActionOutcome {
     fn push(&mut self, req: PlatformRequest) {
         self.requests.push(req);
     }
+
+    /// Whether the action reported no error. [`Session::finish_file`] emits
+    /// exactly one [`PlatformRequest::Error`] when a finisher fails, so a
+    /// frontend can key its own bookkeeping (clear the error overlay, drop the
+    /// stale frame) off this without re-running the finisher.
+    pub fn succeeded(&self) -> bool {
+        !self
+            .requests
+            .iter()
+            .any(|r| matches!(r, PlatformRequest::Error(_)))
+    }
 }
 
 impl Session {
@@ -516,6 +527,103 @@ impl Session {
                 requests: vec![PlatformRequest::AndroidLibrary(other)],
                 pause_changed: false,
             },
+        }
+    }
+
+    /// Finish a [`PlatformRequest::LoadFile`]: hand the resolved `bytes` to the
+    /// finisher for `purpose` and report the result.
+    ///
+    /// This is the second half of the "one place" contract [`apply`](Self::apply)
+    /// opens. `apply` cannot service a file action itself (only the host can turn
+    /// a picked file into bytes), so it hands back a `LoadFile` request; the
+    /// frontend resolves the bytes and calls this. The user-visible
+    /// Status/Error/ClearError/Resize sequence therefore lives here, once, rather
+    /// than being re-implemented per frontend.
+    ///
+    /// Frontends keep only what the session cannot know: their own pause/error
+    /// bookkeeping, and any host-side persistence (the web worker also writes an
+    /// accepted SGB firmware to IndexedDB).
+    pub fn finish_file(&mut self, purpose: LoadPurpose, bytes: &[u8]) -> ActionOutcome {
+        match purpose {
+            LoadPurpose::Rom => match self.finish_load_rom(bytes) {
+                Ok(_) => {
+                    let mut o = ActionOutcome::default();
+                    o.push(PlatformRequest::ClearError);
+                    let (width, height) = self.content_size();
+                    o.push(PlatformRequest::ResizeContent { width, height });
+                    o.push(PlatformRequest::Status("ROM loaded".into()));
+                    o
+                }
+                Err(e) => ActionOutcome::error(format!("Failed to load ROM: {e}")),
+            },
+
+            LoadPurpose::State => {
+                let rom_id = self.rom_id();
+                match self.finish_load_state(bytes, None, rom_id) {
+                    Ok(()) => {
+                        let mut o = ActionOutcome::default();
+                        o.push(PlatformRequest::ClearError);
+                        o.push(PlatformRequest::Status("State loaded".into()));
+                        o
+                    }
+                    Err(e) => ActionOutcome::error(format!("Failed to load state: {e}")),
+                }
+            }
+
+            LoadPurpose::Battery => match self.finish_import_battery(bytes) {
+                Ok(()) => ActionOutcome::status("Battery save imported"),
+                Err(e) => ActionOutcome::error(format!("Failed to import battery save: {e}")),
+            },
+
+            LoadPurpose::Rtc => match self.finish_import_rtc(bytes) {
+                Ok(()) => ActionOutcome::status("RTC imported"),
+                Err(e) => ActionOutcome::error(format!("Failed to import RTC: {e}")),
+            },
+
+            LoadPurpose::Patch => match self.apply_rom_patch(bytes) {
+                Ok(_) => {
+                    let mut o = ActionOutcome::default();
+                    o.push(PlatformRequest::ClearError);
+                    o.push(PlatformRequest::Status("Patch applied".into()));
+                    o
+                }
+                Err(e) => ActionOutcome::error(format!("Failed to apply patch: {e}")),
+            },
+
+            LoadPurpose::Movie => match self.finish_load_movie(bytes) {
+                Ok(()) => {
+                    let mut o = ActionOutcome::default();
+                    o.push(PlatformRequest::ClearError);
+                    o.push(PlatformRequest::Status("Movie loaded — replaying".into()));
+                    o
+                }
+                Err(e) => ActionOutcome::error(format!("Failed to load movie: {e}")),
+            },
+
+            // Validate before installing: the session retains whatever it is
+            // given, so a rejected dump would otherwise silently keep the
+            // previous border while reporting success.
+            LoadPurpose::SgbFirmware => {
+                match rustyboi_core_lib::sgb_firmware::identify(bytes) {
+                    Ok(which) => {
+                        self.finish_load_sgb_firmware(bytes);
+                        let mut o = ActionOutcome::default();
+                        o.push(PlatformRequest::ClearError);
+                        o.push(PlatformRequest::Status(format!(
+                            "{} firmware loaded; showing the system border",
+                            crate::sgb_firmware_label(which)
+                        )));
+                        o
+                    }
+                    Err(e) => ActionOutcome::error(format!(
+                        "Not a Super Game Boy firmware dump: {e}"
+                    )),
+                }
+            }
+
+            // No frontend wires a boot-ROM picker yet, so there is nothing to
+            // finish; `apply` still emits the request for whichever host adds one.
+            LoadPurpose::BootRom => ActionOutcome::default(),
         }
     }
 }

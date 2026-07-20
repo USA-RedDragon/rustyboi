@@ -12,7 +12,7 @@
 //! calls `Session::apply`/the session directly instead of using this driver.
 
 use rustyboi_session::action::{FileData, LoadPurpose};
-use rustyboi_session::apply::{FetchPurpose, PlatformRequest};
+use rustyboi_session::apply::{ActionOutcome, FetchPurpose, PlatformRequest};
 use rustyboi_session::{Session, UiAction};
 
 /// The capabilities the shared action driver requires of a windowed frontend.
@@ -94,7 +94,22 @@ pub(crate) enum PauseHint {
 pub(crate) fn drive_action<F: Frontend>(frontend: &mut F, action: UiAction, timestamp: u64) {
     let pause_hint = pause_hint_for(&action);
     let outcome = frontend.session_mut().apply(action, timestamp);
+    let pause_changed = outcome.pause_changed;
 
+    route_outcome(frontend, outcome);
+
+    if pause_changed
+        && let Some(hint) = pause_hint
+    {
+        frontend.on_pause_changed(hint);
+    }
+}
+
+/// Route an [`ActionOutcome`]'s host work to the `Frontend`'s capability
+/// methods. Shared by [`drive_action`] and by the file-finish path, so a
+/// request produced by `Session::finish_file` reaches exactly the same handler
+/// as one produced by `Session::apply`.
+pub(crate) fn route_outcome<F: Frontend>(frontend: &mut F, outcome: ActionOutcome) {
     for req in outcome.requests {
         match req {
             PlatformRequest::Exit => frontend.exit(),
@@ -116,12 +131,6 @@ pub(crate) fn drive_action<F: Frontend>(frontend: &mut F, action: UiAction, time
             #[cfg(target_os = "android")]
             PlatformRequest::AndroidLibrary(a) => frontend.android_library(a),
         }
-    }
-
-    if outcome.pause_changed
-        && let Some(hint) = pause_hint
-    {
-        frontend.on_pause_changed(hint);
     }
 }
 

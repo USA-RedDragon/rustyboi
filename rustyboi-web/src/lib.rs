@@ -38,6 +38,7 @@ use rustyboi_session::{
 use js_sys::Float32Array;
 use wasm_bindgen::prelude::*;
 
+use rustyboi_session::action::LoadPurpose;
 use rustyboi_session::{FileData, PlatformRequest, SessionUiState, UiAction};
 
 use js_sys::Array;
@@ -238,15 +239,11 @@ impl Emulator {
         let mut extra: Vec<PlatformRequest> = Vec::new();
         for req in outcome.requests {
             if matches!(req, PlatformRequest::LoadFile { .. }) {
-                match self.session.finish_load_rom(bytes) {
-                    Ok(_) => {
-                        self.has_rom = true;
-                        extra.push(PlatformRequest::ClearError);
-                    }
-                    Err(e) => {
-                        extra.push(PlatformRequest::Error(format!("cartridge load failed: {e}")))
-                    }
-                }
+                let outcome = self.session.finish_file(LoadPurpose::Rom, bytes);
+                // The worker tracks has_rom itself; derive it from the session
+                // rather than from the outcome's shape.
+                self.has_rom = self.session.gb().has_rom();
+                extra.extend(outcome.requests);
             } else {
                 extra.push(req);
             }
@@ -258,15 +255,7 @@ impl Emulator {
     /// picked and transferred). Re-attaches the currently-loaded ROM. Returns
     /// Status/Error requests.
     pub fn load_state(&mut self, bytes: &[u8]) -> Array {
-        let rom_id = self.session.rom_id();
-        let mut reqs: Vec<PlatformRequest> = Vec::new();
-        match self.session.finish_load_state(bytes, None, rom_id) {
-            Ok(()) => {
-                reqs.push(PlatformRequest::ClearError);
-                reqs.push(PlatformRequest::Status("State loaded".into()));
-            }
-            Err(e) => reqs.push(PlatformRequest::Error(format!("Failed to load state: {e}"))),
-        }
+        let reqs = self.session.finish_file(LoadPurpose::State, bytes).requests;
         requests_to_js(&reqs)
     }
 
@@ -274,20 +263,14 @@ impl Emulator {
     /// file) into the current cartridge. Persists to IndexedDB (via the session's
     /// storage port) so it survives a reload. Returns Status/Error requests.
     pub fn import_battery(&mut self, bytes: &[u8]) -> Array {
-        let reqs = match self.session.finish_import_battery(bytes) {
-            Ok(()) => vec![PlatformRequest::Status("Battery save imported".into())],
-            Err(e) => vec![PlatformRequest::Error(format!("Failed to import battery save: {e}"))],
-        };
+        let reqs = self.session.finish_file(LoadPurpose::Battery, bytes).requests;
         requests_to_js(&reqs)
     }
 
     /// Import an `.rtc` clock blob into the current cartridge. Returns
     /// Status/Error requests.
     pub fn import_rtc(&mut self, bytes: &[u8]) -> Array {
-        let reqs = match self.session.finish_import_rtc(bytes) {
-            Ok(()) => vec![PlatformRequest::Status("RTC imported".into())],
-            Err(e) => vec![PlatformRequest::Error(format!("Failed to import RTC: {e}"))],
-        };
+        let reqs = self.session.finish_file(LoadPurpose::Rtc, bytes).requests;
         requests_to_js(&reqs)
     }
 
@@ -295,13 +278,7 @@ impl Emulator {
     /// file) to the loaded ROM and re-load the patched cartridge. Returns
     /// Status/Error requests.
     pub fn apply_patch(&mut self, bytes: &[u8]) -> Array {
-        let reqs = match self.session.apply_rom_patch(bytes) {
-            Ok(_) => vec![
-                PlatformRequest::ClearError,
-                PlatformRequest::Status("Patch applied".into()),
-            ],
-            Err(e) => vec![PlatformRequest::Error(format!("Failed to apply patch: {e}"))],
-        };
+        let reqs = self.session.finish_file(LoadPurpose::Patch, bytes).requests;
         requests_to_js(&reqs)
     }
 
@@ -309,13 +286,7 @@ impl Emulator {
     /// picked file) and begin deterministic playback. Returns Status/Error
     /// requests.
     pub fn load_movie(&mut self, bytes: &[u8]) -> Array {
-        let reqs = match self.session.finish_load_movie(bytes) {
-            Ok(()) => vec![
-                PlatformRequest::ClearError,
-                PlatformRequest::Status("Movie loaded — replaying".into()),
-            ],
-            Err(e) => vec![PlatformRequest::Error(format!("Failed to load movie: {e}"))],
-        };
+        let reqs = self.session.finish_file(LoadPurpose::Movie, bytes).requests;
         requests_to_js(&reqs)
     }
 

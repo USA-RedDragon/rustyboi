@@ -495,3 +495,56 @@ fn ui_state_reflects_the_session_and_clamps_volume() {
     s.apply(UiAction::ToggleFastForward, 0);
     assert_eq!(s.ui_state().fast_forward, s.is_fast_forward());
 }
+
+// `Session::finish_file` is the one place a resolved file's bytes meet their
+// finisher and become user-visible requests. Both windowed frontends route
+// through it, so pin the canonical sequences here rather than in either.
+#[test]
+fn finish_file_produces_the_canonical_request_sequences() {
+    use rustyboi_session::action::LoadPurpose;
+    use rustyboi_session::PlatformRequest;
+
+    fn shapes(o: &rustyboi_session::apply::ActionOutcome) -> Vec<&'static str> {
+        o.requests
+            .iter()
+            .map(|r| match r {
+                PlatformRequest::ClearError => "ClearError",
+                PlatformRequest::ResizeContent { .. } => "ResizeContent",
+                PlatformRequest::Status(_) => "Status",
+                PlatformRequest::Error(_) => "Error",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    let rom = test_rom();
+    let mut s = dmg_session(&rom);
+
+    // A ROM load clears any error overlay, resizes to the content, then reports.
+    let o = s.finish_file(LoadPurpose::Rom, &rom);
+    assert!(o.succeeded());
+    assert_eq!(shapes(&o), ["ClearError", "ResizeContent", "Status"]);
+
+    // A failed finish reports exactly one Error and nothing else.
+    let o = s.finish_file(LoadPurpose::Rom, &[0u8; 4]);
+    assert!(!o.succeeded());
+    assert_eq!(shapes(&o), ["Error"]);
+
+    let o = s.finish_file(LoadPurpose::State, &[0u8; 8]);
+    assert!(!o.succeeded(), "garbage savestate must fail");
+    assert_eq!(shapes(&o), ["Error"]);
+
+    let o = s.finish_file(LoadPurpose::Movie, &[0u8; 8]);
+    assert!(!o.succeeded());
+    assert_eq!(shapes(&o), ["Error"]);
+
+    // A junk firmware dump is rejected before install, never reported as loaded.
+    let o = s.finish_file(LoadPurpose::SgbFirmware, &[0u8; 64]);
+    assert!(!o.succeeded());
+    assert_eq!(shapes(&o), ["Error"]);
+
+    // No frontend wires a boot-ROM picker yet: nothing to finish, nothing said.
+    let o = s.finish_file(LoadPurpose::BootRom, &[0u8; 256]);
+    assert!(o.succeeded());
+    assert!(o.requests.is_empty());
+}
