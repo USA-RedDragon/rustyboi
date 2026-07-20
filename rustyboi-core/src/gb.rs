@@ -433,31 +433,6 @@ const REGISTERED_MARK_TILE: [u8; 0x10] = [
     0x3c, 0x00, 0x42, 0x00, 0xb9, 0x00, 0xa5, 0x00, 0xb9, 0x00, 0xa5, 0x00, 0x42, 0x00, 0x3c, 0x00,
 ];
 
-/// Savestate container magic: the first 4 bytes of every buffer
-/// [`GB::to_state_bytes`] produces. Distinguishes a rustyboi savestate from an
-/// unrelated file before any of it reaches bincode.
-pub(crate) const STATE_MAGIC: &[u8; 4] = b"RBST";
-
-/// Savestate wire-format version, stored little-endian right after
-/// [`STATE_MAGIC`].
-///
-/// **Bump this in the SAME commit as any change to the serialized layout** —
-/// adding/removing/reordering a serialized field, changing a field's type, or
-/// swapping a codec or the container itself — and regenerate the golden
-/// fixtures in that same commit:
-///
-/// ```text
-/// cargo test -p rustyboi-core --test savestate_golden -- --ignored write_golden_fixtures
-/// ```
-///
-/// The project is pre-release, so old states are not migrated: a version
-/// mismatch is rejected by name in [`GB::from_state_bytes`] rather than
-/// deserialized into a plausible-but-wrong machine.
-pub(crate) const STATE_VERSION: u32 = 1;
-
-/// Bytes [`STATE_MAGIC`] + [`STATE_VERSION`] occupy ahead of the bincode payload.
-pub(crate) const STATE_HEADER_LEN: usize = STATE_MAGIC.len() + core::mem::size_of::<u32>();
-
 impl GB {
     pub fn new(hardware: Hardware) -> Self {
         let mut mmio = memory::mmio::Mmio::new();
@@ -1841,10 +1816,10 @@ impl GB {
     /// stalling on the JSON encode). Mirrors `to_state_file`, so a state saved
     /// one way round-trips through the other.
     ///
-    /// The bincode payload is prefixed with [`STATE_MAGIC`] +
-    /// [`STATE_VERSION`] (little-endian) so a stale state hitting a newer
-    /// layout fails by name in [`GB::from_state_bytes`] instead of silently
-    /// deserializing into a plausible-but-wrong machine.
+    /// Deliberately unversioned while the project is pre-release: the layout
+    /// moves freely and old states are simply invalid. A stale buffer therefore
+    /// fails as an opaque bincode error, or — if it happens to decode — yields a
+    /// wrong machine. Add a magic/version header before the first release.
     pub fn to_state_bytes(&mut self) -> Result<Vec<u8>, io::Error> {
         // Canonicalize: resolve any carried cross-instruction lag so the
         // serialized machine state is schedule-independent (the carry decision
@@ -1854,47 +1829,17 @@ impl GB {
             let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
             bus.flush_all_lag();
         }
-        let payload =
-            bincode::serialize(&self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let mut out = Vec::with_capacity(STATE_HEADER_LEN + payload.len());
-        out.extend_from_slice(STATE_MAGIC);
-        out.extend_from_slice(&STATE_VERSION.to_le_bytes());
-        out.extend_from_slice(&payload);
-        Ok(out)
+        bincode::serialize(&self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Reconstruct a machine from a savestate buffer produced by
-    /// `to_state_bytes` (or `to_state_file`). Validates the
-    /// [`STATE_MAGIC`]/[`STATE_VERSION`] header before handing anything to
-    /// bincode, so a foreign or stale buffer yields a named `InvalidData` error
-    /// rather than an opaque decode failure. Re-derives the `#[serde(skip)]`
+    /// `to_state_bytes` (or `to_state_file`). Re-derives the `#[serde(skip)]`
     /// cartridge-flag cache exactly as `from_state_file` does. WASM-clean.
+    ///
+    /// Unversioned (see `to_state_bytes`): a buffer from a different layout is
+    /// rejected only insofar as bincode happens to notice.
     pub fn from_state_bytes(bytes: &[u8]) -> Result<Self, io::Error> {
-        let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
-        let header = bytes.get(..STATE_HEADER_LEN).ok_or_else(|| {
-            invalid(format!(
-                "savestate truncated: {} bytes, need at least {STATE_HEADER_LEN} for the header",
-                bytes.len()
-            ))
-        })?;
-        if &header[..4] != STATE_MAGIC {
-            // Unversioned states (written before this header existed) land here
-            // too, so say so — otherwise a user's own stale slot reads as a
-            // foreign file.
-            return Err(invalid(format!(
-                "not a rustyboi savestate, or one predating the versioned format: \
-                 expected magic {:?}, found {:?}",
-                String::from_utf8_lossy(STATE_MAGIC),
-                String::from_utf8_lossy(&header[..4])
-            )));
-        }
-        let version = u32::from_le_bytes(header[4..8].try_into().unwrap());
-        if version != STATE_VERSION {
-            return Err(invalid(format!(
-                "savestate version {version}, this build expects {STATE_VERSION}"
-            )));
-        }
-        let mut gb: GB = bincode::deserialize(&bytes[STATE_HEADER_LEN..])
+        let mut gb: GB = bincode::deserialize(bytes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         gb.post_load_fixup();
         Ok(gb)
@@ -2621,18 +2566,9 @@ mod savestate_roundtrip_tests {
         );
     }
 
-    /// `from_state_bytes`'s error text, panicking with `what` if it succeeded.
-    /// (`GB` is not `Debug`, so `Result::expect_err` is unavailable.)
-    fn state_err(bytes: &[u8], what: &str) -> String {
-        match GB::from_state_bytes(bytes) {
-            Ok(_) => panic!("{what}"),
-            Err(e) => e.to_string(),
-        }
-    }
-
-    /// A serializable machine with no ROM dependency, so the container tests
-    /// below run everywhere (the suite ROMs are optional).
-    fn header_test_machine() -> GB {
+    /// A serializable machine with no ROM dependency, so the container test
+    /// below runs everywhere (the suite ROMs are optional).
+    fn container_test_machine() -> GB {
         let mut gb = GB::new(Hardware::DMG);
         gb.insert(cartridge::Cartridge::from_bytes(&vec![0u8; 0x8000]).unwrap());
         gb.skip_bios();
@@ -2642,95 +2578,38 @@ mod savestate_roundtrip_tests {
         gb
     }
 
-    /// Every savestate opens with `RBST` + the little-endian format version,
-    /// and the payload behind it still round-trips.
+    /// The savestate container is bare bincode — no magic, no version, nothing
+    /// to validate (deliberate while pre-release). What must still hold is that
+    /// a round-trip is byte-identical and that malformed input never panics:
+    /// `from_state_bytes` is reachable from untrusted files, the web drop
+    /// handler and libretro's `retro_unserialize`, so a panic there is a crash,
+    /// not a rejected load. A wrong-layout buffer that bincode happens to accept
+    /// yields a wrong machine and no error — that is the accepted trade here.
     #[test]
-    fn savestate_carries_magic_and_version_header() {
-        let mut gb = header_test_machine();
+    fn savestate_round_trips_and_never_panics_on_malformed_input() {
+        let mut gb = container_test_machine();
         let state = gb.to_state_bytes().expect("serialize");
-        assert!(state.len() > STATE_HEADER_LEN, "state is header-only");
-        assert_eq!(&state[..4], STATE_MAGIC, "magic missing");
-        assert_eq!(
-            u32::from_le_bytes(state[4..8].try_into().unwrap()),
-            STATE_VERSION,
-            "version field missing/wrong"
-        );
 
         let mut restored = GB::from_state_bytes(&state).expect("round-trip");
         assert_eq!(
             restored.to_state_bytes().expect("re-serialize"),
             state,
-            "header round-trip is not byte-identical"
+            "round-trip is not byte-identical"
         );
-    }
 
-    /// Any buffer shorter than the header (including empty) must be reported as
-    /// truncated, never sliced into a panic.
-    #[test]
-    fn savestate_rejects_truncated_header() {
-        let mut gb = header_test_machine();
-        let state = gb.to_state_bytes().expect("serialize");
-        for len in 0..STATE_HEADER_LEN {
-            let err = state_err(&state[..len], "truncated buffer accepted");
-            assert!(
-                err.contains("truncated"),
-                "len {len}: unexpected error {err:?}"
-            );
+        for len in 0..64.min(state.len()) {
+            let _ = GB::from_state_bytes(&state[..len]);
         }
-        // A valid header with a chopped payload must fail in bincode, not panic.
-        assert!(GB::from_state_bytes(&state[..STATE_HEADER_LEN + 4]).is_err());
-    }
-
-    /// A foreign buffer (wrong magic) is named as such, not blamed on the version.
-    #[test]
-    fn savestate_rejects_bad_magic() {
-        let mut gb = header_test_machine();
-        let mut state = gb.to_state_bytes().expect("serialize");
-        state[0] = b'X';
-        let err = state_err(&state, "bad magic accepted");
-        assert!(
-            err.contains("not a rustyboi savestate"),
-            "unexpected error {err:?}"
-        );
-    }
-
-    /// A state written by a different format version names both versions, so a
-    /// stale state after a layout change fails loudly instead of decoding into
-    /// a plausible-but-wrong machine.
-    #[test]
-    fn savestate_rejects_version_mismatch() {
-        let mut gb = header_test_machine();
-        let mut state = gb.to_state_bytes().expect("serialize");
-        state[4..8].copy_from_slice(&(STATE_VERSION + 1).to_le_bytes());
-        let err = state_err(&state, "version mismatch accepted");
-        assert!(
-            err.contains(&format!("savestate version {}", STATE_VERSION + 1))
-                && err.contains(&format!("expects {STATE_VERSION}")),
-            "unexpected error {err:?}"
-        );
-    }
-
-    /// No malformed input may panic: truncations at every length and byte-level
-    /// corruption across the header must all come back as `Err`.
-    #[test]
-    fn savestate_never_panics_on_malformed_input() {
-        let mut gb = header_test_machine();
-        let state = gb.to_state_bytes().expect("serialize");
-        for len in 0..=STATE_HEADER_LEN * 4 {
-            let _ = GB::from_state_bytes(&state[..len.min(state.len())]);
-        }
-        for i in 0..STATE_HEADER_LEN {
+        for i in 0..32.min(state.len()) {
             let mut bad = state.clone();
             bad[i] ^= 0xFF;
-            assert!(
-                GB::from_state_bytes(&bad).is_err(),
-                "corrupted header byte {i} was accepted"
-            );
+            let _ = GB::from_state_bytes(&bad);
         }
         for junk in [&b""[..], &b"RBST"[..], &b"not a savestate at all"[..]] {
             assert!(GB::from_state_bytes(junk).is_err(), "{junk:?} accepted");
         }
     }
+
 
     /// Regression: the DMG noise channel (channel 4) must keep advancing its
     /// LFSR while it plays. The per-dot APU step-skip optimization
