@@ -1,7 +1,8 @@
 pub mod buffer;
 pub mod mmio;
 
-pub use buffer::*;
+pub use buffer::{Addressable, Memory};
+pub(crate) use buffer::boxed_filled;
 
 /// Fill `wram` with the post-boot work-RAM power-on pattern observed on real
 /// hardware, mirroring the captured DMG/CGB power-on WRAM contents. `wram` must be 0x2000 bytes (DMG, 2 banks)
