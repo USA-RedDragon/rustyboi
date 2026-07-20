@@ -47,11 +47,11 @@ impl AnalogModel {
     fn charge_per_cycle(self) -> f32 {
         match self {
             AnalogModel::Dmg => DMG_CHARGE_PER_CYCLE,
+            AnalogModel::CgbMgb => CGB_CHARGE_PER_CYCLE,
             // No published AGB constant exists, only Pan Docs' ordering
             // (AGB more aggressive than CGB). Squaring the CGB factor doubles
             // the per-cycle decay rate in the log domain, which satisfies the
             // documented ordering without inventing false precision.
-            AnalogModel::CgbMgb => CGB_CHARGE_PER_CYCLE,
             AnalogModel::Agb => CGB_CHARGE_PER_CYCLE * CGB_CHARGE_PER_CYCLE,
         }
     }

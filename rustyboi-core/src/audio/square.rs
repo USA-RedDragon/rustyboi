@@ -560,8 +560,13 @@ impl SquareWave {
     }
 
     pub(super) fn step(&mut self, cgb: bool) {
-        // Both channels need the CGB-features flag (the trigger pre-increment
-        // quirk is CGB-D/E only); ch1 also uses it for the sweep trigger init.
+        // `cgb` is the SILICON flag (`is_cgb`/`is_cgb_like`), NOT the cart-mode
+        // flag `is_cgb_features_enabled`: the APU die has no CGB/DMG mode bit,
+        // so KEY0/DMG-compat must not reach channel behavior. Wiring cart mode
+        // here is a bug that has already been fixed once — see the rationale on
+        // `Mmio::sync_apu_cc_with_ds` before changing the source of this flag.
+        // Both channels need it (the trigger pre-increment quirk is CGB-D/E
+        // only); ch1 also uses it for the sweep trigger init.
         self.cgb = cgb;
         // Always keep the duty's `last_pos_cc` current (update_pos advances the
         // index only while active, but must track cc even when idle so a later

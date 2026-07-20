@@ -1322,11 +1322,16 @@ impl Mmio {
             hw,
             crate::gb::Hardware::CGB0 | crate::gb::Hardware::CGBB
         ));
-        // NRx4 square step-back parity gate (all revisions except CGB-D/E):
-        // CGB-C-and-earlier AND AGB gate the step-back on
-        // `sample_countdown & 1`; CGB-D/E apply it unconditionally. The default
-        // CGB keeps the unconditional cgb04c placement, so only the
-        // explicit pre-D / AGB revisions take the parity fork.
+        // NRx4 square step-back parity gate. The extension is EXACTLY
+        // {CGB0, CGBB, AGB} — not "all revisions except CGB-D/E": the default
+        // CGB and the whole DMG family (DMG/DMG0/MGB/SGB/SGB2) are excluded too.
+        // CGB-B-and-earlier plus AGB gate the step-back on
+        // `sample_countdown & 1`; CGB-D/E apply it unconditionally, and the
+        // default CGB deliberately keeps that same unconditional cgb04c
+        // placement, so only the explicit pre-C / AGB revisions take the parity
+        // fork. The DMG-family exclusion asserts nothing about DMG silicon: it
+        // is inert, because both read sites are `&& self.ds` and DMG-class
+        // hardware never reaches double speed.
         self.set_apu_step_back_parity(matches!(
             hw,
             crate::gb::Hardware::CGB0 | crate::gb::Hardware::CGBB | crate::gb::Hardware::AGB
@@ -1353,13 +1358,19 @@ impl Mmio {
         self.cgb_features_enabled = enabled;
     }
 
-    /// Set the AGB (GBA-in-GBC-mode) hardware flag. AGB == CGB plus the small
-    /// AGB-specific diff set. Called once from `GB::new` for Hardware::AGB.
     /// CGB-D/E silicon revision (CGB-D-and-later silicon), for the
-    /// PPU/timer revision gates (LY-153 window, end-of-vblank STAT, OAM read
-    /// windows, speed-switch TIMA edge). Seeded from `GB::new` for
-    /// Hardware::CGBE; AGB stays on the C side (pinned to the AGB timing/APU diff
-    /// set), mirroring `is_cgb_d_or_later`.
+    /// PPU/timer revision gates. Seeded from `GB::new` for Hardware::CGBE, so
+    /// the extension is EXACTLY {CGBE}: AGB stays on the C side (pinned to the
+    /// AGB timing/APU diff set), mirroring `is_cgb_d_or_later`.
+    ///
+    /// A bare `is_cgb_de()` therefore routes AGB with CGB-C. That is the
+    /// deliberate, oracle-backed choice for the LY-153 window, the end-of-vblank
+    /// STAT, the OAM read windows and the speed-switch TIMA edge. Two PPU
+    /// consumers sit OUTSIDE that list and inherit AGB's placement from the bare
+    /// predicate without an oracle behind it — `bgp_apply_latency` and the
+    /// LY-glitch partial-latch fold in `ppu/controller.rs`, both flagged in
+    /// place. Where AGB is known to track D/E instead, spell it out as
+    /// `is_agb() || is_cgb_de()` (see the FF41 coincidence tail-hold).
     pub(crate) fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
     }
@@ -1368,6 +1379,8 @@ impl Mmio {
         self.cgb_de
     }
 
+    /// Set the AGB (GBA-in-GBC-mode) hardware flag. AGB == CGB plus the small
+    /// AGB-specific diff set. Called once from `GB::new` for Hardware::AGB.
     pub(crate) fn set_agb(&mut self, agb: bool) {
         self.is_agb = agb;
         self.audio.set_agb(agb);
@@ -1416,7 +1429,12 @@ impl Mmio {
         self.audio.set_cgb_b(b);
     }
 
-    /// CGB-C-and-older PCM read glitch (CGB-C-and-older silicon; excludes AGB and CGB-D/E).
+    /// CGB-C-and-older PCM read glitch. The extension is EXACTLY {CGB0, CGBB}:
+    /// besides AGB and CGB-D/E it also excludes the DEFAULT `CGB` — which models
+    /// real CPU-CGB-C silicon that does have the glitch, but is deliberately
+    /// held to the SameSuite-calibrated D/E-clean reads (see the seed site in
+    /// `reseed_hardware_flags` for why). Only the explicit pre-C revisions
+    /// consume it.
     pub(crate) fn set_apu_pcm_c_glitch(&mut self, on: bool) {
         self.audio.set_pcm_c_glitch(on);
     }
