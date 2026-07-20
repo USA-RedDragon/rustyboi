@@ -3072,6 +3072,7 @@ impl Ppu {
         lcdc_has(self.lcdc, f)
     }
 
+    #[inline(always)]
     fn begin_window_draw(&mut self, window_x: u8) {
         self.win_y_pos = self.win_y_pos.wrapping_add(1);
         self.win_draw_started = true;
@@ -5774,6 +5775,7 @@ impl Ppu {
     // reproducing the fetcher's BG addressing (LCDC tile-map/tile-data select,
     // CGB attribute bank + x/y flip). Used by the mode-3-start fine-scroll re-fetch
     // when a mid-discard SCX write moves the first displayed tile's column.
+    #[inline(always)]
     fn rewrite_first_fifo_tile(&mut self, mmio: &mmio::Mmio, tile_col: u16, bg_y: u16) {
         let pixels = self.bg_pixels_at_col(mmio, tile_col, bg_y);
         self.fetcher.pixel_fifo.overwrite_oldest(&pixels);
@@ -9767,6 +9769,7 @@ impl Ppu {
     /// The `LCD_CYCLES_PER_LINE - self.line_cycle` subtraction is u32 and is kept
     /// verbatim: it is the original's arithmetic, including its debug-overflow
     /// behaviour if `line_cycle` were ever to exceed the line length.
+    #[inline(always)]
     fn ly_time_master(&self, ds: i64) -> i64 {
         let plus1 = self.ly_plus1();
         let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
@@ -9774,6 +9777,7 @@ impl Ppu {
     }
 
     /// The hardware `line cycles(cc) = 456 - ((the LY time - cc) >> ds)`.
+    #[inline(always)]
     fn line_cycles_at(&self, cc: i64, ds: i64) -> i64 {
         stat_irq::LCD_CYCLES_PER_LINE as i64 - ((self.ly_time_master(ds) - cc) >> ds)
     }
@@ -11692,6 +11696,7 @@ impl Ppu {
     // DMG x-then-OAM) and only then tests BG priority, where these two
     // early-return on the first opaque sprite that beats BG. That is a different
     // algorithm, not a different colour tail, so it keeps its own walk.
+    #[inline(always)]
     fn first_winning_sprite_pixel(
         &self,
         mmio: &mmio::Mmio,
