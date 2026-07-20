@@ -786,7 +786,7 @@ impl SquareWave {
     /// NRx4 write. Re-derives the length counter from the absolute expiry cc,
     /// then applies the length-enable `dec = ~cc>>12 & 1` extra-clock quirk and the
     /// trigger reload, finally rescheduling the absolute expiry.
-    fn length_nr4_change(&mut self, old_nr4: u8, new_nr4: u8, trigger: bool) {
+    fn length_nr4_change(&mut self, old_nr4: u8, new_nr4: u8) {
         let mask = self.length_mask();
         if self.len_counter != LEN_DISABLED {
             self.length_counter =
@@ -812,7 +812,6 @@ impl SquareWave {
             self.length_counter = mask + 1 - dec;
         }
 
-        let _ = trigger;
         self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
             ((self.len_cc >> 13) + self.length_counter as u32) << 13
         } else {
@@ -856,7 +855,7 @@ impl SquareWave {
             // nops-28 pins the stale-high read).
         }
 
-        self.length_nr4_change(old_nr4, value, trigger);
+        self.length_nr4_change(old_nr4, value);
         self.length_enabled = value & 0x40 != 0;
 
         if self.channel1 {

@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use crate::audio::{wave, square, noise};
-use crate::memory::mmio;
 use crate::memory::Addressable;
 
 pub const NR10: u16 = 0xFF10; // Channel 1 sweep register
@@ -308,6 +307,11 @@ impl Audio {
         cgb: bool,
         agb: bool,
     ) {
+        // The per-access PCM read cc only lives for the access that set it
+        // (`set_read_len_cc` runs after this sync, `pcm12`/`pcm34` consume it
+        // within the same access). Any later sync means that access is over;
+        // out-of-band reads then resolve at the current cc.
+        self.pcm_read_cc = None;
         self.cached_ds = ds;
         if !self.clock_anchored {
             // Defer the boot anchor past the abs_cc==0 pre-boot sync: the
@@ -737,6 +741,11 @@ impl Audio {
         self.channel2.set_len_cc(lcc);
         self.channel3.set_len_cc(lcc);
         self.channel4.set_len_cc(lcc);
+        // Fire expiries at the overlay cc, mirroring the read side. Today the
+        // delta is always 0 (timer WRITE_CC_OFF = 0) so this is a no-op; it is
+        // here so a retuned write-cc offset can't silently skip an expiry the
+        // read overlay would have fired.
+        self.fire_length_events(lcc);
     }
 
     /// Restore the steady-state length cc after a write overlay, so a later
@@ -986,12 +995,13 @@ impl Audio {
         (left_mix / 4.0, right_mix / 4.0)
     }
 
-    pub fn generate_samples(&mut self, _mmio: &mut mmio::Mmio, cpu_cycles: u32) -> Vec<(f32, f32)> {
+    pub fn generate_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
         let mut samples = Vec::new();
 
-        // Channels are advanced per-dot via `step` (called from the Bus tick),
-        // so here we only down-sample the live mixer output. Re-stepping here
-        // would double-advance the channel timers and corrupt their phase.
+        // Channels are caught up lazily via `sync_cc` (the caller syncs the
+        // APU to the current cc first), so here we only down-sample the live
+        // mixer output. Re-advancing here would double-advance the channel
+        // timers and corrupt their phase.
         // The divisor is the machine's own clock (an SGB1's is the host SNES's
         // / 5), so a fixed 70224-dot frame yields fewer host samples and every
         // tone comes out at `cpu_hz / period` — pitched up 2.4% on an NTSC SGB1.
