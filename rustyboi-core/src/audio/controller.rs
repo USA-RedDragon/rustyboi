@@ -1785,4 +1785,146 @@ mod tests {
             distinct.len()
         );
     }
+
+    /// An APU whose mixed output is a pure DC bias of +0.25 per side.
+    ///
+    /// Channel 1's DAC is powered (NR12 volume 15) but the channel is never
+    /// triggered, so it feeds its live DAC a digital 0 and parks at analog +1
+    /// (Pan Docs, Audio details: a deactivated channel with a live DAC sits at
+    /// the positive rail, not at silence). NR51 routes it to both sides and
+    /// NR50 is at full master volume, so `mix_stereo` emits a constant
+    /// `1.0 * 8/8 / 4` = +0.25 — exactly the offset the output high-pass exists
+    /// to remove.
+    ///
+    /// The analog model is set directly rather than via `Hardware`, to isolate
+    /// the filter from boot behaviour; `analog::tests::
+    /// every_hardware_model_maps_to_its_analog_stage` pins the other half of
+    /// that chain.
+    fn dc_biased_apu(model: analog::AnalogModel) -> (Audio, u64) {
+        let mut audio = Audio::new();
+        audio.set_boot_cgb(true);
+        audio.set_analog_model(model);
+        sync(&mut audio, 0);
+        sync(&mut audio, 100);
+        audio.write(NR52, 0x80);
+        audio.write(NR51, 0xFF);
+        audio.write(NR50, 0x77);
+        audio.write(NR12, 0xF0);
+        (audio, 100)
+    }
+
+    /// Exactly `n` host samples (left side) pulled through the real output
+    /// path, advancing the APU clock in step with the sample generator.
+    fn emit_samples(audio: &mut Audio, abs: &mut u64, n: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(n);
+        while out.len() < n {
+            *abs += 128;
+            sync(audio, *abs);
+            out.extend(audio.generate_samples(128).into_iter().map(|(l, _)| l));
+        }
+        out.truncate(n);
+        out
+    }
+
+    /// The output high-pass must be wired INTO `analog_sample`, with the right
+    /// model's charge factor.
+    ///
+    /// `AnalogStage::high_pass` has its own unit test, but that test exercises
+    /// the function in isolation and passes with the filter unplugged from the
+    /// sample path. The only test that caught the disconnection was the
+    /// ROM-gated Pokémon drumroll regression, which skips silently wherever the
+    /// ROM is absent — so on most machines the entire filter could be removed
+    /// from the output path with the suite still green. This drives the real
+    /// path instead, with a DC bias the filter is obliged to remove.
+    ///
+    /// The bias decays as `charge^n`, and the two published factors are far
+    /// enough apart to identify WHICH one is applied: 0.996 per sample on DMG
+    /// against 0.9043 on CGB (blargg's per-cycle values raised to
+    /// 4194304/44100). The mean of `0.25 * charge^n` over the first 400 samples
+    /// is therefore 0.125 on DMG but 0.0065 on CGB, a 19x gap — so swapping the
+    /// two factors fails this test rather than merely re-tuning it. DMG's own
+    /// convergence is then asserted over a longer window, so "DMG is slow"
+    /// cannot be satisfied by the filter not running at all.
+    #[test]
+    fn output_high_pass_is_applied_in_the_sample_path() {
+        let (mut cgb, mut cgb_abs) = dc_biased_apu(analog::AnalogModel::CgbMgb);
+        let cgb_out = emit_samples(&mut cgb, &mut cgb_abs, 400);
+        let (mut dmg, mut dmg_abs) = dc_biased_apu(analog::AnalogModel::Dmg);
+        let dmg_out = emit_samples(&mut dmg, &mut dmg_abs, 4000);
+
+        // The bias really is the +0.25 the rest of the test reasons about: the
+        // first sample is taken before the capacitor has charged at all.
+        assert!((cgb_out[0] - 0.25).abs() < 1e-6, "DC bias was {}", cgb_out[0]);
+        assert!((dmg_out[0] - 0.25).abs() < 1e-6, "DC bias was {}", dmg_out[0]);
+
+        let mean = |s: &[f32]| s.iter().sum::<f32>() / s.len() as f32;
+        let cgb_mean = mean(&cgb_out);
+        let dmg_mean = mean(&dmg_out[..400]);
+
+        // Measured 0.0065. An unplugged high-pass parks this at the full 0.25;
+        // the DMG factor applied here leaves 0.125.
+        assert!(
+            cgb_mean < 0.02,
+            "the CGB high-pass did not remove the DC bias (mean over 400 = \
+             {cgb_mean}) -- either it is not in the output path, or the DMG \
+             factor is being applied to a CGB"
+        );
+        // Measured 0.125: DMG must NOT have converged on CGB's timescale.
+        assert!(
+            dmg_mean > 0.08,
+            "the DMG high-pass converged like a CGB (mean over 400 = \
+             {dmg_mean}) -- the two charge factors look swapped"
+        );
+        // Measured 1.9e-6: but it must still converge on its own timescale.
+        assert!(
+            dmg_out[3999].abs() < 1e-4,
+            "the DMG high-pass never removed the bias ({}) -- a 'slow' filter \
+             must still be a filter",
+            dmg_out[3999]
+        );
+    }
+
+    /// The DAC-off fade must be wired INTO `analog_sample`.
+    ///
+    /// Same failure mode as the high-pass above, and worse: with
+    /// `AnalogStage::fade` unplugged at its call site the entire core suite
+    /// stays green, the ROM-gated tests included, so nothing at all noticed.
+    ///
+    /// The observable is continuity. A DAC that loses power coasts from
+    /// wherever its node was left toward 0 (Pan Docs: it "fades to an analog
+    /// value of 0"); it does not step there. With the fade in the path the
+    /// mixer input creeps down by `1 - charge` per sample and the emitted
+    /// stream moves at most ~0.0014 per sample. Without it the input drops the
+    /// whole 0.25 bias in one sample, and the high-pass — which passes exactly
+    /// that kind of fast transient — hands it to the speaker as a 0.25
+    /// discontinuity, 179x larger. DMG is used because its gentle filter leaves
+    /// a real pre-off level to fade down FROM.
+    #[test]
+    fn dac_off_fade_is_applied_in_the_sample_path() {
+        let (mut audio, mut abs) = dc_biased_apu(analog::AnalogModel::Dmg);
+        let pre = emit_samples(&mut audio, &mut abs, 400);
+        let pre_off = pre[399];
+        assert!(pre_off > 0.02, "nothing left to fade from ({pre_off})");
+
+        audio.write(NR12, 0x00); // unpower channel 1's DAC mid-tone
+        let post = emit_samples(&mut audio, &mut abs, 4000);
+
+        let mut prev = pre_off;
+        let mut max_step = 0.0f32;
+        for &s in &post {
+            max_step = max_step.max((s - prev).abs());
+            prev = s;
+        }
+        // Measured 0.0014 with the fade, 0.2504 without it.
+        assert!(
+            max_step < 0.01,
+            "the output stepped by {max_step} at DAC-off -- the fade is not in \
+             the output path (a bypassed fade steps by the full 0.25 bias)"
+        );
+        assert!(
+            post[3999].abs() < 1e-4,
+            "the unpowered DAC never coasted to 0 ({})",
+            post[3999]
+        );
+    }
 }
