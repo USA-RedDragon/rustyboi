@@ -796,6 +796,7 @@ fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
         | UiAction::StepFrames(_)
         | UiAction::SetBreakpoint(_)
         | UiAction::RemoveBreakpoint(_)
+        | UiAction::ClearBreakpoints
         | UiAction::LoadBootRom(_) => {}
 
         // Everything else is pure session state the worker applies. Post the

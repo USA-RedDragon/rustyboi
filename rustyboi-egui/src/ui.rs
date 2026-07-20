@@ -1747,15 +1747,12 @@ impl Gui {
                     ui.label("Active Breakpoints:");
                     ui.separator();
 
-                    let breakpoints: Vec<u16> = snap.breakpoints.clone();
+                    let mut breakpoints: Vec<u16> = snap.breakpoints.clone();
                     if breakpoints.is_empty() {
                         ui.label("No breakpoints set");
                     } else {
-                        // Sort breakpoints for consistent display
-                        let mut sorted_breakpoints = breakpoints.clone();
-                        sorted_breakpoints.sort();
-
-                        for &address in &sorted_breakpoints {
+                        breakpoints.sort();
+                        for &address in &breakpoints {
                             ui.horizontal(|ui| {
                                 ui.monospace(format!("{:04X}", address));
                                 if ui.small_button("✕").clicked() {
@@ -1766,11 +1763,7 @@ impl Gui {
 
                         ui.separator();
                         if ui.button("Clear All").clicked() {
-                            // Remove all breakpoints by sending individual remove actions
-                            // We'll handle this in the main loop
-                            for &address in &breakpoints {
-                                *action = Some(GuiAction::RemoveBreakpoint(address));
-                            }
+                            *action = Some(GuiAction::ClearBreakpoints);
                         }
                     }
 

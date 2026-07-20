@@ -1761,6 +1761,10 @@ impl GB {
         self.breakpoints.remove(&address);
     }
 
+    pub fn clear_breakpoints(&mut self) {
+        self.breakpoints.clear();
+    }
+
     pub fn get_breakpoints(&self) -> &HashSet<u16> {
         &self.breakpoints
     }
