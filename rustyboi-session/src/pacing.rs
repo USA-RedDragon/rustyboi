@@ -32,7 +32,7 @@
 pub const DOTS_PER_FRAME: f64 = 70_224.0;
 
 /// The host output rate every audio backend consumes.
-pub const HOST_SAMPLE_RATE: f64 = 44_100.0;
+pub(crate) const HOST_SAMPLE_RATE: f64 = 44_100.0;
 
 /// Exact emulated frame rate for DMG-rate hardware: 70224 dots at 4.194304 MHz.
 /// Every model but the SGB1 runs at this rate; see [`nominal_fps`] for the
@@ -40,12 +40,14 @@ pub const HOST_SAMPLE_RATE: f64 = 44_100.0;
 pub const NOMINAL_FPS: f64 = 4_194_304.0 / DOTS_PER_FRAME;
 
 /// Exact stereo sample pairs per emulated frame at DMG rate.
-pub const SAMPLES_PER_FRAME_F64: f64 = HOST_SAMPLE_RATE / NOMINAL_FPS;
+// No user left after the visibility narrowing; kept pending triage.
+#[allow(dead_code)]
+pub(crate) const SAMPLES_PER_FRAME_F64: f64 = HOST_SAMPLE_RATE / NOMINAL_FPS;
 
 /// Emulated frames per real second for a machine clocked at `cpu_hz`. An NTSC
 /// SGB1 (4 295 454 Hz — the host SNES's clock / 5) presents ~61.17 fps, which
 /// is exactly where its characteristic stutter on a 60 Hz display comes from.
-pub fn nominal_fps(cpu_hz: u32) -> f64 {
+pub(crate) fn nominal_fps(cpu_hz: u32) -> f64 {
     f64::from(cpu_hz) / DOTS_PER_FRAME
 }
 
@@ -57,7 +59,7 @@ pub fn nominal_fps(cpu_hz: u32) -> f64 {
 /// frames per second, whose product is exactly 44 100 pairs/second on **every**
 /// model. Change one without the other and the host output rate drifts off
 /// 44.1 kHz.
-pub fn samples_per_frame(cpu_hz: u32) -> f64 {
+pub(crate) fn samples_per_frame(cpu_hz: u32) -> f64 {
     HOST_SAMPLE_RATE / nominal_fps(cpu_hz)
 }
 

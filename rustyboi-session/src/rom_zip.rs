@@ -12,7 +12,7 @@ use std::io::{Cursor, Read};
 /// else the largest file); otherwise return `bytes` unchanged. A malformed or
 /// unsupported archive falls back to the raw bytes so the cartridge loader
 /// surfaces the error.
-pub fn extract_rom(bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn extract_rom(bytes: &[u8]) -> Vec<u8> {
     if bytes.len() < 4 || &bytes[..4] != b"PK\x03\x04" {
         return bytes.to_vec();
     }

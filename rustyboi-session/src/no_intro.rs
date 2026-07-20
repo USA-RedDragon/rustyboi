@@ -32,7 +32,7 @@ const DAT_FILES: [&str; 2] = ["Nintendo - Game Boy.dat", "Nintendo - Game Boy Co
 
 /// The two percent-encoded DAT URLs to download, in order. The frontend GETs each
 /// (caching the body) and feeds the bodies back through [`load_dats`].
-pub fn dat_urls() -> Vec<String> {
+pub(crate) fn dat_urls() -> Vec<String> {
     DAT_FILES
         .iter()
         .map(|f| format!("{DAT_BASE}{}", crate::cheat_db::percent_encode(f)))
@@ -44,7 +44,7 @@ pub fn dat_urls() -> Vec<String> {
 /// The DAT is clrmamepro text: each `game (...)` block has a `\tname "NAME"` line
 /// and a later `rom ( … crc XXXXXXXX … )` line. A tab-anchored `name "…"` sets the
 /// pending name; the next 8-hex `crc` pairs with it and clears the pending name.
-pub fn parse_dat(text: &str) -> Vec<(u32, String)> {
+pub(crate) fn parse_dat(text: &str) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     let mut pending: Option<String> = None;
     for line in text.lines() {
@@ -111,7 +111,9 @@ pub fn load_dats(bodies: &[String]) {
 
 /// Replace the runtime index outright with `entries` (sorted by crc here). Mainly
 /// for tests / callers that already hold parsed pairs; frontends use [`load_dats`].
-pub fn set_index(mut entries: Vec<(u32, String)>) {
+// No caller left after the visibility narrowing; kept pending triage.
+#[allow(dead_code)]
+pub(crate) fn set_index(mut entries: Vec<(u32, String)>) {
     entries.sort_by_key(|(c, _)| *c);
     entries.dedup_by_key(|(c, _)| *c);
     *INDEX.write().expect("no_intro index poisoned") = entries;
@@ -134,7 +136,7 @@ pub fn identify(rom: &[u8]) -> Option<String> {
 /// isn't in the No-Intro index. Stops at the first NUL or non-printable byte, so
 /// it also handles CGB carts whose title region is shorter (the CGB flag / a
 /// manufacturer code terminates it).
-pub fn header_title(rom: &[u8]) -> Option<String> {
+pub(crate) fn header_title(rom: &[u8]) -> Option<String> {
     let raw = rom.get(0x134..0x144)?;
     let end = raw
         .iter()
@@ -146,7 +148,7 @@ pub fn header_title(rom: &[u8]) -> Option<String> {
 
 /// A human-readable game name for `rom`: the canonical No-Intro name if known,
 /// else the cartridge header title, else `None`.
-pub fn resolve_game_name(rom: &[u8]) -> Option<String> {
+pub(crate) fn resolve_game_name(rom: &[u8]) -> Option<String> {
     identify(rom).or_else(|| header_title(rom))
 }
 
