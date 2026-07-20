@@ -224,6 +224,19 @@ mod or_mask {
     pub(super) const FF75: u8 = 0x8F; // FF75: only bits 4-6 R/W
 }
 
+/// Source-region classification of the active OAM DMA, as decoded from the
+/// FF46 source-high byte. Drives the per-region bus-conflict rules.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DmaSrcKind {
+    Rom,
+    Sram,
+    Vram,
+    Wram,
+    /// CGB-only: source E000-FFFF drives the external bus with the RAM chip
+    /// select asserted, so only the cartridge answers.
+    ExternalBus,
+}
+
 /// CGB HDMA halt-state machine
 /// Captured at HALT and consulted on unhalt to decide whether the next
 /// Mode 0 should immediately fire an HDMA block.
@@ -3503,14 +3516,16 @@ impl Mmio {
             // real_gbc.sav rows E0-FF read the A000-BFFF fill: E0->A0..FF->BF),
             // a strict board leaves the bus floating 0xFF (the
             // srcE000_readFE00 cgb04c capture, RAMG on).
-            4 => {
+            DmaSrcKind::ExternalBus => {
                 let src = self.dma_source_base.wrapping_add(pos as u16);
                 match &self.cartridge {
                     Some(cart) => cart.dma_sram_bus_read(src),
                     None => 0xFF,
                 }
             }
-            3 => self.dma_conflict_wram_read(self.dma_source_base.wrapping_add(pos as u16)),
+            DmaSrcKind::Wram => {
+                self.dma_conflict_wram_read(self.dma_source_base.wrapping_add(pos as u16))
+            },
             _ => self.read_during_dma(self.dma_source_base.wrapping_add(pos as u16)),
         }
     }
@@ -3538,14 +3553,14 @@ impl Mmio {
     /// OAM-DMA. The AND-with-fetcher model is from real-silicon .dump captures.
     fn dma_vram_conflict_or_source_byte(&mut self, pos: u8) -> u8 {
         let dma_addr = self.dma_source_base.wrapping_add(pos as u16);
-        if self.dma_src_kind() != 2 || !self.fetcher_bus_locked {
+        if self.dma_src_kind() != DmaSrcKind::Vram || !self.fetcher_bus_locked {
             // DMG mode-2 fetcher-prefetch onset: one M-cycle before the mode-3
             // lock, the fetcher already drives the first tile-NUMBER (tilemap)
             // address, so a VRAM-source DMA read here conflicts as the
             // address-line AND `VRAM[dma_addr & tilemap0]`. Only the LAST mode-2
             // M-cycle (`dmg_prefetch_active`, still unlocked) takes this; the
             // following first locked M-cycle is the warmup (clean) byte.
-            if self.dma_src_kind() == 2
+            if self.dma_src_kind() == DmaSrcKind::Vram
                 && !self.cgb_features_enabled
                 && self.dmg_prefetch_active
             {
@@ -4587,22 +4602,22 @@ impl Mmio {
         false
     }
 
-    /// Source-region classification of the active OAM DMA: 0=rom 1=sram 2=vram 3=wram
-    /// 4=external-bus E000+ (CGB hardware only; see `dma_source_byte`).
+    /// Source-region classification of the active OAM DMA. `ExternalBus` is
+    /// CGB hardware only (see `dma_source_byte`).
     /// Bus topology is a *hardware* property, not a
     /// DMG-compat one: a DMG cart on CGB still has internal WRAM and the CGB
     /// external-bus decode (AntonioND dma_valid_sources_dmg_mode real_gbc.sav
     /// rows C0-FF match the native-CGB grid, not the DMG one).
-    fn dma_src_kind(&self) -> u8 {
+    fn dma_src_kind(&self) -> DmaSrcKind {
         let cgb = self.is_cgb();
         let src_high = (self.dma_source_base >> 8) as u8;
         let wram_top: u16 = if cgb { 0xE0 } else { 0x100 };
         if src_high < 0xA0 {
-            if src_high < 0x80 { 0 } else { 2 }
+            if src_high < 0x80 { DmaSrcKind::Rom } else { DmaSrcKind::Vram }
         } else if (src_high as u16) < wram_top {
-            if src_high < 0xC0 { 1 } else { 3 }
+            if src_high < 0xC0 { DmaSrcKind::Sram } else { DmaSrcKind::Wram }
         } else {
-            4
+            DmaSrcKind::ExternalBus
         }
     }
 
@@ -4675,9 +4690,9 @@ impl Mmio {
         if self.is_cgb() {
             if addr < WRAM_START {
                 // rom/sram/vram source: OAM latches the CPU byte (0 for vram).
-                let byte = if self.dma_src_kind() == 2 { 0 } else { value };
+                let byte = if self.dma_src_kind() == DmaSrcKind::Vram { 0 } else { value };
                 self.oam.write(OAM_START + pos, byte);
-            } else if self.dma_src_kind() != 3 {
+            } else if self.dma_src_kind() != DmaSrcKind::Wram {
                 // WRAM region with a non-WRAM source: the write still reaches
                 // WRAM, but on the bank slot chosen by the DMA source-high bit,
                 // not the CPU's SVBK selection.
@@ -4687,7 +4702,7 @@ impl Mmio {
         } else {
             // DMG: OAM latches the CPU byte; a WRAM source ANDs with the byte
             // the DMA already placed (bus conflict).
-            let byte = if self.dma_src_kind() == 3 {
+            let byte = if self.dma_src_kind() == DmaSrcKind::Wram {
                 self.oam.read(OAM_START + pos) & value
             } else {
                 value
@@ -4713,14 +4728,14 @@ impl Mmio {
         // VRAM-source zeroing are silicon bus behaviors, active in DMG-compat
         // too (AntonioND dma_valid_sources_dmg_mode real_gbc.sav probes D0/E8/
         // F8/FC/FD during E-src DMA read the area-routed WRAM quirk bytes).
-        if self.is_cgb() && self.dma_src_kind() != 3 && addr >= WRAM_START {
+        if self.is_cgb() && self.dma_src_kind() != DmaSrcKind::Wram && addr >= WRAM_START {
             return self.dma_conflict_wram_read(addr);
         }
         let byte = self.oam.read(OAM_START + self.dma_pos as u16);
         // CGB with a VRAM source: the conflict read returns OAM[pos] but then
         // zeroes that OAM byte. Defer the zero to
         // the next DMA advance so the &self read path can record it.
-        if self.is_cgb() && self.dma_src_kind() == 2 {
+        if self.is_cgb() && self.dma_src_kind() == DmaSrcKind::Vram {
             self.pending_oam_zero.set(self.dma_pos as i16);
         }
         byte
@@ -4739,10 +4754,10 @@ impl Mmio {
 
         // Per-block conflict masks (bit n set => 4KB block n conflicts).
         let mask: u16 = match src {
-            0 | 1 => 0xFCFF,
-            2 => 0x0300,
-            3 => if cgb { 0xF000 } else { 0xFCFF },
-            _ => if cgb { 0xFCFF } else { 0x0000 },
+            DmaSrcKind::Rom | DmaSrcKind::Sram => 0xFCFF,
+            DmaSrcKind::Vram => 0x0300,
+            DmaSrcKind::Wram => if cgb { 0xF000 } else { 0xFCFF },
+            DmaSrcKind::ExternalBus => if cgb { 0xFCFF } else { 0x0000 },
         };
         (mask >> (addr >> 12)) & 1 != 0
     }
