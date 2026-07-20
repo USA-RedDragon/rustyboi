@@ -6205,6 +6205,17 @@ impl Ppu {
         if mmio.is_cgb() {
             // CGB-D/E samples the BG palette one dot earlier than CGB-C: CGB-E
             // takes the DMG 1-dot latency while CGB-B/C keep 2.
+            //
+            // AGB lands on the CGB-B/C side because the bare `is_cgb_de()` is
+            // false for it. That placement is INHERITED, not measured: BGP
+            // latency is outside the four families `Mmio::set_cgb_de` documents
+            // as deliberate (LY-153 window, end-of-vblank STAT, OAM read
+            // windows, speed-switch TIMA edge), and NO AGB-graded oracle covers
+            // palette latency anywhere (mealybug m3_bgp_change is dmg/cgb only,
+            // age m3-bg-bgp tops out at cgbe, and no AGB reference capture
+            // exists). Queued for the bench; if AGB turns out to track D/E this
+            // becomes `is_agb() || is_cgb_de()`, as the FF41 coincidence
+            // tail-hold already spells out.
             let base = if mmio.is_cgb_de() {
                 BGP_LATENCY_DMG
             } else {
@@ -11037,13 +11048,26 @@ impl Ppu {
                     // unconditionally; CGB-D/E only when the accumulated sub-dot parity
                     // lands the read ON the boundary (odd non-mode-3 phase `par1` OR odd
                     // total switch parity `total_par1`) — else it reads the stale `ly`.
+                    //
+                    // BOTH `is_cgb_de()` arms of this fold (here and the
+                    // steady-state fork below) put AGB on the CGB-C side by
+                    // INHERITANCE from the bare predicate, not by measurement:
+                    // the LY-glitch fold is outside the four families
+                    // `Mmio::set_cgb_de` documents as deliberate, and no
+                    // AGB-graded oracle covers it. The evidence may already be on
+                    // disk though — gbc-hw-tests ships real-silicon AGB captures
+                    // (lcd/last_ly_ly_change/real_gba{,_sp}.sav,
+                    // lcd/last_ly_clocks/real_gba_sp.sav,
+                    // cpu/corrupted_stop/real_gba_sp.sav) that the manifest
+                    // deliberately leaves ungraded. Queued for the bench.
                     if !mmio.is_cgb_de() || par1 || total_par1 {
                         ly_reg & (ly_reg + 1)
                     } else {
                         ly_reg
                     }
                 } else if mmio.is_cgb_de() {
-                    // CGB-D/E does NOT fold: it reads the stale pre-increment `ly`.
+                    // CGB-D/E does NOT fold: it reads the stale pre-increment
+                    // `ly`. AGB inherits the folding C-side path — see above.
                     ly_reg
                 } else {
                     // Steady-state glitch dot: partial-latch fold `ly & (ly+1)`.

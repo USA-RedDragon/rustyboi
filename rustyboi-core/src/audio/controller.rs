@@ -829,10 +829,6 @@ impl Audio {
         self.channel4.set_cgb(cgb);
     }
 
-    /// Seed the CGB-D/E APU revision gate (model newer than CGB-C)
-    /// into the revision-forked units: the square duty-trigger DS delay pair
-    /// (psg_reset lf seed + DS delay formula) and the ch4 divisor-0 DS
-    /// countdown. Called once from `GB::new` for Hardware::CGBE.
     /// Set the machine's real-time CPU clock, which fixes how many dots make one
     /// 44.1 kHz host sample. Affects only the downsample ratio in
     /// `generate_samples` — no channel timer, length counter, or frame-sequencer
@@ -846,6 +842,11 @@ impl Audio {
         self.cycles_per_sample
     }
 
+    /// Seed the CGB-D/E APU revision gate (model newer than CGB-C) into the
+    /// revision-forked units: the square duty-trigger DS delay pair (psg_reset
+    /// lf seed + DS delay formula) and the ch4 divisor-0 DS countdown. Called
+    /// once from `GB::new` for Hardware::CGBE — so `de` is true for CGBE ALONE.
+    /// AGB stays on the C side here; see `Mmio::set_cgb_de`.
     pub(crate) fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
         self.channel1.set_cgb_de(de);

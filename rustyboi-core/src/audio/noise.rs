@@ -108,9 +108,11 @@ pub(super) struct Noise {
     // <=CGB-C divisor-0 even-alignment DS trigger-countdown +2 (see nr44).
     #[serde(default)]
     cgb_de: bool,
-    // AGB (GBA-in-GBC-mode) hardware flag. Only gates the NRx2 zombie
-    // transform, where AGB sides with CGB-D/E (single application) even though
-    // `cgb_de` is false for it (see `nrx2_glitch`). Not serialized: re-seeded
+    // AGB (GBA-in-GBC-mode) hardware flag. Gates the NRx2 zombie transform,
+    // where AGB sides with CGB-D/E (single application) even though `cgb_de` is
+    // false for it (see `nrx2_glitch`); also appears — deliberately redundantly —
+    // in the divisor-0 DS trigger countdown, to spell out that AGB sides with
+    // CGB-C there instead (see `nr44`). Not serialized: re-seeded
     // from the state's `hardware` identity by `Mmio::reseed_hardware_flags`,
     // so adding it leaves the savestate layout untouched.
     #[serde(skip)]
@@ -478,13 +480,28 @@ impl Noise {
             } else if (divisor > 1 && !self.ds) || (divisor == 1 && self.enabled && (self.nr43 & 0xF0) == 0) {
                 countdown -= 4;
             }
-        } else if self.ds && !self.cgb_de {
+        } else if self.ds && (self.agb || !self.cgb_de) {
             // divisor 0, even alignment, double speed: the hardware oracle adds
             // 2 here on model <= CGB_C; CGB-D/E hardware does not (SameSuite
             // channel_4_align \2-even rows pin the shorter countdown on its
             // CPU-CGB-E silicon — that suite runs under Hardware::CGBE. No
             // cgb04c capture reaches this path, so the C-side +2 is
             // pinned by the revision gate alone).
+            //
+            // AGB TAKES THE +2. `self.agb` is logically redundant (`cgb_de` is
+            // false for AGB, so `!cgb_de` already covers it) and is spelled out
+            // anyway so the placement is READ here rather than deduced from
+            // `is_cgb_d_or_later` — do not simplify it away. It follows the
+            // house convention that keeps AGB on the C side (`is_cgb_d_or_later`,
+            // gb.rs, pinned to the AGB reference oracle) and NOT SameBoy's model
+            // order, which places AGB_A above CGB_E and would hand AGB the
+            // shorter D/E countdown. `nrx2_glitch` (envelope.rs) is the case
+            // that follows SameBoy instead, and says so with `(cgb_de || agb)`.
+            //
+            // The cell is UNPINNED IN BOTH DIRECTIONS: no AGB channel-4 oracle
+            // exists in the corpus — the only rev=agb APU row is
+            // channel_1_freq_change_timing-A (ch1), and gb-test-roms ships no
+            // AGB channel-4 ROM at all. Queued for the hardware bench.
             countdown += 2;
         }
 
