@@ -934,6 +934,11 @@ impl Audio {
         self.channel3.pcm_nibble() | (ch4 << 4)
     }
 
+    /// The four GB channels mixed to stereo. On an SGB this is still the whole
+    /// output: the SGB's own effects come from the SNES APU, which is decoded
+    /// but not synthesised ([`crate::sgb::SgbSound`]); adding them later means
+    /// summing into this stream here or at a downstream sink, with no change to
+    /// the channels below.
     pub fn get_mixed_output(&self) -> (f32, f32) {
         if !self.audio_enabled {
             return (0.0, 0.0);
