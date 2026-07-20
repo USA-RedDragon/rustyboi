@@ -1153,6 +1153,56 @@ impl Session {
         &self.config.input
     }
 
+    /// The full UI read-model for the menus, assembled from the session's own
+    /// accessors.
+    ///
+    /// This is the *only* producer of [`SessionUiState`]: frontends call it and
+    /// override only fields the host owns (the web worker tracks `has_rom`
+    /// itself, since its ROM bytes arrive over the worker boundary). Both
+    /// windowed frontends used to hand-copy all 35 fields, which had already
+    /// drifted — desktop read `config.volume` raw where web read the clamped
+    /// `volume()`.
+    pub fn ui_state(&self) -> crate::action::SessionUiState {
+        let cfg = &self.config;
+        crate::action::SessionUiState {
+            hardware: self.hardware_choice(),
+            palette: self.palette(),
+            gbc_dmg_palette: self.gbc_dmg_palette(),
+            dmg_palette_active: self.dmg_palette_active(),
+            sgb_palette: self.sgb_palette(),
+            sgb_palette_active: self.sgb_palette_active(),
+            color_correction: self.color_correction(),
+            use_real_boot_rom: self.use_real_boot_rom(),
+            texture_filter: self.texture_filter(),
+            lcd_effect: self.lcd_effect(),
+            printer_scale: self.printer_scale(),
+            touch_opacity: self.touch_opacity(),
+            rewind_enabled: cfg.rewind.enabled,
+            rewind_interval_frames: cfg.rewind.interval_frames,
+            rewind_depth: cfg.rewind.depth,
+            volume: self.volume(),
+            scaling: self.scaling_mode(),
+            graphics_backend: self.graphics_backend(),
+            sgb_border: self.sgb_border(),
+            paused: self.is_paused(),
+            fast_forward: self.is_fast_forward(),
+            fast_forward_factor: self.fast_forward_factor(),
+            touch_controls: self.touch_controls(),
+            show_fps: self.show_fps(),
+            printer_attached: self.gb().printer_attached(),
+            recording: self.is_recording(),
+            replaying: self.is_playing(),
+            slots: self.list_slots(),
+            cheats: self.cheats().map(str::to_owned).collect(),
+            fetched_cheats: self.fetched_cheats().to_vec(),
+            has_battery: self.has_battery(),
+            has_rtc: self.has_rtc(),
+            has_rom: self.gb().has_rom(),
+            game_name: self.game_name().map(str::to_owned),
+            input: self.input_config().clone(),
+        }
+    }
+
     fn persist_config(&mut self) {
         if let Err(e) = self.save_config() {
             log_config_error(&e);

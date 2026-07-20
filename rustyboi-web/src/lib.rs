@@ -584,46 +584,16 @@ impl Emulator {
     }
 
     /// Assemble the shared [`SessionUiState`] view from the session.
+    ///
+    /// The session produces every field (including `graphics_backend`, which is
+    /// surfaced for menu consistency even though the browser picks the actual
+    /// WebGPU/WebGL backend); the worker owns only `has_rom`, since its ROM
+    /// bytes arrive over the worker boundary rather than through a cartridge
+    /// the session loaded itself.
     fn session_ui_state(&self) -> SessionUiState {
-        SessionUiState {
-            hardware: self.session.hardware_choice(),
-            palette: self.session.palette(),
-            gbc_dmg_palette: self.session.gbc_dmg_palette(),
-            dmg_palette_active: self.session.dmg_palette_active(),
-            sgb_palette: self.session.sgb_palette(),
-            sgb_palette_active: self.session.sgb_palette_active(),
-            color_correction: self.session.color_correction(),
-            use_real_boot_rom: self.session.use_real_boot_rom(),
-            texture_filter: self.session.texture_filter(),
-            lcd_effect: self.session.lcd_effect(),
-            printer_scale: self.session.printer_scale(),
-            touch_opacity: self.session.touch_opacity(),
-            rewind_enabled: self.session.config().rewind.enabled,
-            rewind_interval_frames: self.session.config().rewind.interval_frames,
-            rewind_depth: self.session.config().rewind.depth,
-            volume: self.session.volume(),
-            scaling: self.session.scaling_mode(),
-            // Surfaced for menu consistency; the browser picks the actual
-            // backend (WebGPU/WebGL), so the choice has no effect on web.
-            graphics_backend: self.session.graphics_backend(),
-            sgb_border: self.session.sgb_border(),
-            paused: self.session.is_paused(),
-            fast_forward: self.session.is_fast_forward(),
-            fast_forward_factor: self.session.fast_forward_factor(),
-            touch_controls: self.session.touch_controls(),
-            show_fps: self.session.show_fps(),
-            printer_attached: self.session.gb().printer_attached(),
-            recording: self.session.is_recording(),
-            replaying: self.session.is_playing(),
-            slots: self.session.list_slots(),
-            cheats: self.session.cheats().map(str::to_owned).collect(),
-            fetched_cheats: self.session.fetched_cheats().to_vec(),
-            has_battery: self.session.has_battery(),
-            has_rtc: self.session.has_rtc(),
-            has_rom: self.has_rom,
-            game_name: self.session.game_name().map(str::to_owned),
-            input: self.session.input_config().clone(),
-        }
+        let mut state = self.session.ui_state();
+        state.has_rom = self.has_rom;
+        state
     }
 
     /// The current hardware model as a lowercase string ("dmg" / "cgb").
