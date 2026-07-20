@@ -1492,19 +1492,22 @@ impl Mmio {
     }
 
     /// Hand the Rocket-Games mapper the Nintendo logo from the loaded boot ROM
-    /// (DMG offset 0xA8, CGB 0x42) so its locked-CGB phase can satisfy a running
-    /// boot ROM's logo check without any logo bytes being embedded in rustyboi.
+    /// so its locked-CGB phase can satisfy a running boot ROM's logo check
+    /// without any logo bytes being embedded in rustyboi.
+    ///
+    /// The offset is *located* (`cartridge::find_logo_in_boot_rom`), not assumed
+    /// from the image length: DMG0 keeps its copy at $CB rather than the $A8 of
+    /// DMG/MGB and is the same 256 bytes, and SGB/SGB2 embed no logo at all — a
+    /// length-keyed offset seeded 48 bytes of unrelated boot-ROM code for all
+    /// three. Nothing is seeded when no logo is found, which leaves the mapper
+    /// presenting the cart's own bytes instead of garbage.
+    ///
     /// No-op unless both a boot ROM and a cartridge are present.
     fn seed_rocket_boot_logo(&mut self) {
         let Some(bios) = self.bios.as_ref() else { return };
-        let off = match bios.len() {
-            BIOS_SIZE => 0xA8usize,
-            CGB_BIOS_SIZE => 0x42,
-            _ => return,
-        };
-        let Some(slice) = bios.get(off..off + 48) else { return };
+        let Some(off) = cartridge::find_logo_in_boot_rom(bios) else { return };
         let mut logo = [0u8; 48];
-        logo.copy_from_slice(slice);
+        logo.copy_from_slice(&bios[off..off + 48]);
         if let Some(cart) = self.cartridge.as_mut() {
             cart.set_rocket_boot_logo(logo);
         }

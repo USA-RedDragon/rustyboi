@@ -109,6 +109,10 @@ const POCKET_CAMERA: u8 = 0xFC;
 
 /// Byte sum of the 48-byte Nintendo logo at its usual $0104 location.
 const LOGO_SUM_NINTENDO: u32 = 5446;
+/// Sum of the Nintendo logo's first 24 bytes. Paired with `LOGO_SUM_NINTENDO`
+/// by `find_logo_in_boot_rom` because the 48-byte sum alone is ambiguous: an
+/// unrelated window at $0001 of dmg_boot/mgb_boot also sums to 5446.
+const LOGO_SUM_NINTENDO_HALF: u32 = 1492;
 /// Byte sums of the two Sachen logo variants.
 const LOGO_SUM_SACHEN_A: u32 = 5542;
 const LOGO_SUM_SACHEN_B: u32 = 7484;
@@ -128,6 +132,38 @@ const LOGO_SUM_VF001_LOH: u32 = 4593;
 /// 4593 can never match.
 const VF001_STUB_OFFSET: usize = 0x32FC;
 const VF001_STUB: [u8; 6] = [0x11, 0x80, 0x70, 0x3E, 0x9A, 0x12];
+
+/// Offset of the Nintendo logo inside a boot ROM image, or `None` if the image
+/// carries no copy.
+///
+/// Located by checksum rather than by a per-revision offset table, for two
+/// reasons. The revisions disagree on where they keep it — $A8 on DMG/MGB, $CB
+/// on DMG0, $42 on CGB/AGB — and DMG0 and DMG are both 256 bytes, so image
+/// length cannot tell them apart. SGB/SGB2 embed no logo at all (the SNES side
+/// runs that check), so there is nothing to find and `None` is the answer
+/// rather than 48 bytes of unrelated boot-ROM code.
+///
+/// Matching on checksums keeps rustyboi free of embedded logo bytes, the same
+/// posture `detect_unl_mapper` already takes. A single sum is not selective
+/// enough (see `LOGO_SUM_NINTENDO_HALF`), and an image with more than one
+/// candidate window yields `None` rather than an arbitrary pick.
+pub fn find_logo_in_boot_rom(bios: &[u8]) -> Option<usize> {
+    fn sum(bytes: &[u8]) -> u32 {
+        bytes.iter().map(|&b| u32::from(b)).sum()
+    }
+    let mut found = None;
+    for off in 0..bios.len().saturating_sub(47) {
+        let window = &bios[off..off + 48];
+        if sum(window) != LOGO_SUM_NINTENDO || sum(&window[..24]) != LOGO_SUM_NINTENDO_HALF {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(off);
+    }
+    found
+}
 
 // Lock-phase values shared by the Sachen and Rocket boot state machines
 // (the board powers up locked and unlocks in DMG -> CGB -> unlocked phases).

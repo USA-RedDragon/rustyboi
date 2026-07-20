@@ -28,9 +28,11 @@ use rustyboi_core_lib::cartridge::Cartridge;
 use rustyboi_core_lib::gb::{Hardware, GB};
 
 /// Where each boot ROM revision keeps its copy of the header logo. Offsets
-/// only — no logo bytes live in rustyboi (see `Mmio::seed_rocket_boot_logo`,
-/// which uses the same 0xA8 / 0x42 anchors). `None` means the revision carries
-/// no copy at all and performs no logo check.
+/// only — no logo bytes live in rustyboi. `Mmio::seed_rocket_boot_logo` reaches
+/// the same offsets at runtime by searching the image
+/// (`cartridge::find_logo_in_boot_rom`); this table is the independently
+/// written expectation that pins it. `None` means the revision carries no copy
+/// at all and performs no logo check.
 #[derive(Clone, Copy)]
 enum Logo {
     At(usize),
