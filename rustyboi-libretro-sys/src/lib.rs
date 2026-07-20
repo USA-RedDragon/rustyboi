@@ -99,10 +99,10 @@ pub enum MemoryKind {
     VideoRam,
 }
 
-/// A live RAM region published to the frontend. Built from a slice, so the
-/// consumer never writes a raw pointer; the frontend keeps the pointer for the
-/// content's lifetime (the region must outlive the content — the caller's
-/// contract, satisfied by regions inside the heap-owned machine).
+/// A live RAM region published to the frontend for RetroAchievements / RAM
+/// tools. Holds a raw pointer the frontend dereferences for the whole content
+/// lifetime — long after any Rust borrow could express it, which is why
+/// construction is `unsafe` rather than lifetime-checked.
 pub struct MemoryDescriptor {
     ptr: *mut u8,
     len: usize,
@@ -110,7 +110,18 @@ pub struct MemoryDescriptor {
     kind: MemoryKind,
 }
 impl MemoryDescriptor {
-    pub fn new(region: &mut [u8], start: usize, kind: MemoryKind) -> Self {
+    /// # Safety
+    ///
+    /// `region` must remain allocated, un-moved and valid for reads and writes
+    /// until the content is unloaded — the frontend stores this pointer and
+    /// dereferences it at arbitrary later times, with no borrow to stop it.
+    ///
+    /// Taking `&mut [u8]` is a convenience for length and provenance only; the
+    /// borrow ends when this returns. A region on the stack, in a temporary, or
+    /// in anything that may reallocate (`Vec` growth, a moved `Box` payload)
+    /// is a use-after-free waiting to happen. Regions reached through a
+    /// heap-owned machine that outlives the content are the intended input.
+    pub unsafe fn new(region: &mut [u8], start: usize, kind: MemoryKind) -> Self {
         MemoryDescriptor { ptr: region.as_mut_ptr(), len: region.len(), start, kind }
     }
 }

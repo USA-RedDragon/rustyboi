@@ -449,12 +449,25 @@ fn android_main(app: AndroidApp) {
         }
     }
     raw_log("android_main: run_android returned");
-    // winit 0.29's `EventLoop` can only be built once per process on
-    // Android. If we let `android_main` return normally, GameActivity
-    // keeps the process alive and the next activity launch (e.g.
-    // resuming from Recents) re-enters `android_main`, where
-    // `EventLoopBuilder::build()` then fails. Force-exit the process so
-    // every launch starts from a clean slate.
+    // The one sanctioned `std::process::exit` in the tree (the standing rule is
+    // to exit the loop and let Drop run). It is safe HERE specifically because
+    // `run_android` has already returned: everything it owned — session, audio
+    // stream, surfaces, worker threads — is dropped by this point, so no Drop is
+    // being skipped. Only process teardown is short-circuited, which Rust does
+    // not run destructors for anyway.
+    //
+    // It is necessary because winit still allows exactly one `EventLoop` per
+    // process. Re-verified against winit 0.30.13 (an earlier version of this
+    // comment claimed 0.29 and was stale): `EventLoopBuilder::build` checks a
+    // global `EVENT_LOOP_CREATED: AtomicBool` and returns
+    // `EventLoopError::RecreationAttempt` on the second call — see winit
+    // src/event_loop.rs, `if EVENT_LOOP_CREATED.swap(true, ...)`. GameActivity
+    // keeps the process alive after `android_main` returns, so the next launch
+    // (resuming from Recents) would re-enter here and fail to build a loop.
+    // Exiting guarantees every launch starts in a fresh process.
+    //
+    // Re-check this when bumping winit: if the guard becomes per-loop or the
+    // Android backend gains teardown support, drop the exit and return normally.
     std::process::exit(0);
 }
 
