@@ -16,7 +16,13 @@
 //! fan-out is gallery-only: the manifest that `compare` gates on carries exactly
 //! ONE canonical row per ROM (auto-detected hardware, no audio drain), produced
 //! by a code path byte-identical to a media-free run, so extra hardware/audio
-//! never perturb the regression hashes. When `ffmpeg` is on PATH and screenshots
+//! never perturb the regression hashes. On the SGB models the media pass also
+//! writes a 256x224 border still (`screens/<sha>_sgb_border.webp`): the game's
+//! own border when it uploads one, otherwise the system border LZ-decoded at
+//! runtime from the user's SGB firmware (`sgb1.sfc`/`sgb2.sfc`, resolved out of
+//! `--bios-dir` beside the boot ROMs; absent = no default border, logged once).
+//! Firmware seeds display-only state and is installed by the MEDIA pass only,
+//! never by the manifest pass. When `ffmpeg` is on PATH and screenshots
 //! are enabled, each (ROM,hardware) also streams every frame to an HEVC encoder
 //! with the emulated APU audio muxed in as AAC (`--no-videos` to disable).
 //!
@@ -218,6 +224,12 @@ struct RunCfg {
     /// canonical manifest row is always the auto-detected model regardless of
     /// this set (see `canonical_hardware`).
     hardware: Vec<Hardware>,
+    /// SNES-side SGB firmware images (`sgb1.sfc`/`sgb2.sfc`) for the SGB models
+    /// in `hardware`, read once at startup from the bios dir. Installed by the
+    /// MEDIA pass only (`capture_media`) so a game that never uploads a border
+    /// still gets the machine's own; empty when the dumps aren't provisioned.
+    /// Never touched by `emulate`, so the manifest cannot see it.
+    sgb_firmware: Vec<(Hardware, Arc<Vec<u8>>)>,
     /// CRC32 -> No-Intro game name (auto-fetched DATs). Empty = file stems.
     names: std::collections::HashMap<u32, String>,
 }
@@ -508,6 +520,7 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
         audio_dir,
         audio_map: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         rec_frames,
+        sgb_firmware: load_sgb_firmwares(bios_dir.as_deref(), &hardware),
         hardware,
         names,
     };
@@ -877,7 +890,8 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
                     }
                     // SGB border still (display-only, SGB-only, additional to
                     // the 160x144 poster): a 256x224 bordered frame, written
-                    // only when the game uploaded a border.
+                    // whenever a border exists — the game's own, else the SGB
+                    // firmware's system border.
                     if let Some(rgb) = m.border.as_ref() {
                         write_border_png(dir, &row.rom_sha, rgb);
                     }
@@ -1003,8 +1017,11 @@ struct MediaOut {
     /// model to prove audio drain never perturbs the frame hashes.
     hash_all: u64,
     /// SGB-only: the 256x224 RGB888 border frame (GB screen composited at
-    /// (48,40)) captured at the end of the run, `Some` only when the game
-    /// actually uploaded a border. Display-only; never touches the manifest.
+    /// (48,40)) captured at the end of the run. `Some` whenever A border is
+    /// available — the game's own upload if it sent one, else the SGB
+    /// firmware's system border (when `cfg.sgb_firmware` supplied a dump).
+    /// `None` only on non-SGB hardware, or on SGB with neither source.
+    /// Display-only; never touches the manifest.
     border: Option<Vec<u8>>,
     frames: usize,
     audio_samples: usize,
@@ -1150,6 +1167,16 @@ fn capture_media(
     let mut gb = GB::new(hardware);
     gb.insert(cart);
     gb.skip_bios();
+    // SGB system border: install the user's own SNES-side firmware so a game
+    // that never uploads a border renders on the machine's default one, as real
+    // hardware does. This seeds DISPLAY-ONLY state (border tiles/map/palettes,
+    // read solely by the 256x224 compositor), so the 160x144 frame path — and
+    // therefore every hash this pass produces — is bit-for-bit unaffected. A
+    // game's own CHR_TRN/PCT_TRN overwrites the seed, so its border still wins.
+    // Inert on non-SGB models and when the dump isn't provisioned.
+    if let Some((_, fw)) = cfg.sgb_firmware.iter().find(|(h, _)| *h == hardware) {
+        let _ = gb.load_sgb_firmware_bytes(fw);
+    }
 
     let tag = hw_tag(hardware);
     // Audio is drained only when a video is actually being encoded. Encode temps
@@ -1298,10 +1325,13 @@ fn capture_media(
     }
 
     // SGB border still: after the run the border (uploaded once, static) is
-    // established, so grab the full 256x224 composited frame. `None` when the
-    // game never sent a border (or on non-SGB hardware) — the caller then writes
-    // no border still and that card renders as a normal 160x144 card. This is a
-    // pure non-consuming read: it never perturbs the 160x144 frame path.
+    // established, so grab the full 256x224 composited frame. This resolves to
+    // the game's own border when it sent one, else the firmware's system border
+    // seeded above — the same precedence as hardware. `None` on non-SGB
+    // hardware, or on SGB when the game sent nothing and no firmware dump was
+    // provisioned; the caller then writes no border still and that card renders
+    // as a normal 160x144 card. This is a pure non-consuming read: it never
+    // perturbs the 160x144 frame path.
     let border = (hardware == Hardware::SGB)
         .then(|| gb.sgb_composited_frame())
         .flatten()
@@ -1416,6 +1446,67 @@ fn resolve_bios_path(file: &str, bios_dir: Option<&Path>) -> Option<PathBuf> {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("bios").join(file),
     );
     candidates.into_iter().find(|p| p.exists())
+}
+
+/// SNES-side Super Game Boy firmware image for a model, provisioned alongside
+/// the boot ROMs in the bios dir (`sgb1.sfc` 256 KiB / `sgb2.sfc` 512 KiB).
+/// Only the two SGB models have one; every other model returns None.
+fn sgb_firmware_filename(hw: Hardware) -> Option<&'static str> {
+    match hw {
+        Hardware::SGB => Some("sgb1.sfc"),
+        Hardware::SGB2 => Some("sgb2.sfc"),
+        _ => None,
+    }
+}
+
+/// Read the SGB firmware for every SGB model in the media matrix, resolved
+/// exactly like a boot ROM (`--bios-dir`, then `bios/`, then `../bios/`). The
+/// firmware carries the system border a real Super Game Boy shows for a game
+/// that never uploads one of its own, so loading it is what lets the gallery
+/// render a default border instead of a bare 160x144 card.
+///
+/// Absence is NOT an error (mirrors `capture_bios`): each missing, unreadable
+/// or unrecognised dump is logged ONCE here at startup, and that model simply
+/// keeps the pre-firmware behaviour — a border still only for games that
+/// upload their own. A sweep on a machine with no `bios/` runs unchanged.
+///
+/// No border bytes are ever emitted from source: the artwork is LZ-decoded at
+/// runtime from the user's own firmware image.
+fn load_sgb_firmwares(
+    bios_dir: Option<&Path>,
+    hardware: &[Hardware],
+) -> Vec<(Hardware, Arc<Vec<u8>>)> {
+    let mut out = Vec::new();
+    for &hw in hardware {
+        let Some(file) = sgb_firmware_filename(hw) else { continue };
+        let tag = hw_tag(hw);
+        let Some(path) = resolve_bios_path(file, bios_dir) else {
+            eprintln!(
+                "sweep: no {file} in bios dir; [{tag}] cards show a border only for games that upload one"
+            );
+            continue;
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("sweep: read {}: {e}; [{tag}] default border unavailable", path.display());
+                continue;
+            }
+        };
+        // Identify up front so an unrecognised dump is one loud startup line
+        // rather than a silent per-ROM `load_sgb_firmware_bytes` rejection.
+        match rustyboi_core_lib::sgb_firmware::identify(&bytes) {
+            Ok(kind) => {
+                eprintln!("sweep: [{tag}] default border from {} ({kind:?})", path.display());
+                out.push((hw, Arc::new(bytes)));
+            }
+            Err(e) => eprintln!(
+                "sweep: {} is not a recognised SGB firmware ({e}); [{tag}] default border unavailable",
+                path.display()
+            ),
+        }
+    }
+    out
 }
 
 /// The 48-byte Nintendo logo the boot ROM checks the cart header against,
