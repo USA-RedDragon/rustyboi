@@ -7754,20 +7754,14 @@ impl Ppu {
     /// As a method each of those is a plain `return;` with the same meaning:
     /// control resumes at the caller after the `match`, which is where the
     /// labelled break landed. No early exit is added or dropped.
-    fn step_mode3_dot(&mut self, mmio: &mut mmio::Mmio, fast: bool) {
-        // Shift the DMG WE per-dot visibility history (see we_dot_hist).
-        self.we_dot_hist = [
-            self.lcdc_has(LCDCFlags::WindowDisplayEnable),
-            self.we_dot_hist[0],
-            self.we_dot_hist[1],
-            self.we_dot_hist[2],
-            self.we_dot_hist[3],
-        ];
-        // A mid-mode-3 WX change before the window starts invalidates the
-        // closed-form schedule; fall back to the live emergent transition.
-        // The `win_wx_enable_resolved` latch suppresses re-entry on the dots
-        // after a clean WX-enable was handled (the WX != arm-WX condition
-        // stays true every subsequent dot until the window draws).
+    /// Mid-mode-3 WX-change rekey: a WX write (or a window-will-start flip)
+    /// after the closed-form mode-0 schedule was captured at mode-3 arm either
+    /// re-keys that schedule with/without the `StartWindowDraw` penalty, or
+    /// drops it so the live emergent `x == 160` transition takes over.
+    ///
+    /// Lifted verbatim out of `step_mode3_dot`. The block had no early exit of
+    /// its own, so it needs no "stop this dot" signal back to the caller.
+    fn mode3_rekey_wx_change(&mut self, mmio: &mmio::Mmio, fast: bool) {
         if !fast
             && self.scheduled_mode0_dot.is_some()
             && !self.window_started_this_line
@@ -7969,6 +7963,23 @@ impl Ppu {
                 self.m0_time_master = None;
             }
         }
+    }
+
+    fn step_mode3_dot(&mut self, mmio: &mut mmio::Mmio, fast: bool) {
+        // Shift the DMG WE per-dot visibility history (see we_dot_hist).
+        self.we_dot_hist = [
+            self.lcdc_has(LCDCFlags::WindowDisplayEnable),
+            self.we_dot_hist[0],
+            self.we_dot_hist[1],
+            self.we_dot_hist[2],
+            self.we_dot_hist[3],
+        ];
+        // A mid-mode-3 WX change before the window starts invalidates the
+        // closed-form schedule; fall back to the live emergent transition.
+        // The `win_wx_enable_resolved` latch suppresses re-entry on the dots
+        // after a clean WX-enable was handled (the WX != arm-WX condition
+        // stays true every subsequent dot until the window draws).
+        self.mode3_rekey_wx_change(mmio, fast);
         // late_wx: a mid-mode-3 WX write AFTER the window has started,
         // moving WX out of range, cancels the remaining window draw and
         // refunds the unaccrued StartWindowDraw penalty from the
