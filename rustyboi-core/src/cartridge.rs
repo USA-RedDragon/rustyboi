@@ -553,16 +553,233 @@ impl Mbc7Eeprom {
     }
 }
 
-fn serde_u16_8000() -> u16 {
-    0x8000
-}
-
-fn serde_u8_one() -> u8 {
-    1
-}
-
 fn serde_cam_regs() -> Vec<u8> {
     vec![0; CAM_REG_COUNT]
+}
+
+/// One MBC3 RTC register bank: the live counters, and (as a second instance)
+/// the CPU-visible shadows a $6000-$7FFF write latches them into.
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+struct Mbc3Rtc {
+    seconds: u8,   // 0-59
+    minutes: u8,   // 0-59
+    hours: u8,     // 0-23
+    days_low: u8,  // Lower 8 bits of day counter
+    days_high: u8, // Upper 1 bit of day counter + halt flag + day carry
+}
+
+/// MBC5 bank registers.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct Mbc5State {
+    rom_bank_low: u8,  // Lower 8 bits of ROM bank (0x2000-0x2FFF)
+    rom_bank_high: u8, // Upper 1 bit of ROM bank (0x3000-0x3FFF) - only bit 0 used
+    ram_bank: u8,      // RAM bank select (0x4000-0x5FFF) - 4 bits used (0x00-0x0F)
+}
+
+impl Default for Mbc5State {
+    fn default() -> Self {
+        Self { rom_bank_low: 1, rom_bank_high: 0, ram_bank: 0 }
+    }
+}
+
+/// MBC7 state. RAM-register access needs a TWO stage unlock: 0x0A to
+/// 0x0000-0x1FFF (shared `ram_enabled`) AND exactly 0x40 to 0x4000-0x5FFF.
+#[derive(Clone, Serialize, Deserialize)]
+struct Mbc7State {
+    ram_enabled2: bool,
+    /// 8-bit ROM bank register; like MBC5, bank 0 is selectable at 0x4000-0x7FFF.
+    rom_bank: u8,
+    /// Latched accelerometer sample, 16 bits per axis. Reads 0x8000 before the
+    /// first latch and after an 0x55 erase; a real sample is centered ~0x81D0.
+    accel_x: u16,
+    accel_y: u16,
+    /// A new 0xAA latch is only accepted after an 0x55 erase (Pan Docs: cannot
+    /// re-latch without erasing first).
+    accel_latched: bool,
+    eeprom: Mbc7Eeprom,
+}
+
+impl Default for Mbc7State {
+    fn default() -> Self {
+        Self {
+            ram_enabled2: false,
+            rom_bank: 1,
+            accel_x: 0x8000,
+            accel_y: 0x8000,
+            accel_latched: false,
+            eeprom: Mbc7Eeprom::default(),
+        }
+    }
+}
+
+/// HuC-3 register state. The 0x0000-0x1FFF register selects what A000-BFFF
+/// accesses: 0x0 RAM read-only, 0xA RAM read/write, 0xB RTC command mailbox
+/// (write), 0xC RTC command/response (read), 0xD RTC semaphore, 0xE IR.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct HuC3State {
+    mode: u8,
+    rom_bank: u8, // 7-bit; bank 0 selectable like MBC5
+    ram_bank: u8,
+    /// RTC MCU mailbox: command (bits 6-4 of the 0xB write) + argument (3-0),
+    /// executed on a 0xD write with bit 0 clear; result readable through 0xC.
+    rtc_command: u8,
+    rtc_argument: u8,
+    rtc_result: u8,
+    /// 256-nibble access pointer into the RTC MCU memory.
+    rtc_address: u8,
+}
+
+impl Default for HuC3State {
+    fn default() -> Self {
+        Self {
+            mode: 0,
+            rom_bank: 1,
+            ram_bank: 0,
+            rtc_command: 0,
+            rtc_argument: 0,
+            rtc_result: 0,
+            rtc_address: 0,
+        }
+    }
+}
+
+/// The HuC-3 RTC MCU's battery-fed state: its 256-nibble internal memory (one
+/// nibble per byte) plus the sub-minute accumulator. The live clock is stored
+/// in-place: nibbles 0x10-0x12 = minute-of-day counter (rolls at 1440),
+/// 0x13-0x15 = 12-bit day counter, little-endian nibbles (Pan Docs "RTC
+/// Location Map"). `mem` is empty for non-HuC3 carts.
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct HuC3Rtc {
+    mem: Vec<u8>,
+    /// Sub-minute cycle accumulator, master-clock derived like the MBC3 RTC.
+    accum: u64,
+}
+
+/// HuC-1 state. RAM is always enabled; the 0x0000-0x1FFF register only selects
+/// whether A000-BFFF accesses RAM (default) or the IR transceiver (low nibble
+/// == 0xE).
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct HuC1State {
+    ir_mode: bool,
+    /// 6-bit ROM bank register; bank 0 is selectable at 0x4000-0x7FFF (no
+    /// MBC1-style zero remap; the largest HuC-1 cart is 1MB = 64 banks).
+    rom_bank: u8,
+    /// RAM bank register, "at least 2 bits" (Pan Docs); stored raw and reduced
+    /// modulo the cart's bank count like HuC-3.
+    ram_bank: u8,
+    /// IR LED output latch (bit 0 of writes in IR mode). No IR transport is
+    /// modeled: reads always see "no light" (0xC0), the documented idle.
+    ir_led: bool,
+}
+
+impl Default for HuC1State {
+    fn default() -> Self {
+        Self { ir_mode: false, rom_bank: 1, ram_bank: 0, ir_led: false }
+    }
+}
+
+/// POCKET CAMERA (MAC-GBD + M64282FP) state.
+#[derive(Clone, Serialize, Deserialize)]
+struct CameraState {
+    /// 6-bit ROM bank register; bank 0 is selectable at 4000-7FFF (AntonioND:
+    /// "This area may contain any ROM bank (0 included)"). Initial bank 1.
+    rom_bank: u8,
+    /// 4-bit RAM bank register (banks 0-$0F of the 128KB RAM).
+    ram_bank: u8,
+    /// Bit 4 of the 4000-5FFF write maps the CAM register file over A000-BFFF
+    /// instead of RAM (the ROM uses bank $10).
+    regs_selected: bool,
+    /// The 54-byte register file. Write-only except index 0 (trigger/status).
+    regs: Vec<u8>,
+    /// Remaining master-clock T-cycles of the in-flight (or stopped) capture.
+    clocks_left: u64,
+    /// Capture actively running (A000 bit 0 reads 1). Cleared by writing bit
+    /// 0 = 0 mid-capture (stop) and when the countdown expires.
+    running: bool,
+    /// Fully processed tile data of the in-flight capture, committed to RAM
+    /// bank 0 at $0100 when the countdown expires (the real controller streams
+    /// pixels into RAM during the sensor read period at the end of the window;
+    /// until then RAM keeps the previous image).
+    pending: Vec<u8>,
+}
+
+impl Default for CameraState {
+    fn default() -> Self {
+        Self {
+            rom_bank: 1,
+            ram_bank: 0,
+            regs_selected: false,
+            regs: serde_cam_regs(),
+            clocks_left: 0,
+            running: false,
+            pending: Vec::new(),
+        }
+    }
+}
+
+/// Rocket Games board state. `lock`/`unlock_count` model the A15-transition
+/// boot lock: the cart powers up locked and, while a boot ROM is running,
+/// presents the Nintendo logo during the boot ROM's logo check; skip_bios
+/// unlocks immediately (no boot ROM ran). Cell: the counter advances on ROM
+/// READS, and `Addressable::read` takes `&self`.
+#[derive(Clone, Serialize, Deserialize)]
+struct RocketState {
+    rom_bank: u8,
+    outer: u8,
+    lock: Cell<u8>,
+    unlock_count: Cell<u8>,
+}
+
+impl Default for RocketState {
+    fn default() -> Self {
+        Self { rom_bank: 1, outer: 0, lock: Cell::new(UNL_LOCKED_DMG), unlock_count: Cell::new(0) }
+    }
+}
+
+/// Sachen MMC1/MMC2 state. `bank` is the raw inner-bank latch ("unmasked
+/// bank"); `base`/`mask` writes only latch while (bank & 0x30) == 0x30. Lock
+/// phases as for Rocket.
+#[derive(Clone, Serialize, Deserialize)]
+struct SachenState {
+    base: u8,
+    mask: u8,
+    bank: u8,
+    lock: Cell<u8>,
+    transition: Cell<u8>,
+}
+
+impl Default for SachenState {
+    fn default() -> Self {
+        Self { base: 0, mask: 0, bank: 1, lock: Cell::new(UNL_LOCKED_DMG), transition: Cell::new(0) }
+    }
+}
+
+/// NT/Makon "old" board state. `bank` holds the raw written bank; the $5003
+/// bit-swap is combinational on the bank lines, so it is applied at read time
+/// (`get_rom_bank`), keeping swap-mode flips retroactive exactly like the real
+/// wiring (a push-model map would instead re-switch on the mode write to
+/// emulate the same thing).
+#[derive(Clone, Serialize, Deserialize)]
+struct NtState {
+    bank: u8,
+    base: u8,
+    bank_mask: u8,
+    swapped: bool,
+}
+
+impl Default for NtState {
+    fn default() -> Self {
+        Self { bank: 1, base: 0, bank_mask: 0, swapped: false }
+    }
+}
+
+/// M161 one-shot 32KB latch. `bank` is the even 16KB half of the selected 32KB
+/// pair ((data & 7) << 1); the odd half is `bank | 1`. `mapped` blocks any
+/// further latch until reset.
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+struct M161State {
+    bank: u8,
+    mapped: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -630,19 +847,10 @@ pub struct Cartridge {
     // MBC3 state
     mbc3_ram_bank: u8,   // 0x00-0x03 for RAM, 0x08-0x0C for RTC
 
-    // MBC3 RTC registers
-    rtc_seconds: u8,     // 0-59
-    rtc_minutes: u8,     // 0-59
-    rtc_hours: u8,       // 0-23
-    rtc_days_low: u8,    // Lower 8 bits of day counter
-    rtc_days_high: u8,   // Upper 1 bit of day counter + halt flag + day carry
-
-    // MBC3 RTC latched values
-    rtc_seconds_latched: u8,
-    rtc_minutes_latched: u8,
-    rtc_hours_latched: u8,
-    rtc_days_low_latched: u8,
-    rtc_days_high_latched: u8,
+    // Live MBC3 RTC counters, and the CPU-visible shadows a $6000-$7FFF write
+    // latches them into. Same register shape, so they share a type.
+    rtc: Mbc3Rtc,
+    rtc_latched: Mbc3Rtc,
 
     // Sub-second cycle accumulator for the cycle-derived RTC. One RTC second is
     // 4_194_304 T-cycles (the 4.194304 MHz master/dot clock). The RTC crystal is
@@ -652,114 +860,31 @@ pub struct Cartridge {
     #[serde(default)]
     rtc_cycle_accum: u64,
 
-    // MBC5 state
-    mbc5_rom_bank_low: u8,   // Lower 8 bits of ROM bank (0x2000-0x2FFF)
-    mbc5_rom_bank_high: u8,  // Upper 1 bit of ROM bank (0x3000-0x3FFF) - only bit 0 used
-    mbc5_ram_bank: u8,       // RAM bank select (0x4000-0x5FFF) - 4 bits used (0x00-0x0F)
+    mbc5: Mbc5State,
 
-    // MBC7 state. RAM-register access needs a TWO stage unlock: 0x0A to
-    // 0x0000-0x1FFF (shared `ram_enabled`) AND exactly 0x40 to 0x4000-0x5FFF.
     #[serde(default)]
-    mbc7_ram_enabled2: bool,
-    // 8-bit ROM bank register; like MBC5, bank 0 is selectable at 0x4000-0x7FFF.
-    #[serde(default = "serde_u8_one")]
-    mbc7_rom_bank: u8,
-    // Latched accelerometer sample, 16 bits per axis. Reads 0x8000 before the
-    // first latch and after an 0x55 erase; a real sample is centered ~0x81D0.
-    #[serde(default = "serde_u16_8000")]
-    mbc7_accel_x: u16,
-    #[serde(default = "serde_u16_8000")]
-    mbc7_accel_y: u16,
-    // A new 0xAA latch is only accepted after an 0x55 erase (Pan Docs: cannot
-    // re-latch without erasing first).
-    #[serde(default)]
-    mbc7_accel_latched: bool,
+    mbc7: Mbc7State,
     // Live sensor input in g, fed by the frontend via `set_accelerometer`.
-    // Not persisted (transient hardware input, like buttons).
+    // Not persisted (transient hardware input, like buttons), and survives
+    // `reset` -- power-cycling the console does not null gravity -- so it sits
+    // outside `Mbc7State`, which resets wholesale.
     #[serde(skip, default)]
     mbc7_sensor_x: f32,
     #[serde(skip, default)]
     mbc7_sensor_y: f32,
-    #[serde(default)]
-    mbc7_eeprom: Mbc7Eeprom,
 
-    // HuC-3 state. The 0x0000-0x1FFF register selects what A000-BFFF accesses:
-    // 0x0 RAM read-only, 0xA RAM read/write, 0xB RTC command mailbox (write),
-    // 0xC RTC command/response (read), 0xD RTC semaphore, 0xE IR.
     #[serde(default)]
-    huc3_mode: u8,
-    #[serde(default = "serde_u8_one")]
-    huc3_rom_bank: u8, // 7-bit; bank 0 selectable like MBC5
+    huc3: HuC3State,
+    // Battery-fed HuC-3 clock: survives `reset` while the mailbox registers
+    // above do not, so it is a separate struct.
     #[serde(default)]
-    huc3_ram_bank: u8,
-    // RTC MCU mailbox: command (bits 6-4 of the 0xB write) + argument (3-0),
-    // executed on a 0xD write with bit 0 clear; result readable through 0xC.
-    #[serde(default)]
-    huc3_rtc_command: u8,
-    #[serde(default)]
-    huc3_rtc_argument: u8,
-    #[serde(default)]
-    huc3_rtc_result: u8,
-    // 256-nibble access pointer into the RTC MCU memory.
-    #[serde(default)]
-    huc3_rtc_address: u8,
-    // The RTC MCU's 256-nibble internal memory (one nibble per byte). The live
-    // clock is stored in-place: nibbles 0x10-0x12 = minute-of-day counter
-    // (rolls at 1440), 0x13-0x15 = 12-bit day counter, little-endian nibbles
-    // (Pan Docs "RTC Location Map"). Empty for non-HuC3 carts.
-    #[serde(default)]
-    huc3_rtc_mem: Vec<u8>,
-    // Sub-minute cycle accumulator, master-clock derived like the MBC3 RTC.
-    #[serde(default)]
-    huc3_rtc_accum: u64,
+    huc3_rtc: HuC3Rtc,
 
-    // HuC-1 state. RAM is always enabled; the 0x0000-0x1FFF register only
-    // selects whether A000-BFFF accesses RAM (default) or the IR transceiver
-    // (low nibble == 0xE).
     #[serde(default)]
-    huc1_ir_mode: bool,
-    // 6-bit ROM bank register; bank 0 is selectable at 0x4000-0x7FFF (no
-    // MBC1-style zero remap; the largest HuC-1
-    // cart is 1MB = 64 banks).
-    #[serde(default = "serde_u8_one")]
-    huc1_rom_bank: u8,
-    // RAM bank register, "at least 2 bits" (Pan Docs); stored raw and
-    // reduced modulo the cart's bank count like HuC-3.
-    #[serde(default)]
-    huc1_ram_bank: u8,
-    // IR LED output latch (bit 0 of writes in IR mode). No IR transport is
-    // modeled: reads always see "no light" (0xC0), the documented idle.
-    #[serde(default)]
-    huc1_ir_led: bool,
+    huc1: HuC1State,
 
-    // POCKET CAMERA (MAC-GBD + M64282FP) state.
-    // 6-bit ROM bank register; bank 0 is selectable at 4000-7FFF (AntonioND:
-    // "This area may contain any ROM bank (0 included)"). Initial bank 1.
-    #[serde(default = "serde_u8_one")]
-    cam_rom_bank: u8,
-    // 4-bit RAM bank register (banks 0-$0F of the 128KB RAM).
     #[serde(default)]
-    cam_ram_bank: u8,
-    // Bit 4 of the 4000-5FFF write maps the CAM register file over A000-BFFF
-    // instead of RAM (the ROM uses bank $10).
-    #[serde(default)]
-    cam_regs_selected: bool,
-    // The 54-byte register file. Write-only except index 0 (trigger/status).
-    #[serde(default = "serde_cam_regs")]
-    cam_regs: Vec<u8>,
-    // Remaining master-clock T-cycles of the in-flight (or stopped) capture.
-    #[serde(default)]
-    cam_clocks_left: u64,
-    // Capture actively running (A000 bit 0 reads 1). Cleared by writing bit
-    // 0 = 0 mid-capture (stop) and when the countdown expires.
-    #[serde(default)]
-    cam_running: bool,
-    // Fully processed tile data of the in-flight capture, committed to RAM
-    // bank 0 at $0100 when the countdown expires (the real controller
-    // streams pixels into RAM during the sensor read period at the end of
-    // the window; until then RAM keeps the previous image).
-    #[serde(default)]
-    cam_pending: Vec<u8>,
+    cam: CameraState,
     // Live 128x112 8-bit grayscale sensor input, fed by the frontend via
     // `set_camera_image`. Empty => the built-in deterministic test pattern.
     // Not persisted (transient hardware input, like buttons).
@@ -776,19 +901,8 @@ pub struct Cartridge {
     #[serde(default)]
     wt_bank: u8,
 
-    // Rocket Games state. rocket_lock/rocket_unlock_count model the
-    // A15-transition boot lock: the cart powers up locked and, while a
-    // boot ROM is running, presents the Nintendo logo during the boot ROM's logo
-    // check; skip_bios unlocks immediately (no boot ROM ran). Cell: the counter
-    // advances on ROM READS, and Addressable::read takes &self.
-    #[serde(default = "serde_u8_one")]
-    rocket_rom_bank: u8,
     #[serde(default)]
-    rocket_outer: u8,
-    #[serde(default)]
-    rocket_lock: Cell<u8>,
-    #[serde(default)]
-    rocket_unlock_count: Cell<u8>,
+    rocket: RocketState,
     // Nintendo logo bytes the Rocket mapper presents at $0104-$0133 during its
     // locked-CGB phase, sourced at RUNTIME from the loaded boot ROM (which
     // contains the logo it checks against) so no logo data is embedded here.
@@ -797,41 +911,12 @@ pub struct Cartridge {
     #[serde(skip, default)]
     rocket_boot_logo: Option<[u8; 48]>,
 
-    // Sachen MMC1/MMC2 state. sachen_bank is the raw inner-bank latch
-    // ("unmasked bank"); base/mask writes only latch while
-    // (sachen_bank & 0x30) == 0x30. Lock phases as for Rocket.
     #[serde(default)]
-    sachen_base: u8,
+    sachen: SachenState,
     #[serde(default)]
-    sachen_mask: u8,
-    #[serde(default = "serde_u8_one")]
-    sachen_bank: u8,
+    nt: NtState,
     #[serde(default)]
-    sachen_lock: Cell<u8>,
-    #[serde(default)]
-    sachen_transition: Cell<u8>,
-
-    // NT/Makon "old" board state. nt_bank holds the raw written bank; the
-    // $5003 bit-swap is combinational on the bank lines, so it is applied at
-    // read time (get_rom_bank), keeping swap-mode flips retroactive exactly
-    // like the real wiring (a push-model map would instead re-switch on the
-    // mode write to emulate the same thing).
-    #[serde(default = "serde_u8_one")]
-    nt_bank: u8,
-    #[serde(default)]
-    nt_base: u8,
-    #[serde(default)]
-    nt_bank_mask: u8,
-    #[serde(default)]
-    nt_swapped: bool,
-
-    // M161 one-shot 32KB latch. `m161_bank` is the even
-    // 16KB half of the selected 32KB pair ((data & 7) << 1); the odd half is
-    // `m161_bank | 1`. `m161_mapped` blocks any further latch until reset.
-    #[serde(default)]
-    m161_bank: u8,
-    #[serde(default)]
-    m161_mapped: bool,
+    m161: M161State,
 
     // CGB support information
     cgb_support: CgbSupport, // CGB compatibility from cartridge header
@@ -924,67 +1009,25 @@ impl Clone for Cartridge {
             sram_cs_lazy: self.sram_cs_lazy,
             mbc2_ram: self.mbc2_ram.clone(),
             mbc3_ram_bank: self.mbc3_ram_bank,
-            rtc_seconds: self.rtc_seconds,
-            rtc_minutes: self.rtc_minutes,
-            rtc_hours: self.rtc_hours,
-            rtc_days_low: self.rtc_days_low,
-            rtc_days_high: self.rtc_days_high,
-            rtc_seconds_latched: self.rtc_seconds_latched,
-            rtc_minutes_latched: self.rtc_minutes_latched,
-            rtc_hours_latched: self.rtc_hours_latched,
-            rtc_days_low_latched: self.rtc_days_low_latched,
-            rtc_days_high_latched: self.rtc_days_high_latched,
+            rtc: self.rtc,
+            rtc_latched: self.rtc_latched,
             rtc_cycle_accum: self.rtc_cycle_accum,
-            mbc5_rom_bank_low: self.mbc5_rom_bank_low,
-            mbc5_rom_bank_high: self.mbc5_rom_bank_high,
-            mbc5_ram_bank: self.mbc5_ram_bank,
-            mbc7_ram_enabled2: self.mbc7_ram_enabled2,
-            mbc7_rom_bank: self.mbc7_rom_bank,
-            mbc7_accel_x: self.mbc7_accel_x,
-            mbc7_accel_y: self.mbc7_accel_y,
-            mbc7_accel_latched: self.mbc7_accel_latched,
+            mbc5: self.mbc5,
+            mbc7: self.mbc7.clone(),
             mbc7_sensor_x: self.mbc7_sensor_x,
             mbc7_sensor_y: self.mbc7_sensor_y,
-            mbc7_eeprom: self.mbc7_eeprom.clone(),
-            huc3_mode: self.huc3_mode,
-            huc3_rom_bank: self.huc3_rom_bank,
-            huc3_ram_bank: self.huc3_ram_bank,
-            huc3_rtc_command: self.huc3_rtc_command,
-            huc3_rtc_argument: self.huc3_rtc_argument,
-            huc3_rtc_result: self.huc3_rtc_result,
-            huc3_rtc_address: self.huc3_rtc_address,
-            huc3_rtc_mem: self.huc3_rtc_mem.clone(),
-            huc3_rtc_accum: self.huc3_rtc_accum,
-            huc1_ir_mode: self.huc1_ir_mode,
-            huc1_rom_bank: self.huc1_rom_bank,
-            huc1_ram_bank: self.huc1_ram_bank,
-            huc1_ir_led: self.huc1_ir_led,
-            cam_rom_bank: self.cam_rom_bank,
-            cam_ram_bank: self.cam_ram_bank,
-            cam_regs_selected: self.cam_regs_selected,
-            cam_regs: self.cam_regs.clone(),
-            cam_clocks_left: self.cam_clocks_left,
-            cam_running: self.cam_running,
-            cam_pending: self.cam_pending.clone(),
+            huc3: self.huc3,
+            huc3_rtc: self.huc3_rtc.clone(),
+            huc1: self.huc1,
+            cam: self.cam.clone(),
             cam_image: self.cam_image.clone(),
             unl_mapper: self.unl_mapper,
             wt_bank: self.wt_bank,
-            rocket_rom_bank: self.rocket_rom_bank,
-            rocket_outer: self.rocket_outer,
-            rocket_lock: self.rocket_lock.clone(),
-            rocket_unlock_count: self.rocket_unlock_count.clone(),
+            rocket: self.rocket.clone(),
             rocket_boot_logo: self.rocket_boot_logo,
-            sachen_base: self.sachen_base,
-            sachen_mask: self.sachen_mask,
-            sachen_bank: self.sachen_bank,
-            sachen_lock: self.sachen_lock.clone(),
-            sachen_transition: self.sachen_transition.clone(),
-            nt_bank: self.nt_bank,
-            nt_base: self.nt_base,
-            nt_bank_mask: self.nt_bank_mask,
-            nt_swapped: self.nt_swapped,
-            m161_bank: self.m161_bank,
-            m161_mapped: self.m161_mapped,
+            sachen: self.sachen.clone(),
+            nt: self.nt.clone(),
+            m161: self.m161,
             cgb_support: self.cgb_support.clone(),
             rumble_motor: self.rumble_motor,
             rtc_memory: self.rtc_memory.clone(),
@@ -1460,67 +1503,28 @@ impl Cartridge {
             sram_cs_lazy: false,
             mbc2_ram: vec![0xFF; MBC2_RAM_SIZE],
             mbc3_ram_bank: 0,
-            rtc_seconds: 0,
-            rtc_minutes: 0,
-            rtc_hours: 0,
-            rtc_days_low: 0,
-            rtc_days_high: 0,
-            rtc_seconds_latched: 0,
-            rtc_minutes_latched: 0,
-            rtc_hours_latched: 0,
-            rtc_days_low_latched: 0,
-            rtc_days_high_latched: 0,
+            rtc: Mbc3Rtc::default(),
+            rtc_latched: Mbc3Rtc::default(),
             rtc_cycle_accum: 0,
-            mbc5_rom_bank_low: 1,
-            mbc5_rom_bank_high: 0,
-            mbc5_ram_bank: 0,
-            mbc7_ram_enabled2: false,
-            mbc7_rom_bank: 1,
-            mbc7_accel_x: 0x8000,
-            mbc7_accel_y: 0x8000,
-            mbc7_accel_latched: false,
+            mbc5: Mbc5State::default(),
+            mbc7: Mbc7State::default(),
             mbc7_sensor_x: 0.0,
             mbc7_sensor_y: 0.0,
-            mbc7_eeprom: Mbc7Eeprom::default(),
-            huc3_mode: 0,
-            huc3_rom_bank: 1,
-            huc3_ram_bank: 0,
-            huc3_rtc_command: 0,
-            huc3_rtc_argument: 0,
-            huc3_rtc_result: 0,
-            huc3_rtc_address: 0,
-            huc3_rtc_mem: if cartridge_type == HUC3 { vec![0; 256] } else { Vec::new() },
-            huc3_rtc_accum: 0,
-            huc1_ir_mode: false,
-            huc1_rom_bank: 1,
-            huc1_ram_bank: 0,
-            huc1_ir_led: false,
-            cam_rom_bank: 1,
-            cam_ram_bank: 0,
-            cam_regs_selected: false,
-            cam_regs: serde_cam_regs(),
-            cam_clocks_left: 0,
-            cam_running: false,
-            cam_pending: Vec::new(),
+            huc3: HuC3State::default(),
+            huc3_rtc: HuC3Rtc {
+                mem: if cartridge_type == HUC3 { vec![0; 256] } else { Vec::new() },
+                accum: 0,
+            },
+            huc1: HuC1State::default(),
+            cam: CameraState::default(),
             cam_image: Vec::new(),
             unl_mapper,
             wt_bank: 0,
-            rocket_rom_bank: 1,
-            rocket_outer: 0,
-            rocket_lock: Cell::new(UNL_LOCKED_DMG),
-            rocket_unlock_count: Cell::new(0),
+            rocket: RocketState::default(),
             rocket_boot_logo: None,
-            sachen_base: 0,
-            sachen_mask: 0,
-            sachen_bank: 1,
-            sachen_lock: Cell::new(UNL_LOCKED_DMG),
-            sachen_transition: Cell::new(0),
-            nt_bank: 1,
-            nt_base: 0,
-            nt_bank_mask: 0,
-            nt_swapped: false,
-            m161_bank: 0,
-            m161_mapped: false,
+            sachen: SachenState::default(),
+            nt: NtState::default(),
+            m161: M161State::default(),
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -1736,25 +1740,25 @@ impl Cartridge {
             CartridgeType::MBC5 { .. } => {
                 // MBC5 uses 9 bits for ROM bank selection (8 bits low + 1 bit high)
                 // Bank 0 can be selected for the switchable area in MBC5
-                let bank = (self.mbc5_rom_bank_low as usize) | ((self.mbc5_rom_bank_high as usize & 0x01) << 8);
+                let bank = (self.mbc5.rom_bank_low as usize) | ((self.mbc5.rom_bank_high as usize & 0x01) << 8);
                 bank % self.rom_banks
             }
             CartridgeType::MBC7 => {
                 // 8-bit register; like MBC5 bank 0 is selectable here.
-                (self.mbc7_rom_bank as usize) % self.rom_banks
+                (self.mbc7.rom_bank as usize) % self.rom_banks
             }
             CartridgeType::HuC1 => {
                 // 6-bit register; bank 0 is selectable here (no zero remap).
-                (self.huc1_rom_bank as usize) % self.rom_banks
+                (self.huc1.rom_bank as usize) % self.rom_banks
             }
             CartridgeType::HuC3 => {
                 // 7-bit register; like MBC5 bank 0 is selectable here.
-                (self.huc3_rom_bank as usize) % self.rom_banks
+                (self.huc3.rom_bank as usize) % self.rom_banks
             }
             CartridgeType::PocketCamera => {
                 // 6-bit register; bank 0 is selectable here (AntonioND: "may
                 // contain any ROM bank (0 included)").
-                (self.cam_rom_bank as usize) % self.rom_banks
+                (self.cam.rom_bank as usize) % self.rom_banks
             }
             CartridgeType::WisdomTree => {
                 // Whole-$0000-$7FFF 32KB banking: this half is the odd 16KB
@@ -1764,38 +1768,38 @@ impl Cartridge {
             CartridgeType::Rocket => {
                 // Outer 256KB bank (high nibble) | 16KB inner bank:
                 // (outerBank | rom_bank) << 14.
-                (((self.rocket_outer as usize & 0x0F) << 4)
-                    | (self.rocket_rom_bank as usize))
+                (((self.rocket.outer as usize & 0x0F) << 4)
+                    | (self.rocket.rom_bank as usize))
                     % self.rom_banks
             }
             CartridgeType::Sachen { .. } => {
                 // Masked outer/inner combination: mask bits come from the
                 // base register, the rest from the inner bank register
                 // (outerBank&outerMask | rom_bank&~outerMask).
-                (((self.sachen_bank & !self.sachen_mask)
-                    | (self.sachen_base & self.sachen_mask)) as usize)
+                (((self.sachen.bank & !self.sachen.mask)
+                    | (self.sachen.base & self.sachen.mask)) as usize)
                     % self.rom_banks
             }
             CartridgeType::NtOld { v2 } => {
                 // The $5003 bit-swap is combinational on the bank lines; the
                 // $5002 bank-count mask and the $5001 multicart base (32KB
                 // units = 2 x 16KB banks) apply after it.
-                let mut bank = self.nt_bank;
-                if self.nt_swapped {
+                let mut bank = self.nt.bank;
+                if self.nt.swapped {
                     bank = Self::reorder_bits(
                         bank,
                         if v2 { &NT_OLD2_REORDER } else { &NT_OLD1_REORDER },
                     );
                 }
-                if self.nt_bank_mask != 0 {
-                    bank &= self.nt_bank_mask;
+                if self.nt.bank_mask != 0 {
+                    bank &= self.nt.bank_mask;
                 }
-                (bank as usize + self.nt_base as usize * 2) % self.rom_banks
+                (bank as usize + self.nt.base as usize * 2) % self.rom_banks
             }
             CartridgeType::M161 => {
                 // Odd 16KB half of the latched 32KB pair:
                 // (rombank_ | 1) & (rombanks - 1).
-                ((self.m161_bank as usize) | 1) & (self.rom_banks - 1)
+                ((self.m161.bank as usize) | 1) & (self.rom_banks - 1)
             }
             CartridgeType::NoMBC { .. } => 1, // Simple cartridge always uses bank 1 for upper area
         }
@@ -1821,21 +1825,21 @@ impl Cartridge {
             }
             CartridgeType::MBC5 { .. } => {
                 // MBC5 uses 4 bits for RAM bank selection (0x00-0x0F)
-                (self.mbc5_ram_bank & 0x0F) as usize % self.ram_banks.max(1)
+                (self.mbc5.ram_bank & 0x0F) as usize % self.ram_banks.max(1)
             }
             CartridgeType::MBC7 => 0, // no banked RAM (EEPROM is serial)
             CartridgeType::M161 => 0, // no external RAM (disabledRam)
             CartridgeType::HuC1 => {
                 // "At least 2 bits" per Pan Docs; the real cart has 4 banks.
-                (self.huc1_ram_bank as usize) % self.ram_banks.max(1)
+                (self.huc1.ram_bank as usize) % self.ram_banks.max(1)
             }
             CartridgeType::HuC3 => {
                 // "At least 2 bits" per Pan Docs; real carts have 4 banks.
-                (self.huc3_ram_bank as usize) % self.ram_banks.max(1)
+                (self.huc3.ram_bank as usize) % self.ram_banks.max(1)
             }
             CartridgeType::PocketCamera => {
                 // 4-bit register, 16 banks of the 128KB RAM.
-                (self.cam_ram_bank as usize) % self.ram_banks.max(1)
+                (self.cam.ram_bank as usize) % self.ram_banks.max(1)
             }
             // None of the unlicensed boards bank their (optional) RAM.
             CartridgeType::WisdomTree
@@ -1863,17 +1867,17 @@ impl Cartridge {
             CartridgeType::WisdomTree => (self.wt_bank as usize * 2) % self.rom_banks,
             // Outer bank alone ((outerBank | 0) << 14).
             CartridgeType::Rocket => {
-                ((self.rocket_outer as usize & 0x0F) << 4) % self.rom_banks
+                ((self.rocket.outer as usize & 0x0F) << 4) % self.rom_banks
             }
             // Masked base bank (outerBank & outerMask).
             CartridgeType::Sachen { .. } => {
-                ((self.sachen_base & self.sachen_mask) as usize) % self.rom_banks
+                ((self.sachen.base & self.sachen.mask) as usize) % self.rom_banks
             }
             // Multicart base (32KB units).
-            CartridgeType::NtOld { .. } => (self.nt_base as usize * 2) % self.rom_banks,
+            CartridgeType::NtOld { .. } => (self.nt.base as usize * 2) % self.rom_banks,
             // Even 16KB half of the latched 32KB pair:
             // rombank_ & (rombanks - 2).
-            CartridgeType::M161 => (self.m161_bank as usize) & (self.rom_banks - 2),
+            CartridgeType::M161 => (self.m161.bank as usize) & (self.rom_banks - 2),
             _ => 0,
         }
     }
@@ -2285,11 +2289,11 @@ impl Cartridge {
         // the internal counters only (see `write_rtc_register`), so a freshly
         // written value is not visible until the next latch.
         match self.mbc3_ram_bank {
-            0x08 => self.rtc_seconds_latched,
-            0x09 => self.rtc_minutes_latched,
-            0x0A => self.rtc_hours_latched,
-            0x0B => self.rtc_days_low_latched,
-            0x0C => self.rtc_days_high_latched,
+            0x08 => self.rtc_latched.seconds,
+            0x09 => self.rtc_latched.minutes,
+            0x0A => self.rtc_latched.hours,
+            0x0B => self.rtc_latched.days_low,
+            0x0C => self.rtc_latched.days_high,
             _ => 0xFF,
         }
     }
@@ -2304,15 +2308,15 @@ impl Cartridge {
     fn write_rtc_register(&mut self, value: u8) {
         match self.mbc3_ram_bank {
             0x08 => {
-                self.rtc_seconds = value & 0x3F;
+                self.rtc.seconds = value & 0x3F;
                 // Writing seconds resets the internal sub-second divider, so the
                 // next tick is a full second away.
                 self.rtc_cycle_accum = 0;
             }
-            0x09 => self.rtc_minutes = value & 0x3F,
-            0x0A => self.rtc_hours = value & 0x1F,
-            0x0B => self.rtc_days_low = value,
-            0x0C => self.rtc_days_high = value & 0xC1,
+            0x09 => self.rtc.minutes = value & 0x3F,
+            0x0A => self.rtc.hours = value & 0x1F,
+            0x0B => self.rtc.days_low = value,
+            0x0C => self.rtc.days_high = value & 0xC1,
             _ => {}
         }
         // Persist software clock-sets / HALT toggles immediately.
@@ -2325,11 +2329,11 @@ impl Cartridge {
     /// read path returns these shadows,
     /// so software must latch to observe the advancing clock.
     fn latch_rtc(&mut self) {
-        self.rtc_seconds_latched = self.rtc_seconds;
-        self.rtc_minutes_latched = self.rtc_minutes;
-        self.rtc_hours_latched = self.rtc_hours;
-        self.rtc_days_low_latched = self.rtc_days_low;
-        self.rtc_days_high_latched = self.rtc_days_high;
+        self.rtc_latched.seconds = self.rtc.seconds;
+        self.rtc_latched.minutes = self.rtc.minutes;
+        self.rtc_latched.hours = self.rtc.hours;
+        self.rtc_latched.days_low = self.rtc.days_low;
+        self.rtc_latched.days_high = self.rtc.days_high;
         // Keep the persisted latched shadows fresh: other tools reconstruct the
         // clock from the blob's LATCHED fields + timestamp, so they matter
         // for cross-tool reads. No-op without a sidecar.
@@ -2352,7 +2356,7 @@ impl Cartridge {
                 // HALT bit frozen: the crystal still oscillates but the counters
                 // do not advance. Do not accumulate while halted so no seconds
                 // are "banked".
-                if self.rtc_days_high & 0x40 != 0 {
+                if self.rtc.days_high & 0x40 != 0 {
                     return;
                 }
                 self.rtc_cycle_accum = self.rtc_cycle_accum.wrapping_add(cycles);
@@ -2373,11 +2377,11 @@ impl Cartridge {
             RtcTickKind::HuC3 => {
                 // The HuC-3 clock counts whole minutes: minute-of-day rolls at
                 // 1440 into a 12-bit day counter (Pan Docs RTC location map).
-                self.huc3_rtc_accum = self.huc3_rtc_accum.wrapping_add(cycles);
+                self.huc3_rtc.accum = self.huc3_rtc.accum.wrapping_add(cycles);
                 const CYCLES_PER_MINUTE: u64 = 60 * 4_194_304;
                 let mut advanced = false;
-                while self.huc3_rtc_accum >= CYCLES_PER_MINUTE {
-                    self.huc3_rtc_accum -= CYCLES_PER_MINUTE;
+                while self.huc3_rtc.accum >= CYCLES_PER_MINUTE {
+                    self.huc3_rtc.accum -= CYCLES_PER_MINUTE;
                     let (mut minutes, mut days) = self.huc3_clock();
                     minutes += 1;
                     if minutes >= 1440 {
@@ -2398,20 +2402,20 @@ impl Cartridge {
     /// Live HuC-3 clock (minute-of-day, day counter) read from its nibble
     /// locations 0x10-0x12 / 0x13-0x15 in the RTC MCU memory.
     fn huc3_clock(&self) -> (u16, u16) {
-        if self.huc3_rtc_mem.len() < 0x16 {
+        if self.huc3_rtc.mem.len() < 0x16 {
             return (0, 0);
         }
-        let m = &self.huc3_rtc_mem;
+        let m = &self.huc3_rtc.mem;
         let minutes = (m[0x10] as u16 & 0xF) | ((m[0x11] as u16 & 0xF) << 4) | ((m[0x12] as u16 & 0xF) << 8);
         let days = (m[0x13] as u16 & 0xF) | ((m[0x14] as u16 & 0xF) << 4) | ((m[0x15] as u16 & 0xF) << 8);
         (minutes, days)
     }
 
     fn huc3_set_clock(&mut self, minutes: u16, days: u16) {
-        if self.huc3_rtc_mem.len() < 0x16 {
+        if self.huc3_rtc.mem.len() < 0x16 {
             return;
         }
-        let m = &mut self.huc3_rtc_mem;
+        let m = &mut self.huc3_rtc.mem;
         m[0x10] = (minutes & 0xF) as u8;
         m[0x11] = ((minutes >> 4) & 0xF) as u8;
         m[0x12] = ((minutes >> 8) & 0xF) as u8;
@@ -2423,7 +2427,7 @@ impl Cartridge {
     /// Event ("alarm") time as total minutes, from nibbles 0x58-0x5A (minutes)
     /// and 0x5B-0x5D (days).
     fn huc3_event_total_minutes(&self) -> i64 {
-        let m = &self.huc3_rtc_mem;
+        let m = &self.huc3_rtc.mem;
         let minutes =
             (m[0x58] as i64 & 0xF) | ((m[0x59] as i64 & 0xF) << 4) | ((m[0x5A] as i64 & 0xF) << 8);
         let days =
@@ -2436,7 +2440,7 @@ impl Cartridge {
         let total = total.rem_euclid(4096 * 1440);
         let minutes = (total % 1440) as u16;
         let days = (total / 1440) as u16;
-        let m = &mut self.huc3_rtc_mem;
+        let m = &mut self.huc3_rtc.mem;
         m[0x58] = (minutes & 0xF) as u8;
         m[0x59] = ((minutes >> 4) & 0xF) as u8;
         m[0x5A] = ((minutes >> 8) & 0xF) as u8;
@@ -2450,38 +2454,38 @@ impl Cartridge {
     /// always-ready / instant execution; the semaphore therefore always reads
     /// "ready". Command set per Pan Docs "RTC Communication Protocol".
     fn huc3_execute_command(&mut self) {
-        if self.huc3_rtc_mem.len() < 0x100 {
+        if self.huc3_rtc.mem.len() < 0x100 {
             return;
         }
-        let addr = self.huc3_rtc_address as usize;
-        match self.huc3_rtc_command {
+        let addr = self.huc3.rtc_address as usize;
+        match self.huc3.rtc_command {
             0x1 => {
                 // Read value and increment access address.
-                self.huc3_rtc_result = self.huc3_rtc_mem[addr] & 0x0F;
-                self.huc3_rtc_address = self.huc3_rtc_address.wrapping_add(1);
+                self.huc3.rtc_result = self.huc3_rtc.mem[addr] & 0x0F;
+                self.huc3.rtc_address = self.huc3.rtc_address.wrapping_add(1);
             }
             0x3 => {
                 // Write value and increment access address.
-                self.huc3_rtc_mem[addr] = self.huc3_rtc_argument & 0x0F;
-                self.huc3_rtc_address = self.huc3_rtc_address.wrapping_add(1);
+                self.huc3_rtc.mem[addr] = self.huc3.rtc_argument & 0x0F;
+                self.huc3.rtc_address = self.huc3.rtc_address.wrapping_add(1);
             }
             0x4 => {
                 // Set access address least significant nibble.
-                self.huc3_rtc_address = (self.huc3_rtc_address & 0xF0) | self.huc3_rtc_argument;
+                self.huc3.rtc_address = (self.huc3.rtc_address & 0xF0) | self.huc3.rtc_argument;
             }
             0x5 => {
                 // Set access address most significant nibble.
-                self.huc3_rtc_address =
-                    (self.huc3_rtc_address & 0x0F) | (self.huc3_rtc_argument << 4);
+                self.huc3.rtc_address =
+                    (self.huc3.rtc_address & 0x0F) | (self.huc3.rtc_argument << 4);
             }
             0x6 => {
                 // Extended command in the argument nibble.
-                match self.huc3_rtc_argument {
+                match self.huc3.rtc_argument {
                     0x0 => {
                         // Copy current time (0x10-0x16) to I/O space 0x00-0x06.
                         // Pan Docs specifies "locations $00-06": 7 nibbles.
                         for i in 0..7 {
-                            self.huc3_rtc_mem[i] = self.huc3_rtc_mem[0x10 + i] & 0x0F;
+                            self.huc3_rtc.mem[i] = self.huc3_rtc.mem[0x10 + i] & 0x0F;
                         }
                     }
                     0x1 => {
@@ -2490,7 +2494,7 @@ impl Cartridge {
                         // duration until the event is preserved (Pan Docs).
                         let (old_min, old_day) = self.huc3_clock();
                         for i in 0..7 {
-                            self.huc3_rtc_mem[0x10 + i] = self.huc3_rtc_mem[i] & 0x0F;
+                            self.huc3_rtc.mem[0x10 + i] = self.huc3_rtc.mem[i] & 0x0F;
                         }
                         let (new_min, new_day) = self.huc3_clock();
                         let delta = (new_day as i64 * 1440 + new_min as i64)
@@ -2498,7 +2502,7 @@ impl Cartridge {
                         let event = self.huc3_event_total_minutes();
                         self.huc3_set_event_total_minutes(event + delta);
                         // Setting the time restarts the current minute.
-                        self.huc3_rtc_accum = 0;
+                        self.huc3_rtc.accum = 0;
                     }
                     0x2 => {
                         // Status request issued by games on boot; they refuse
@@ -2512,7 +2516,7 @@ impl Cartridge {
                 }
                 // Hardware-observed: extended commands leave 1 in the response
                 // nibble (this is what boot-time $62 status checks rely on).
-                self.huc3_rtc_result = 0x1;
+                self.huc3.rtc_result = 0x1;
             }
             // Commands $0, $2 and $7 are unobserved/unknown on hardware
             // (Pan Docs); treat as no-ops.
@@ -2579,40 +2583,40 @@ impl Cartridge {
         let di = value & 0x02 != 0;
         let clk = value & 0x40 != 0;
         let cs = value & 0x80 != 0;
-        let rising_clk = clk && !self.mbc7_eeprom.clk;
-        let falling_cs = !cs && self.mbc7_eeprom.cs;
+        let rising_clk = clk && !self.mbc7.eeprom.clk;
+        let falling_cs = !cs && self.mbc7.eeprom.cs;
 
         if rising_clk && cs {
-            match self.mbc7_eeprom.state {
+            match self.mbc7.eeprom.state {
                 Mbc7EepromState::Idle => {
                     if di {
                         // Start bit.
-                        self.mbc7_eeprom.state = Mbc7EepromState::Command;
-                        self.mbc7_eeprom.sr = 0;
-                        self.mbc7_eeprom.sr_n = 0;
+                        self.mbc7.eeprom.state = Mbc7EepromState::Command;
+                        self.mbc7.eeprom.sr = 0;
+                        self.mbc7.eeprom.sr_n = 0;
                     }
                 }
                 Mbc7EepromState::Command => {
-                    self.mbc7_eeprom.sr = (self.mbc7_eeprom.sr << 1) | di as u16;
-                    self.mbc7_eeprom.sr_n += 1;
-                    if self.mbc7_eeprom.sr_n == 10 {
+                    self.mbc7.eeprom.sr = (self.mbc7.eeprom.sr << 1) | di as u16;
+                    self.mbc7.eeprom.sr_n += 1;
+                    if self.mbc7.eeprom.sr_n == 10 {
                         self.mbc7_eeprom_decode();
                     }
                 }
                 Mbc7EepromState::Input => {
-                    self.mbc7_eeprom.sr = (self.mbc7_eeprom.sr << 1) | di as u16;
-                    self.mbc7_eeprom.sr_n += 1;
-                    if self.mbc7_eeprom.sr_n == 16 {
-                        self.mbc7_eeprom.input = self.mbc7_eeprom.sr;
-                        self.mbc7_eeprom.state = Mbc7EepromState::Pending;
+                    self.mbc7.eeprom.sr = (self.mbc7.eeprom.sr << 1) | di as u16;
+                    self.mbc7.eeprom.sr_n += 1;
+                    if self.mbc7.eeprom.sr_n == 16 {
+                        self.mbc7.eeprom.input = self.mbc7.eeprom.sr;
+                        self.mbc7.eeprom.state = Mbc7EepromState::Pending;
                     }
                 }
                 Mbc7EepromState::Output => {
-                    self.mbc7_eeprom.do_line = self.mbc7_eeprom.out & 0x8000 != 0;
-                    self.mbc7_eeprom.out <<= 1;
-                    self.mbc7_eeprom.out_n += 1;
-                    if self.mbc7_eeprom.out_n == 16 {
-                        self.mbc7_eeprom.state = Mbc7EepromState::Done;
+                    self.mbc7.eeprom.do_line = self.mbc7.eeprom.out & 0x8000 != 0;
+                    self.mbc7.eeprom.out <<= 1;
+                    self.mbc7.eeprom.out_n += 1;
+                    if self.mbc7.eeprom.out_n == 16 {
+                        self.mbc7.eeprom.state = Mbc7EepromState::Done;
                     }
                 }
                 Mbc7EepromState::Pending | Mbc7EepromState::Done => {}
@@ -2620,50 +2624,50 @@ impl Cartridge {
         }
 
         if falling_cs {
-            if self.mbc7_eeprom.state == Mbc7EepromState::Pending {
+            if self.mbc7.eeprom.state == Mbc7EepromState::Pending {
                 self.mbc7_eeprom_program();
             }
             // Any in-flight instruction is aborted by deselecting the chip.
-            self.mbc7_eeprom.state = Mbc7EepromState::Idle;
+            self.mbc7.eeprom.state = Mbc7EepromState::Idle;
         }
 
-        self.mbc7_eeprom.di_line = di;
-        self.mbc7_eeprom.clk = clk;
-        self.mbc7_eeprom.cs = cs;
+        self.mbc7.eeprom.di_line = di;
+        self.mbc7.eeprom.clk = clk;
+        self.mbc7.eeprom.cs = cs;
     }
 
     /// Decode a completed 10-bit instruction. The top 4 bits identify the
     /// operation; the low 7 bits are the word address for READ/WRITE/ERASE.
     fn mbc7_eeprom_decode(&mut self) {
-        let cmd = self.mbc7_eeprom.sr & 0x03FF;
-        self.mbc7_eeprom.command = cmd;
+        let cmd = self.mbc7.eeprom.sr & 0x03FF;
+        self.mbc7.eeprom.command = cmd;
         match (cmd >> 6) & 0xF {
             0b1000..=0b1011 => {
                 // READ: present the word MSB-first on subsequent rising edges.
                 // DO drops to 0 immediately (the datasheet's dummy zero bit,
                 // which does not consume a clock).
-                self.mbc7_eeprom.out = self.mbc7_eeprom_word((cmd & 0x7F) as usize);
-                self.mbc7_eeprom.out_n = 0;
-                self.mbc7_eeprom.do_line = false;
-                self.mbc7_eeprom.state = Mbc7EepromState::Output;
+                self.mbc7.eeprom.out = self.mbc7_eeprom_word((cmd & 0x7F) as usize);
+                self.mbc7.eeprom.out_n = 0;
+                self.mbc7.eeprom.do_line = false;
+                self.mbc7.eeprom.state = Mbc7EepromState::Output;
             }
             0b0100..=0b0111 | 0b0001 => {
                 // WRITE / WRAL: 16 data bits follow.
-                self.mbc7_eeprom.sr = 0;
-                self.mbc7_eeprom.sr_n = 0;
-                self.mbc7_eeprom.state = Mbc7EepromState::Input;
+                self.mbc7.eeprom.sr = 0;
+                self.mbc7.eeprom.sr_n = 0;
+                self.mbc7.eeprom.state = Mbc7EepromState::Input;
             }
             0b1100..=0b1111 | 0b0010 => {
                 // ERASE / ERAL: programs on CS fall.
-                self.mbc7_eeprom.state = Mbc7EepromState::Pending;
+                self.mbc7.eeprom.state = Mbc7EepromState::Pending;
             }
             0b0011 => {
-                self.mbc7_eeprom.write_enabled = true;
-                self.mbc7_eeprom.state = Mbc7EepromState::Done;
+                self.mbc7.eeprom.write_enabled = true;
+                self.mbc7.eeprom.state = Mbc7EepromState::Done;
             }
             0b0000 => {
-                self.mbc7_eeprom.write_enabled = false;
-                self.mbc7_eeprom.state = Mbc7EepromState::Done;
+                self.mbc7.eeprom.write_enabled = false;
+                self.mbc7.eeprom.state = Mbc7EepromState::Done;
             }
             _ => unreachable!(),
         }
@@ -2673,12 +2677,12 @@ impl Cartridge {
     /// erase/write is not enabled (no EWEN) the operation is silently dropped
     /// and DO keeps its previous level (no programming cycle ever starts).
     fn mbc7_eeprom_program(&mut self) {
-        if !self.mbc7_eeprom.write_enabled {
+        if !self.mbc7.eeprom.write_enabled {
             return;
         }
-        let cmd = self.mbc7_eeprom.command;
+        let cmd = self.mbc7.eeprom.command;
         let addr = (cmd & 0x7F) as usize;
-        let input = self.mbc7_eeprom.input;
+        let input = self.mbc7.eeprom.input;
         match (cmd >> 6) & 0xF {
             0b0100..=0b0111 => self.mbc7_eeprom_set_word(addr, input),
             0b1100..=0b1111 => self.mbc7_eeprom_set_word(addr, 0xFFFF),
@@ -2695,7 +2699,7 @@ impl Cartridge {
             _ => {}
         }
         // Programming modeled as instant: DO = RDY as soon as CS re-rises.
-        self.mbc7_eeprom.do_line = true;
+        self.mbc7.eeprom.do_line = true;
     }
 
     /// Increment the live RTC by one second with the full MBC3 cascade:
@@ -2713,47 +2717,47 @@ impl Cartridge {
         // (including out-of-range 60-62) just increments, and 63 -> 0 without a
         // carry (the 6-bit register simply overflows) — matching hardware where
         // only the 59->0 transition produces the minute carry.
-        let sec = self.rtc_seconds & 0x3F;
+        let sec = self.rtc.seconds & 0x3F;
         if sec == 59 {
-            self.rtc_seconds = 0;
+            self.rtc.seconds = 0;
         } else {
-            self.rtc_seconds = (sec + 1) & 0x3F;
+            self.rtc.seconds = (sec + 1) & 0x3F;
             return;
         }
 
-        let min = self.rtc_minutes & 0x3F;
+        let min = self.rtc.minutes & 0x3F;
         if min == 59 {
-            self.rtc_minutes = 0;
+            self.rtc.minutes = 0;
         } else {
-            self.rtc_minutes = (min + 1) & 0x3F;
+            self.rtc.minutes = (min + 1) & 0x3F;
             return;
         }
 
-        let hour = self.rtc_hours & 0x1F;
+        let hour = self.rtc.hours & 0x1F;
         if hour == 23 {
-            self.rtc_hours = 0;
+            self.rtc.hours = 0;
         } else {
-            self.rtc_hours = (hour + 1) & 0x1F;
+            self.rtc.hours = (hour + 1) & 0x1F;
             return;
         }
 
         // Day counter: 9 bits = days_low (8) + bit 0 of days_high. On overflow
         // past 0x1FF the counter wraps to 0 and the carry flag (bit 7) latches.
-        let day = (self.rtc_days_low as u16) | (((self.rtc_days_high & 0x01) as u16) << 8);
+        let day = (self.rtc.days_low as u16) | (((self.rtc.days_high & 0x01) as u16) << 8);
         let next = day + 1;
-        self.rtc_days_low = (next & 0xFF) as u8;
+        self.rtc.days_low = (next & 0xFF) as u8;
         // Preserve HALT (bit 6) and the already-latched carry (bit 7); set bit 0
         // from the new day counter, and set carry on the 0x1FF -> 0x200 wrap.
-        let mut high = self.rtc_days_high & 0xC0;
+        let mut high = self.rtc.days_high & 0xC0;
         if next & 0x100 != 0 {
             high |= 0x01;
         }
         if next > 0x1FF {
-            self.rtc_days_low = 0;
+            self.rtc.days_low = 0;
             high &= !0x01;
             high |= 0x80; // day-carry latches until software clears it
         }
-        self.rtc_days_high = high;
+        self.rtc.days_high = high;
     }
 
     // --- RTC persistence -------------------------------------------------
@@ -2796,16 +2800,16 @@ impl Cartridge {
 
     fn mbc3_rtc_serialize(&self, unix_time: u64) -> [u8; Self::MBC3_RTC_BLOB_LEN] {
         let regs = [
-            self.rtc_seconds,
-            self.rtc_minutes,
-            self.rtc_hours,
-            self.rtc_days_low,
-            self.rtc_days_high,
-            self.rtc_seconds_latched,
-            self.rtc_minutes_latched,
-            self.rtc_hours_latched,
-            self.rtc_days_low_latched,
-            self.rtc_days_high_latched,
+            self.rtc.seconds,
+            self.rtc.minutes,
+            self.rtc.hours,
+            self.rtc.days_low,
+            self.rtc.days_high,
+            self.rtc_latched.seconds,
+            self.rtc_latched.minutes,
+            self.rtc_latched.hours,
+            self.rtc_latched.days_low,
+            self.rtc_latched.days_high,
         ];
         let mut out = [0u8; Self::MBC3_RTC_BLOB_LEN];
         for (i, r) in regs.iter().enumerate() {
@@ -2824,16 +2828,16 @@ impl Cartridge {
             return None;
         }
         let reg = |i: usize| u32::from_le_bytes(data[i * 4..i * 4 + 4].try_into().unwrap()) as u8;
-        self.rtc_seconds = reg(0) & 0x3F;
-        self.rtc_minutes = reg(1) & 0x3F;
-        self.rtc_hours = reg(2) & 0x1F;
-        self.rtc_days_low = reg(3);
-        self.rtc_days_high = reg(4) & 0xC1;
-        self.rtc_seconds_latched = reg(5) & 0x3F;
-        self.rtc_minutes_latched = reg(6) & 0x3F;
-        self.rtc_hours_latched = reg(7) & 0x1F;
-        self.rtc_days_low_latched = reg(8);
-        self.rtc_days_high_latched = reg(9) & 0xC1;
+        self.rtc.seconds = reg(0) & 0x3F;
+        self.rtc.minutes = reg(1) & 0x3F;
+        self.rtc.hours = reg(2) & 0x1F;
+        self.rtc.days_low = reg(3);
+        self.rtc.days_high = reg(4) & 0xC1;
+        self.rtc_latched.seconds = reg(5) & 0x3F;
+        self.rtc_latched.minutes = reg(6) & 0x3F;
+        self.rtc_latched.hours = reg(7) & 0x1F;
+        self.rtc_latched.days_low = reg(8);
+        self.rtc_latched.days_high = reg(9) & 0xC1;
         // The restored state begins a fresh second.
         self.rtc_cycle_accum = 0;
         Some(if data.len() >= Self::MBC3_RTC_BLOB_LEN {
@@ -2845,7 +2849,7 @@ impl Cartridge {
 
     fn huc3_rtc_serialize(&self, unix_time: u64) -> [u8; Self::HUC3_RTC_BLOB_LEN] {
         let mut out = [0u8; Self::HUC3_RTC_BLOB_LEN];
-        for (i, chunk) in self.huc3_rtc_mem.chunks(2).take(0x80).enumerate() {
+        for (i, chunk) in self.huc3_rtc.mem.chunks(2).take(0x80).enumerate() {
             out[i] = (chunk[0] & 0x0F) | (chunk.get(1).copied().unwrap_or(0) << 4);
         }
         out[128..136].copy_from_slice(&unix_time.to_le_bytes());
@@ -2853,15 +2857,15 @@ impl Cartridge {
     }
 
     fn huc3_rtc_deserialize(&mut self, data: &[u8]) -> Option<u64> {
-        if data.len() < Self::HUC3_RTC_BLOB_LEN || self.huc3_rtc_mem.len() < 0x100 {
+        if data.len() < Self::HUC3_RTC_BLOB_LEN || self.huc3_rtc.mem.len() < 0x100 {
             return None;
         }
         for (i, &d) in data[..0x80].iter().enumerate() {
-            self.huc3_rtc_mem[i * 2] = d & 0x0F;
-            self.huc3_rtc_mem[i * 2 + 1] = d >> 4;
+            self.huc3_rtc.mem[i * 2] = d & 0x0F;
+            self.huc3_rtc.mem[i * 2 + 1] = d >> 4;
         }
         // The restored state begins a fresh minute.
-        self.huc3_rtc_accum = 0;
+        self.huc3_rtc.accum = 0;
         Some(u64::from_le_bytes(data[128..136].try_into().unwrap()))
     }
 
@@ -2914,36 +2918,36 @@ impl Cartridge {
         if n == 0 {
             return;
         }
-        let (s, carries) = Self::counter_advance(self.rtc_seconds & 0x3F, 64, 60, n);
-        self.rtc_seconds = s;
+        let (s, carries) = Self::counter_advance(self.rtc.seconds & 0x3F, 64, 60, n);
+        self.rtc.seconds = s;
         if carries == 0 {
             return;
         }
-        let (m, carries) = Self::counter_advance(self.rtc_minutes & 0x3F, 64, 60, carries);
-        self.rtc_minutes = m;
+        let (m, carries) = Self::counter_advance(self.rtc.minutes & 0x3F, 64, 60, carries);
+        self.rtc.minutes = m;
         if carries == 0 {
             return;
         }
-        let (h, carries) = Self::counter_advance(self.rtc_hours & 0x1F, 32, 24, carries);
-        self.rtc_hours = h;
+        let (h, carries) = Self::counter_advance(self.rtc.hours & 0x1F, 32, 24, carries);
+        self.rtc.hours = h;
         if carries == 0 {
             return;
         }
-        let day = (self.rtc_days_low as u64) | (((self.rtc_days_high & 0x01) as u64) << 8);
+        let day = (self.rtc.days_low as u64) | (((self.rtc.days_high & 0x01) as u64) << 8);
         let total = day + carries;
-        self.rtc_days_low = (total & 0xFF) as u8;
-        let mut high = self.rtc_days_high & 0xC0;
+        self.rtc.days_low = (total & 0xFF) as u8;
+        let mut high = self.rtc.days_high & 0xC0;
         high |= ((total >> 8) & 0x01) as u8;
         if total > 0x1FF {
             high |= 0x80; // day-counter overflow latches until software clears it
         }
-        self.rtc_days_high = high;
+        self.rtc.days_high = high;
     }
 
     /// Advance the HuC-3 minute-of-day/day counters by `n` minutes in closed
     /// form; equivalent to `n` iterations of the per-minute tick.
     fn huc3_rtc_advance_minutes(&mut self, mut n: u64) {
-        if n == 0 || self.huc3_rtc_mem.len() < 0x16 {
+        if n == 0 || self.huc3_rtc.mem.len() < 0x16 {
             return;
         }
         let (mut minutes, mut days) = self.huc3_clock();
@@ -2974,7 +2978,7 @@ impl Cartridge {
         }
         match self.get_cartridge_type() {
             CartridgeType::MBC3 { timer: true, .. } => {
-                if self.rtc_days_high & 0x40 != 0 {
+                if self.rtc.days_high & 0x40 != 0 {
                     return; // halted
                 }
                 self.mbc3_rtc_advance_seconds(elapsed_seconds);
@@ -2983,8 +2987,9 @@ impl Cartridge {
                 self.huc3_rtc_advance_minutes(elapsed_seconds / 60);
                 // Sub-minute remainder feeds the cycle accumulator so the
                 // next in-session minute fires early by the carried amount.
-                self.huc3_rtc_accum = self
-                    .huc3_rtc_accum
+                self.huc3_rtc.accum = self
+                    .huc3_rtc
+                    .accum
                     .saturating_add((elapsed_seconds % 60) * 4_194_304);
             }
             _ => {}
@@ -3281,27 +3286,27 @@ impl Cartridge {
     fn cam_reg_write(&mut self, idx: u16, value: u8) {
         if idx == 0 {
             // Only the low 3 bits are wired.
-            self.cam_regs[0] = value & 0x07;
+            self.cam.regs[0] = value & 0x07;
             if value & 0x01 != 0 {
-                if !self.cam_running {
-                    if self.cam_clocks_left > 0 {
+                if !self.cam.running {
+                    if self.cam.clocks_left > 0 {
                         // Restart after a mid-capture stop: "it will continue
                         // the previous capture process with the old capture
                         // parameters, even if the registers are changed in
                         // between" -- cam_pending was already processed with
                         // the trigger-time parameters.
-                        self.cam_running = true;
+                        self.cam.running = true;
                     } else {
                         self.cam_start_capture();
                     }
                 }
-            } else if self.cam_running {
+            } else if self.cam.running {
                 // Stop the capture; RAM is readable again. The countdown
                 // freezes so a later '1' write resumes it.
-                self.cam_running = false;
+                self.cam.running = false;
             }
         } else if (idx as usize) < CAM_REG_COUNT {
-            self.cam_regs[idx as usize] = value;
+            self.cam.regs[idx as usize] = value;
         }
         // A036-A07F: unmapped, writes ignored.
     }
@@ -3312,14 +3317,14 @@ impl Cartridge {
     /// at the END of the window; committing at expiry keeps the previous
     /// image visible if the capture is stopped early, as documented).
     fn cam_start_capture(&mut self) {
-        let n_bit = self.cam_regs[1] & 0x80 != 0;
-        let exposure = ((self.cam_regs[2] as u64) << 8) | self.cam_regs[3] as u64;
+        let n_bit = self.cam.regs[1] & 0x80 != 0;
+        let exposure = ((self.cam.regs[2] as u64) << 8) | self.cam.regs[3] as u64;
         // Pan Docs: M-cycles(1MiHz) = 32446 + (N ? 0 : 512) + 16 * exposure.
         // Stored in master-clock T-cycles (x4); cam_tick halves the window
         // in CGB double-speed mode where PHI runs twice as fast.
-        self.cam_clocks_left = 4 * (32446 + if n_bit { 0 } else { 512 } + 16 * exposure);
-        self.cam_running = true;
-        self.cam_pending = self.cam_process_image();
+        self.cam.clocks_left = 4 * (32446 + if n_bit { 0 } else { 512 } + 16 * exposure);
+        self.cam.running = true;
+        self.cam.pending = self.cam_process_image();
     }
 
     /// Advance the capture countdown by `phi_quarters` PHI/4 units (master
@@ -3327,21 +3332,21 @@ impl Cartridge {
     /// mode, where the PHI cartridge clock runs at 2.097152 MHz). No-op
     /// unless a capture is actively running.
     pub(crate) fn cam_tick(&mut self, phi_quarters: u64) {
-        if !self.cam_running || phi_quarters == 0 {
+        if !self.cam.running || phi_quarters == 0 {
             return;
         }
-        if self.cam_clocks_left > phi_quarters {
-            self.cam_clocks_left -= phi_quarters;
+        if self.cam.clocks_left > phi_quarters {
+            self.cam.clocks_left -= phi_quarters;
             return;
         }
         // Capture finished: the controller has streamed the processed tile
         // data into RAM bank 0 at $0100 and the busy flag clears.
-        self.cam_clocks_left = 0;
-        self.cam_running = false;
+        self.cam.clocks_left = 0;
+        self.cam.running = false;
         if self.ram_data.len() >= CAM_RAM_IMAGE_OFFSET + CAM_TILE_BYTES
-            && self.cam_pending.len() == CAM_TILE_BYTES
+            && self.cam.pending.len() == CAM_TILE_BYTES
         {
-            let pending = std::mem::take(&mut self.cam_pending);
+            let pending = std::mem::take(&mut self.cam.pending);
             self.ram_data[CAM_RAM_IMAGE_OFFSET..CAM_RAM_IMAGE_OFFSET + CAM_TILE_BYTES]
                 .copy_from_slice(&pending);
             // Stream the block to the battery .sav (single bulk write, not
@@ -3380,18 +3385,18 @@ impl Cartridge {
 
         // --- Configuration (registers latched at trigger time).
         // A000 bits 1-2 select the 1-D filter P/M sets (doc v1.1.1 §3.1.3).
-        let (p_bits, m_bits) = match (self.cam_regs[0] >> 1) & 3 {
+        let (p_bits, m_bits) = match (self.cam.regs[0] >> 1) & 3 {
             0 => (0x00u32, 0x01u32),
             1 => (0x01, 0x00),
             _ => (0x01, 0x02),
         };
-        let n_bit = (self.cam_regs[1] >> 7) as u32;
-        let vh_bits = ((self.cam_regs[1] >> 5) & 3) as u32;
-        let exposure = ((self.cam_regs[2] as i32) << 8) | self.cam_regs[3] as i32;
-        let e3_bit = (self.cam_regs[4] >> 7) as u32;
-        let i_bit = self.cam_regs[4] & 0x08 != 0;
+        let n_bit = (self.cam.regs[1] >> 7) as u32;
+        let vh_bits = ((self.cam.regs[1] >> 5) & 3) as u32;
+        let exposure = ((self.cam.regs[2] as i32) << 8) | self.cam.regs[3] as i32;
+        let e3_bit = (self.cam.regs[4] >> 7) as u32;
+        let i_bit = self.cam.regs[4] & 0x08 != 0;
         // Edge enhancement ratio in quarters: 0.50,0.75,1.00,1.25,2,3,4,5.
-        let alpha4 = [2i32, 3, 4, 5, 8, 12, 16, 20][((self.cam_regs[4] >> 4) & 7) as usize];
+        let alpha4 = [2i32, 3, 4, 5, 8, 12, 16, 20][((self.cam.regs[4] >> 4) & 7) as usize];
         // alpha-scaled add in the documented sample's exact float->int form:
         // trunc(px + diff*alpha) == trunc((4*px + diff*alpha4) / 4).
         let edge = |px: i32, diff: i32| (px * 4 + diff * alpha4) / 4;
@@ -3541,11 +3546,11 @@ impl Cartridge {
                 let base = 6 + ((j & 3) * 4 + (i & 3)) * 3;
                 // sensor < DxyL -> black; < DxyM -> dark gray; < DxyH ->
                 // light gray; else white (shades as 2bpp color numbers).
-                let color: u8 = if value < self.cam_regs[base] as i32 {
+                let color: u8 = if value < self.cam.regs[base] as i32 {
                     3
-                } else if value < self.cam_regs[base + 1] as i32 {
+                } else if value < self.cam.regs[base + 1] as i32 {
                     2
-                } else if value < self.cam_regs[base + 2] as i32 {
+                } else if value < self.cam.regs[base + 2] as i32 {
                     1
                 } else {
                     0
@@ -3725,14 +3730,9 @@ impl Cartridge {
             // Battery-fed domain.
             ram_data: std::mem::take(&mut self.ram_data),
             mbc2_ram: std::mem::take(&mut self.mbc2_ram),
-            rtc_seconds: self.rtc_seconds,
-            rtc_minutes: self.rtc_minutes,
-            rtc_hours: self.rtc_hours,
-            rtc_days_low: self.rtc_days_low,
-            rtc_days_high: self.rtc_days_high,
+            rtc: self.rtc,
             rtc_cycle_accum: self.rtc_cycle_accum,
-            huc3_rtc_mem: std::mem::take(&mut self.huc3_rtc_mem),
-            huc3_rtc_accum: self.huc3_rtc_accum,
+            huc3_rtc: std::mem::take(&mut self.huc3_rtc),
             // Transient hardware inputs: power cycling the console nulls
             // neither gravity nor the camera scene.
             mbc7_sensor_x: self.mbc7_sensor_x,
@@ -3758,8 +3758,8 @@ impl Cartridge {
     /// bootstrap). No-op for every other mapper.
     pub(crate) fn skip_boot_handoff(&mut self) {
         match self.get_cartridge_type() {
-            CartridgeType::Sachen { .. } => self.sachen_lock.set(UNL_UNLOCKED),
-            CartridgeType::Rocket => self.rocket_lock.set(UNL_UNLOCKED),
+            CartridgeType::Sachen { .. } => self.sachen.lock.set(UNL_UNLOCKED),
+            CartridgeType::Rocket => self.rocket.lock.set(UNL_UNLOCKED),
             _ => {}
         }
     }
@@ -3804,22 +3804,22 @@ impl Cartridge {
     /// transitions are driven by CPU READS (the A15-transition counter on the
     /// real board).
     fn sachen_read_addr(&self, mut addr: u16, mmc2: bool) -> u16 {
-        let lock = self.sachen_lock.get();
+        let lock = self.sachen.lock.get();
         if mmc2 {
             // MMC2: DMG -> CGB -> unlocked, 0x31 transitions each. (The
             // DMG->CGB shortcut on WRAM traffic is not visible from the
             // cart bus here; the counter path below models the read-driven counter.)
             if lock != UNL_UNLOCKED && (addr & 0x8700) == 0x0100 {
-                let t = self.sachen_transition.get() + 1;
+                let t = self.sachen.transition.get() + 1;
                 if t == 0x31 {
-                    self.sachen_lock.set(lock + 1);
-                    self.sachen_transition.set(0);
+                    self.sachen.lock.set(lock + 1);
+                    self.sachen.transition.set(0);
                 } else {
-                    self.sachen_transition.set(t);
+                    self.sachen.transition.set(t);
                 }
             }
             if (addr & 0xFF00) == 0x0100 {
-                if self.sachen_lock.get() == UNL_LOCKED_CGB {
+                if self.sachen.lock.get() == UNL_LOCKED_CGB {
                     // Locked: RA7 forced high (presents the second header
                     // copy).
                     addr |= 0x80;
@@ -3829,10 +3829,10 @@ impl Cartridge {
         } else {
             // MMC1: single locked phase; the 0x31st $01xx read unlocks.
             if lock != UNL_UNLOCKED && (addr & 0xFF00) == 0x0100 {
-                let t = self.sachen_transition.get() + 1;
-                self.sachen_transition.set(t);
+                let t = self.sachen.transition.get() + 1;
+                self.sachen.transition.set(t);
                 if t == 0x31 {
-                    self.sachen_lock.set(UNL_UNLOCKED);
+                    self.sachen.lock.set(UNL_UNLOCKED);
                 } else {
                     addr |= 0x80;
                 }
@@ -3869,21 +3869,21 @@ impl Cartridge {
     /// present — that window is only ever observed while the boot ROM runs.
     /// (Rocket Games lock state machine.)
     fn rocket_locked_logo(&self, addr: u16) -> Option<u8> {
-        let mode = self.rocket_lock.get();
+        let mode = self.rocket.lock.get();
         if mode != UNL_UNLOCKED {
-            let count = self.rocket_unlock_count.get();
+            let count = self.rocket.unlock_count.get();
             if count == 0x30 {
                 if mode == UNL_LOCKED_DMG {
-                    self.rocket_lock.set(UNL_LOCKED_CGB);
-                    self.rocket_unlock_count.set(0);
+                    self.rocket.lock.set(UNL_LOCKED_CGB);
+                    self.rocket.unlock_count.set(0);
                 } else {
-                    self.rocket_lock.set(UNL_UNLOCKED);
+                    self.rocket.lock.set(UNL_UNLOCKED);
                 }
             } else {
-                self.rocket_unlock_count.set(count + 1);
+                self.rocket.unlock_count.set(count + 1);
             }
         }
-        if self.rocket_lock.get() == UNL_LOCKED_CGB && (0x0104..0x0134).contains(&addr) {
+        if self.rocket.lock.get() == UNL_LOCKED_CGB && (0x0104..0x0134).contains(&addr) {
             self.rocket_boot_logo.map(|logo| logo[(addr - 0x0104) as usize])
         } else {
             None
@@ -3902,7 +3902,7 @@ impl Cartridge {
         if (addr >> 10) & 3 == 0 {
             st.cmd = [st.cmd[1], st.cmd[2], value];
             if st.cmd == [0x7E, 0x29, 0x79] {
-                self.mbc5_rom_bank_low = 6;
+                self.mbc5.rom_bank_low = 6;
             }
         } else {
             st.select = value;
@@ -4060,16 +4060,16 @@ impl memory::Addressable for Cartridge {
                         // A000-AFFF (B000-BFFF just reads 0xFF). The register
                         // is selected by address bits 4-7; bits 0-3 and 8-11
                         // are ignored.
-                        if self.ram_enabled && self.mbc7_ram_enabled2 && addr < 0xB000 {
+                        if self.ram_enabled && self.mbc7.ram_enabled2 && addr < 0xB000 {
                             match (addr >> 4) & 0x0F {
-                                0x2 => (self.mbc7_accel_x & 0xFF) as u8,
-                                0x3 => (self.mbc7_accel_x >> 8) as u8,
-                                0x4 => (self.mbc7_accel_y & 0xFF) as u8,
-                                0x5 => (self.mbc7_accel_y >> 8) as u8,
+                                0x2 => (self.mbc7.accel_x & 0xFF) as u8,
+                                0x3 => (self.mbc7.accel_x >> 8) as u8,
+                                0x4 => (self.mbc7.accel_y & 0xFF) as u8,
+                                0x5 => (self.mbc7.accel_y >> 8) as u8,
                                 // Ax6x always reads 0x00 (possibly a reserved
                                 // Z axis); Ax7x always 0xFF.
                                 0x6 => 0x00,
-                                0x8 => self.mbc7_eeprom.pin_state(),
+                                0x8 => self.mbc7.eeprom.pin_state(),
                                 // Ax0x/Ax1x are write-only (latch control),
                                 // Ax7x and Ax9x-AxFx read 0xFF.
                                 _ => 0xFF,
@@ -4079,7 +4079,7 @@ impl memory::Addressable for Cartridge {
                         }
                     }
                     CartridgeType::HuC1 => {
-                        if self.huc1_ir_mode {
+                        if self.huc1.ir_mode {
                             // IR receiver: 0xC1 = light seen, 0xC0 = no light
                             // (Pan Docs HuC1). No IR transport is modeled, so
                             // this always reads the documented idle 0xC0.
@@ -4092,17 +4092,17 @@ impl memory::Addressable for Cartridge {
                         }
                     }
                     CartridgeType::PocketCamera => {
-                        if self.cam_regs_selected {
+                        if self.cam.regs_selected {
                             // Register file, mirrored every $80. Only A000 is
                             // readable: bits 1-2 are the stored 1-D filter
                             // set, bit 0 is the live capture-busy flag; bits
                             // 3-7 read '0'. All other registers read $00.
                             if (addr & 0x7F) == 0 {
-                                (self.cam_regs[0] & 0x06) | (self.cam_running as u8)
+                                (self.cam.regs[0] & 0x06) | (self.cam.running as u8)
                             } else {
                                 0x00
                             }
-                        } else if self.cam_running {
+                        } else if self.cam.running {
                             // "When the capture process is active all RAM
                             // banks will return 00h when read."
                             0x00
@@ -4114,7 +4114,7 @@ impl memory::Addressable for Cartridge {
                         }
                     }
                     CartridgeType::HuC3 => {
-                        match self.huc3_mode {
+                        match self.huc3.mode {
                             // 0x0 = RAM read-only, 0xA = RAM read/write; both
                             // read the banked external RAM.
                             0x0 | 0xA => {
@@ -4129,7 +4129,7 @@ impl memory::Addressable for Cartridge {
                             // the result of the last executed command. D7 is
                             // not driven by the chip (open bus, usually
                             // high).
-                            0xC => 0x80 | (self.huc3_rtc_command << 4) | self.huc3_rtc_result,
+                            0xC => 0x80 | (self.huc3.rtc_command << 4) | self.huc3.rtc_result,
                             // RTC semaphore: bit 0 high = MCU ready. Modeled
                             // as always ready (instant execution). Bits 7-1
                             // are not specified; 0 matches observed software
@@ -4216,9 +4216,9 @@ impl memory::Addressable for Cartridge {
             RAM_ENABLE_START..=BANKING_MODE_END
                 if matches!(self.get_cartridge_type(), CartridgeType::M161) =>
             {
-                if !self.m161_mapped {
-                    self.m161_bank = (value & 7) << 1;
-                    self.m161_mapped = true;
+                if !self.m161.mapped {
+                    self.m161.bank = (value & 7) << 1;
+                    self.m161.mapped = true;
                 }
             }
             // RAM Enable (0x0000-0x1FFF)
@@ -4242,12 +4242,12 @@ impl memory::Addressable for Cartridge {
                         // IR select: only 0xE in the low nibble maps the IR
                         // transceiver at A000-BFFF; anything else selects RAM.
                         // There is no RAM-disable state.
-                        self.huc1_ir_mode = (value & 0x0F) == 0x0E;
+                        self.huc1.ir_mode = (value & 0x0F) == 0x0E;
                     }
                     CartridgeType::HuC3 => {
                         // RAM/RTC/IR select: maps what A000-BFFF accesses.
                         // Only the low 4 bits are significant.
-                        self.huc3_mode = value & 0x0F;
+                        self.huc3.mode = value & 0x0F;
                     }
                     CartridgeType::PocketCamera => {
                         // Gates RAM WRITES only: "Reading from RAM or
@@ -4258,8 +4258,8 @@ impl memory::Addressable for Cartridge {
                     CartridgeType::Sachen { .. } => {
                         // Base ROM bank register, latched only while the
                         // inner bank register has bits 4-5 both set.
-                        if (self.sachen_bank & 0x30) == 0x30 {
-                            self.sachen_base = value;
+                        if (self.sachen.bank & 0x30) == 0x30 {
+                            self.sachen.base = value;
                         }
                     }
                     CartridgeType::NtOld { .. } => {
@@ -4285,46 +4285,46 @@ impl memory::Addressable for Cartridge {
                         // MBC5 ROM bank select depends on address range
                         if addr <= 0x2FFF {
                             // 0x2000-0x2FFF: Lower 8 bits of ROM bank
-                            self.mbc5_rom_bank_low = value; // MBC5 allows bank 0
+                            self.mbc5.rom_bank_low = value; // MBC5 allows bank 0
                         } else {
                             // 0x3000-0x3FFF: Upper 1 bit of ROM bank
-                            self.mbc5_rom_bank_high = value & 0x01; // Only bit 0 is used
+                            self.mbc5.rom_bank_high = value & 0x01; // Only bit 0 is used
                         }
                     }
                     CartridgeType::MBC7 => {
-                        self.mbc7_rom_bank = value; // like MBC5, bank 0 allowed
+                        self.mbc7.rom_bank = value; // like MBC5, bank 0 allowed
                     }
                     CartridgeType::HuC1 => {
-                        self.huc1_rom_bank = value & 0x3F; // 6-bit, bank 0 allowed
+                        self.huc1.rom_bank = value & 0x3F; // 6-bit, bank 0 allowed
                     }
                     CartridgeType::HuC3 => {
-                        self.huc3_rom_bank = value & 0x7F; // 7-bit, bank 0 allowed
+                        self.huc3.rom_bank = value & 0x7F; // 7-bit, bank 0 allowed
                     }
                     CartridgeType::PocketCamera => {
-                        self.cam_rom_bank = value & 0x3F; // 6-bit, bank 0 allowed
+                        self.cam.rom_bank = value & 0x3F; // 6-bit, bank 0 allowed
                     }
                     CartridgeType::Rocket => {
                         // Two EXACT register addresses; everything else in
                         // the region is ignored.
                         match addr {
                             // Inner 16KB bank, 0 maps to 1.
-                            0x3F00 => self.rocket_rom_bank = value.max(1),
+                            0x3F00 => self.rocket.rom_bank = value.max(1),
                             // Outer 256KB bank (effective bank bits 4-7; the
                             // $99 2-in-1s use it to pick the sub-game).
-                            0x3FC0 => self.rocket_outer = value,
+                            0x3FC0 => self.rocket.outer = value,
                             _ => {}
                         }
                     }
                     CartridgeType::Sachen { .. } => {
                         // Inner ("unmasked") bank register, 0 maps to 1.
-                        self.sachen_bank = value.max(1);
+                        self.sachen.bank = value.max(1);
                     }
                     CartridgeType::NtOld { v2 } => {
                         // v1 is MBC1-style 5-bit, v2 MBC3-style 8-bit; both
                         // remap 0 to 1. The raw value is stored; the $5003
                         // bit-swap applies combinationally in get_rom_bank.
                         let bank = if v2 { value } else { value & 0x1F };
-                        self.nt_bank = bank.max(1);
+                        self.nt.bank = bank.max(1);
                     }
                     _ => {}
                 }
@@ -4353,18 +4353,18 @@ impl memory::Addressable for Cartridge {
                             // low 3 bits select the RAM bank.
                             self.rumble_motor = (value & 0x08) != 0;
                         }
-                        self.mbc5_ram_bank = value; // 4 bits used (0x00-0x0F)
+                        self.mbc5.ram_bank = value; // 4 bits used (0x00-0x0F)
                     }
                     CartridgeType::MBC7 => {
                         // Stage 2 of the RAM-register unlock: exactly 0x40
                         // enables; any other value disables.
-                        self.mbc7_ram_enabled2 = value == 0x40;
+                        self.mbc7.ram_enabled2 = value == 0x40;
                     }
                     CartridgeType::HuC1 => {
-                        self.huc1_ram_bank = value;
+                        self.huc1.ram_bank = value;
                     }
                     CartridgeType::HuC3 => {
-                        self.huc3_ram_bank = value;
+                        self.huc3.ram_bank = value;
                     }
                     CartridgeType::PocketCamera => {
                         // Bit 4 set maps the CAM register file over
@@ -4372,17 +4372,17 @@ impl memory::Addressable for Cartridge {
                         // bank (the bank latch is untouched while registers
                         // are selected).
                         if value & 0x10 != 0 {
-                            self.cam_regs_selected = true;
+                            self.cam.regs_selected = true;
                         } else {
-                            self.cam_regs_selected = false;
-                            self.cam_ram_bank = value & 0x0F;
+                            self.cam.regs_selected = false;
+                            self.cam.ram_bank = value & 0x0F;
                         }
                     }
                     CartridgeType::Sachen { .. } => {
                         // ROM bank mask register, latched only while the
                         // inner bank register has bits 4-5 both set.
-                        if (self.sachen_bank & 0x30) == 0x30 {
-                            self.sachen_mask = value;
+                        if (self.sachen.bank & 0x30) == 0x30 {
+                            self.sachen.mask = value;
                         }
                     }
                     CartridgeType::NtOld { .. }
@@ -4394,7 +4394,7 @@ impl memory::Addressable for Cartridge {
                             match addr & 0x03 {
                                 0x01 => {
                                     // Multicart base, 32KB units.
-                                    self.nt_base = value & 0x3F;
+                                    self.nt.base = value & 0x3F;
                                 }
                                 0x02 => {
                                     // High nibble $Ex declares 8KB cart RAM
@@ -4405,7 +4405,7 @@ impl memory::Addressable for Cartridge {
                                     }
                                     // Low nibble selects the sub-game bank
                                     // window (bank-count mask).
-                                    self.nt_bank_mask = match value & 0x0F {
+                                    self.nt.bank_mask = match value & 0x0F {
                                         0x00 => 31, // 512KB
                                         0x08 => 15, // 256KB
                                         0x0C => 7,  // 128KB
@@ -4416,7 +4416,7 @@ impl memory::Addressable for Cartridge {
                                 }
                                 0x03 => {
                                     // Bank-line bit-swap mode (bit 4).
-                                    self.nt_swapped = (value & 0x10) != 0;
+                                    self.nt.swapped = (value & 0x10) != 0;
                                 }
                                 _ => {}
                             }
@@ -4504,28 +4504,28 @@ impl memory::Addressable for Cartridge {
                     CartridgeType::MBC7 => {
                         // Registers respond only with both enable stages
                         // unlocked, and only in A000-AFFF (see the read path).
-                        if self.ram_enabled && self.mbc7_ram_enabled2 && addr < 0xB000 {
+                        if self.ram_enabled && self.mbc7.ram_enabled2 && addr < 0xB000 {
                             match (addr >> 4) & 0x0F {
                                 0x0 => {
                                     // Erase the accelerometer latch: values
                                     // reset to 0x8000 and re-latching is
                                     // re-armed.
                                     if value == 0x55 {
-                                        self.mbc7_accel_x = 0x8000;
-                                        self.mbc7_accel_y = 0x8000;
-                                        self.mbc7_accel_latched = false;
+                                        self.mbc7.accel_x = 0x8000;
+                                        self.mbc7.accel_y = 0x8000;
+                                        self.mbc7.accel_latched = false;
                                     }
                                 }
                                 0x1 => {
                                     // Latch the current sensor sample. Only
                                     // accepted after an erase (cannot
                                     // re-latch without erasing first).
-                                    if value == 0xAA && !self.mbc7_accel_latched {
-                                        self.mbc7_accel_x =
+                                    if value == 0xAA && !self.mbc7.accel_latched {
+                                        self.mbc7.accel_x =
                                             Self::mbc7_accel_counts(self.mbc7_sensor_x);
-                                        self.mbc7_accel_y =
+                                        self.mbc7.accel_y =
                                             Self::mbc7_accel_counts(self.mbc7_sensor_y);
-                                        self.mbc7_accel_latched = true;
+                                        self.mbc7.accel_latched = true;
                                     }
                                 }
                                 0x8 => self.mbc7_eeprom_write(value),
@@ -4534,23 +4534,23 @@ impl memory::Addressable for Cartridge {
                         }
                     }
                     CartridgeType::HuC1 => {
-                        if self.huc1_ir_mode {
+                        if self.huc1.ir_mode {
                             // IR transmitter: bit 0 drives the LED ($01 on,
                             // $00 off). Latched for a future IR transport;
                             // nothing observes it yet.
-                            self.huc1_ir_led = value & 0x01 != 0;
+                            self.huc1.ir_led = value & 0x01 != 0;
                         } else if let Some(offset) = self.banked_ram_offset(addr) {
                             // RAM is always enabled (no MBC1-style gate).
                             let _ = self.write_ram_byte(offset, value);
                         }
                     }
                     CartridgeType::PocketCamera => {
-                        if self.cam_regs_selected {
+                        if self.cam.regs_selected {
                             // Register writes are always enabled (no RAMG
                             // gate) and mirror every $80.
                             self.cam_reg_write(addr & 0x7F, value);
                         } else if self.ram_enabled
-                            && !self.cam_running
+                            && !self.cam.running
                             && let Some(offset) = self.banked_ram_offset(addr)
                         {
                             // RAM writes need the $0A gate and are ignored
@@ -4559,7 +4559,7 @@ impl memory::Addressable for Cartridge {
                         }
                     }
                     CartridgeType::HuC3 => {
-                        match self.huc3_mode {
+                        match self.huc3.mode {
                             // RAM read/write. Mode 0x0 (read-only) ignores
                             // writes.
                             0xA => {
@@ -4572,8 +4572,8 @@ impl memory::Addressable for Cartridge {
                             // the mailbox; execution happens via the
                             // semaphore. D7 is not connected and is ignored.
                             0xB => {
-                                self.huc3_rtc_command = (value >> 4) & 0x07;
-                                self.huc3_rtc_argument = value & 0x0F;
+                                self.huc3.rtc_command = (value >> 4) & 0x07;
+                                self.huc3.rtc_argument = value & 0x0F;
                             }
                             // RTC semaphore: writing with bit 0 clear requests
                             // that the MCU execute the pending command.
@@ -4812,7 +4812,7 @@ mod tests {
 
         // Bank-switch command drives the MBC5 ROM-bank register to 6.
         arm(&mut cart, [0x7E, 0x29, 0x79]);
-        assert_eq!(cart.mbc5_rom_bank_low, 6);
+        assert_eq!(cart.mbc5.rom_bank_low, 6);
         assert_eq!(cart.read(0xAFFF), 0x31); // port 3 decoy readback
 
         // An unarmed read falls through to normal cart RAM (saves still work).
@@ -5130,20 +5130,20 @@ mod tests {
     }
 
     fn set_mbc3_rtc(cart: &mut Cartridge, regs: (u8, u8, u8, u8, u8)) {
-        cart.rtc_seconds = regs.0;
-        cart.rtc_minutes = regs.1;
-        cart.rtc_hours = regs.2;
-        cart.rtc_days_low = regs.3;
-        cart.rtc_days_high = regs.4;
+        cart.rtc.seconds = regs.0;
+        cart.rtc.minutes = regs.1;
+        cart.rtc.hours = regs.2;
+        cart.rtc.days_low = regs.3;
+        cart.rtc.days_high = regs.4;
     }
 
     fn mbc3_rtc(cart: &Cartridge) -> (u8, u8, u8, u8, u8) {
         (
-            cart.rtc_seconds,
-            cart.rtc_minutes,
-            cart.rtc_hours,
-            cart.rtc_days_low,
-            cart.rtc_days_high,
+            cart.rtc.seconds,
+            cart.rtc.minutes,
+            cart.rtc.hours,
+            cart.rtc.days_low,
+            cart.rtc.days_high,
         )
     }
 
@@ -5191,11 +5191,11 @@ mod tests {
     fn mbc3_rtc_blob_round_trips() {
         let mut cart = mbc3_rtc_cart();
         set_mbc3_rtc(&mut cart, (61, 5, 17, 0xAB, 0xC1)); // incl. out-of-range seconds
-        cart.rtc_seconds_latched = 33;
-        cart.rtc_minutes_latched = 44;
-        cart.rtc_hours_latched = 12;
-        cart.rtc_days_low_latched = 0x12;
-        cart.rtc_days_high_latched = 0x81;
+        cart.rtc_latched.seconds = 33;
+        cart.rtc_latched.minutes = 44;
+        cart.rtc_latched.hours = 12;
+        cart.rtc_latched.days_low = 0x12;
+        cart.rtc_latched.days_high = 0x81;
 
         let blob = cart.mbc3_rtc_serialize(0x0102_0304_0506_0708);
         assert_eq!(blob.len(), 48);
@@ -5209,8 +5209,8 @@ mod tests {
         let ts = restored.mbc3_rtc_deserialize(&blob).unwrap();
         assert_eq!(ts, 0x0102_0304_0506_0708);
         assert_eq!(mbc3_rtc(&restored), (61, 5, 17, 0xAB, 0xC1));
-        assert_eq!(restored.rtc_seconds_latched, 33);
-        assert_eq!(restored.rtc_days_high_latched, 0x81);
+        assert_eq!(restored.rtc_latched.seconds, 33);
+        assert_eq!(restored.rtc_latched.days_high, 0x81);
     }
 
     /// The legacy 44-byte variant (32-bit timestamp, from older tools) must be
@@ -5241,7 +5241,7 @@ mod tests {
     fn huc3_rtc_blob_round_trips_with_nibble_packing() {
         let mut cart = huc3_cart();
         cart.huc3_set_clock(0x2A5, 0x123);
-        cart.huc3_rtc_mem[0x58] = 0x7; // event-time nibble
+        cart.huc3_rtc.mem[0x58] = 0x7; // event-time nibble
         let blob = cart.huc3_rtc_serialize(0xDEAD_BEEF);
         assert_eq!(blob.len(), 136);
         // Nibble packing: nibble N -> byte N/2, even N in the low half. Minutes
@@ -5253,7 +5253,7 @@ mod tests {
         let ts = restored.huc3_rtc_deserialize(&blob).unwrap();
         assert_eq!(ts, 0xDEAD_BEEF);
         assert_eq!(restored.huc3_clock(), (0x2A5, 0x123));
-        assert_eq!(restored.huc3_rtc_mem[0x58], 0x7);
+        assert_eq!(restored.huc3_rtc.mem[0x58], 0x7);
     }
 
     /// Closed-form HuC-3 minute catch-up == iterating the per-minute tick,
@@ -5483,9 +5483,9 @@ mod tests {
         cart.write(0x0000, 0x0E);
         assert_eq!(cart.read(0xA000), 0xC0);
         cart.write(0xA000, 0x01);
-        assert!(cart.huc1_ir_led);
+        assert!(cart.huc1.ir_led);
         cart.write(0xA000, 0x00);
-        assert!(!cart.huc1_ir_led);
+        assert!(!cart.huc1.ir_led);
         // Anything else selects RAM mode again; RAM was not disturbed.
         cart.write(0x0000, 0x00);
         assert_eq!(cart.read(0xA000), 0x42);
@@ -5837,7 +5837,7 @@ mod tests {
         cart.write(0x4000, 0x08); // map RTC seconds
         cart.write(0x6000, 0x00); // latch edge
         cart.write(0x6000, 0x01);
-        assert_eq!(cart.rtc_seconds_latched, 12);
+        assert_eq!(cart.rtc_latched.seconds, 12);
         cart.ram_data[0] = 0x5A; // battery RAM must survive
 
         cart.reset();
@@ -5846,11 +5846,11 @@ mod tests {
         assert_eq!(cart.mbc3_ram_bank, 0);
         assert_eq!(
             (
-                cart.rtc_seconds_latched,
-                cart.rtc_minutes_latched,
-                cart.rtc_hours_latched,
-                cart.rtc_days_low_latched,
-                cart.rtc_days_high_latched,
+                cart.rtc_latched.seconds,
+                cart.rtc_latched.minutes,
+                cart.rtc_latched.hours,
+                cart.rtc_latched.days_low,
+                cart.rtc_latched.days_high,
             ),
             (0, 0, 0, 0, 0)
         );
@@ -5871,9 +5871,9 @@ mod tests {
 
         cart.reset();
         assert!(!cart.ram_enabled);
-        assert_eq!(cart.mbc5_rom_bank_low, 1);
-        assert_eq!(cart.mbc5_rom_bank_high, 0);
-        assert_eq!(cart.mbc5_ram_bank, 0);
+        assert_eq!(cart.mbc5.rom_bank_low, 1);
+        assert_eq!(cart.mbc5.rom_bank_high, 0);
+        assert_eq!(cart.mbc5.ram_bank, 0);
         assert!(!cart.rumble_active());
     }
 
@@ -5911,30 +5911,30 @@ mod tests {
                 cart.ram_data[0] = 0xA5;
             }
             cart.mbc2_ram[3] = 0x0F;
-            cart.rtc_seconds = 12;
-            cart.rtc_minutes = 34;
-            cart.rtc_hours = 5;
-            cart.rtc_days_low = 0x67;
-            cart.rtc_days_high = 0x01;
+            cart.rtc.seconds = 12;
+            cart.rtc.minutes = 34;
+            cart.rtc.hours = 5;
+            cart.rtc.days_low = 0x67;
+            cart.rtc.days_high = 0x01;
             cart.rtc_cycle_accum = 999;
-            if !cart.huc3_rtc_mem.is_empty() {
-                cart.huc3_rtc_mem[0x10] = 0xA;
+            if !cart.huc3_rtc.mem.is_empty() {
+                cart.huc3_rtc.mem[0x10] = 0xA;
             }
-            cart.huc3_rtc_accum = 777;
+            cart.huc3_rtc.accum = 777;
 
             cart.reset();
 
             let mut fresh = Cartridge::from_bytes(&rom).unwrap();
             fresh.ram_data = cart.ram_data.clone();
             fresh.mbc2_ram = cart.mbc2_ram.clone();
-            fresh.rtc_seconds = cart.rtc_seconds;
-            fresh.rtc_minutes = cart.rtc_minutes;
-            fresh.rtc_hours = cart.rtc_hours;
-            fresh.rtc_days_low = cart.rtc_days_low;
-            fresh.rtc_days_high = cart.rtc_days_high;
+            fresh.rtc.seconds = cart.rtc.seconds;
+            fresh.rtc.minutes = cart.rtc.minutes;
+            fresh.rtc.hours = cart.rtc.hours;
+            fresh.rtc.days_low = cart.rtc.days_low;
+            fresh.rtc.days_high = cart.rtc.days_high;
             fresh.rtc_cycle_accum = cart.rtc_cycle_accum;
-            fresh.huc3_rtc_mem = cart.huc3_rtc_mem.clone();
-            fresh.huc3_rtc_accum = cart.huc3_rtc_accum;
+            fresh.huc3_rtc.mem = cart.huc3_rtc.mem.clone();
+            fresh.huc3_rtc.accum = cart.huc3_rtc.accum;
             assert_eq!(
                 bincode::serialize(&cart).unwrap(),
                 bincode::serialize(&fresh).unwrap(),
