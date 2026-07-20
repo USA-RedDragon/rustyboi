@@ -8,12 +8,12 @@
 
 use rustyboi_core_lib::input::ButtonState;
 
-pub struct Event {
+pub(crate) struct Event {
     pub frame: usize,
     pub buttons: ButtonState,
 }
 
-pub fn parse_buttons(spec: &str) -> ButtonState {
+pub(crate) fn parse_buttons(spec: &str) -> ButtonState {
     let mut b = ButtonState::default();
     for name in spec.split('+').filter(|s| !s.is_empty()) {
         match name.to_ascii_uppercase().as_str() {
@@ -32,7 +32,7 @@ pub fn parse_buttons(spec: &str) -> ButtonState {
 }
 
 /// Parse a script into frame-sorted events.
-pub fn parse_script(script: &str) -> Vec<Event> {
+pub(crate) fn parse_script(script: &str) -> Vec<Event> {
     let mut events: Vec<Event> = script
         .split(';')
         .filter(|s| !s.trim().is_empty())
@@ -52,7 +52,7 @@ pub fn parse_script(script: &str) -> Vec<Event> {
 
 /// Expand a script into one `ButtonState` per frame for `frames` frames: the
 /// button state at each frame is the most recent event at or before it.
-pub fn expand_timeline(script: &str, frames: usize) -> Vec<ButtonState> {
+pub(crate) fn expand_timeline(script: &str, frames: usize) -> Vec<ButtonState> {
     let events = parse_script(script);
     let mut timeline = Vec::with_capacity(frames);
     let mut cur = ButtonState::default();

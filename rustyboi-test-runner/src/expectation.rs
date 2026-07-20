@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
-pub enum Mode {
+pub(crate) enum Mode {
     Dmg,
     Cgb,
     /// GBA-in-GBC-compat mode. Runs a CGB ROM on Hardware::AGB. Opt-in only
@@ -15,7 +15,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Dmg => "DMG",
             Self::Cgb => "CGB",
@@ -23,7 +23,7 @@ impl Mode {
         }
     }
 
-    pub fn progress_char(self) -> char {
+    pub(crate) fn progress_char(self) -> char {
         match self {
             Self::Dmg => 'd',
             Self::Cgb => 'c',
@@ -35,7 +35,7 @@ impl Mode {
 /// Memory region a `.dump` oracle is captured from. The base address is fixed
 /// per region; the length comes from the reference file size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DumpRegion {
+pub(crate) enum DumpRegion {
     /// OAM region starting at 0xFE00 (a `.dump` may cover the full 256 bytes
     /// 0xFE00..=0xFEFF, not only the 160-byte sprite table).
     Oam,
@@ -44,7 +44,7 @@ pub enum DumpRegion {
 }
 
 impl DumpRegion {
-    pub fn base_address(self) -> u16 {
+    pub(crate) fn base_address(self) -> u16 {
         match self {
             Self::Oam => 0xFE00,
             Self::Vram => 0x8000,
@@ -53,7 +53,7 @@ impl DumpRegion {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Oracle {
+pub(crate) enum Oracle {
     Hex { marker: &'static str, expected: String },
     Audio { marker: &'static str, audible: bool },
     Png { path: PathBuf },
@@ -133,7 +133,7 @@ pub enum Oracle {
 }
 
 impl Oracle {
-    pub fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             Self::Hex { marker, expected } => format!("{marker}{expected}"),
             Self::Audio { marker, audible } => {
@@ -171,23 +171,23 @@ impl Oracle {
 /// state with `buttons` (a `BTN_*` bitmask; 0 releases everything). Parsed
 /// from a manifest `input=` token; see `parse_input_script`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InputEvent {
+pub(crate) struct InputEvent {
     pub frame: u32,
     pub ly: Option<u8>,
     pub buttons: u8,
 }
 
-pub const BTN_A: u8 = 0x01;
-pub const BTN_B: u8 = 0x02;
-pub const BTN_SELECT: u8 = 0x04;
-pub const BTN_START: u8 = 0x08;
-pub const BTN_RIGHT: u8 = 0x10;
-pub const BTN_LEFT: u8 = 0x20;
-pub const BTN_UP: u8 = 0x40;
-pub const BTN_DOWN: u8 = 0x80;
+pub(crate) const BTN_A: u8 = 0x01;
+pub(crate) const BTN_B: u8 = 0x02;
+pub(crate) const BTN_SELECT: u8 = 0x04;
+pub(crate) const BTN_START: u8 = 0x08;
+pub(crate) const BTN_RIGHT: u8 = 0x10;
+pub(crate) const BTN_LEFT: u8 = 0x20;
+pub(crate) const BTN_UP: u8 = 0x40;
+pub(crate) const BTN_DOWN: u8 = 0x80;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TestCase {
+pub(crate) struct TestCase {
     pub rom_path: PathBuf,
     pub mode: Mode,
     pub oracle: Oracle,
@@ -212,7 +212,7 @@ pub struct TestCase {
     pub cart_lazy_sram_cs: bool,
 }
 
-pub fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<TestCase> {
+pub(crate) fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<TestCase> {
     let base = extension_stripped_string(rom_path);
     let mut cases = Vec::new();
 
@@ -324,7 +324,7 @@ pub fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<Te
 /// `blargg_mem`, `memauto`, `mem`, `mooneye`, `mooneye_ed`, `sram`, and `<arg>`
 /// is the reference-PNG path (png), `ADDR=VAL` hex (mem), the reference `.sav`
 /// path (sram), or empty. The `<id>` is descriptive only.
-pub fn parse_manifest(
+pub(crate) fn parse_manifest(
     text: &str,
     requested_modes: &HashSet<Mode>,
 ) -> Result<Vec<TestCase>, String> {
@@ -568,7 +568,7 @@ pub fn parse_manifest(
 /// windows since case start); with `@<ly>` it waits (up to two extra frames)
 /// for LY to equal `<ly>` first, so presses can land mid-frame at a chosen
 /// scanline. Events must be in non-decreasing frame order.
-pub fn parse_input_script(script: &str) -> Result<Vec<InputEvent>, String> {
+pub(crate) fn parse_input_script(script: &str) -> Result<Vec<InputEvent>, String> {
     let mut events = Vec::new();
     let mut last_frame = 0u32;
     for tok in script.split(',') {

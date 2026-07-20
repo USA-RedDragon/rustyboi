@@ -23,7 +23,7 @@ const MAX_CYCLES_UNTIL_LCD_FRAME: u32 = CYCLES_PER_FRAME * 64;
 const DUMP_MIN_FRAMES: usize = 64;
 
 #[derive(Debug)]
-pub struct CaseResult {
+pub(crate) struct CaseResult {
     pub case: TestCase,
     pub passed: bool,
     pub detail: String,
@@ -97,7 +97,7 @@ fn buttons_to_state(buttons: u8) -> ButtonState {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct RunOptions {
+pub(crate) struct RunOptions {
     pub frames: usize,
     pub scan_frames: usize,
     pub dump_dir: Option<PathBuf>,
@@ -124,7 +124,7 @@ pub struct RunOptions {
 /// boot ROM provisioned for it. DMG/CGB/AGB/SGB plus the revision variants
 /// DMG0/MGB/SGB2/CGB0/CGBE have dumps in `bios/`. CGBB (CPU-CGB-A/B) shares the
 /// standard CGB boot ROM — no distinct dump exists — so it maps to cgb_boot.bin.
-pub fn bios_filename(hw: Hardware) -> Option<&'static str> {
+pub(crate) fn bios_filename(hw: Hardware) -> Option<&'static str> {
     match hw {
         Hardware::DMG => Some("dmg_boot.bin"),
         Hardware::CGB => Some("cgb_boot.bin"),
@@ -248,7 +248,7 @@ fn snapshot_state(gb: &GB, cgb: bool) -> BootSnapshot {
 /// Run the real boot ROM and skip_bios independently on the same ROM, then
 /// print every byte/register where they differ. The diff exposes latent
 /// skip_bios hardware-accuracy bugs. Returns the number of discrepancies.
-pub fn validate_bios(
+pub(crate) fn validate_bios(
     rom_path: &PathBuf,
     mode: Mode,
     bios_dir: Option<&PathBuf>,
@@ -407,7 +407,7 @@ pub fn validate_bios(
     Ok(total)
 }
 
-pub fn run_case(case: TestCase, options: &RunOptions) -> CaseResult {
+pub(crate) fn run_case(case: TestCase, options: &RunOptions) -> CaseResult {
     match run_case_inner(&case, options) {
         Ok(()) => CaseResult {
             case,
