@@ -8103,6 +8103,345 @@ impl Ppu {
         false
     }
 
+    /// One BG/window fetcher step and everything that reacts to the event it
+    /// emits: the tile-fetch bookkeeping, the DMG window bus-glitch journal, the
+    /// sub-dot SCX/SCY re-resolves and the FIFO overwrites they drive.
+    ///
+    /// Lifted verbatim out of `step_mode3_dot`. The block has no early exit, so
+    /// there is no "stop this dot" signal to plumb. It did write one of the
+    /// caller's locals — `push_this_dot`, which it only ever sets to `true` —
+    /// so that becomes the return value and the caller re-applies it.
+    fn mode3_fetch_step(&mut self, mmio: &mut mmio::Mmio, cadence_even: bool, fetcher_lcdc_state: fetcher::FetcherLcdcState, pending_discard: u8) -> bool {
+        let mut push_this_dot = false;
+        if cadence_even
+            && let Some(event) = self.fetcher.step(mmio, fetcher_lcdc_state, crate::ppu::fetcher::FetchPos {
+                window_line: self.win_y_pos,
+                display_x: self.x,
+                pending_discard,
+                scy: self.scy_delayed,
+                scx: self.scx_delayed,
+            }) {
+                if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::TileNumber) {
+                    self.subcc_last_tn_cc = self.abs_cc;
+                }
+                if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo) {
+                    push_this_dot = true;
+                    // The display-x at which this tile's first pixel will
+                    // pop (the hardware push-at-empty dot), SIGNED: during
+                    // the SCX fine-scroll discard prologue the boundary
+                    // sits at the hardware position -(pending discards) < 0.
+                    if !mmio.is_cgb_features_enabled() {
+                        let first_x = self.x as i32 + event.fifo_size as i32
+                            - 8
+                            - pending_discard as i32;
+                        if (0..160).contains(&first_x) {
+                            // Visible boundary: queue for the pop-side
+                            // WE-off zero-pixel insert check.
+                            if let Some(slot) = self
+                                .we_glitch_tile_starts
+                                .iter_mut()
+                                .find(|s| s.is_none())
+                            {
+                                *slot = Some(first_x as u8);
+                            }
+                        } else if first_x < 0 && !mmio.is_cgb() {
+                            // Discard-prologue boundary (a known hardware
+                            // quirk): evaluate the WE-off insert HERE, at
+                            // the push dot. logical position = first_x+7
+                            // (hardware clamps out-of-range to 0, matching
+                            // WX==0). A hit inserts a color-0 pixel that
+                            // the prologue itself swallows — one discard
+                            // dot consumes it instead of a real pixel
+                            // (see we_glitch_discard_insert). Pre-CGB
+                            // MACHINES only (non-CGB hardware): the CGB
+                            // PPU has no insert glitch even in DMG-compat.
+                            let logical = first_x + 7;
+                            let logical =
+                                if (0..=167).contains(&logical) { logical } else { 0 };
+                            if self.window_y_triggered
+                                && !self.fetcher.is_fetching_window()
+                                && !self.we_dot_hist[2]
+                                && !self.we_insert_suppressed
+                                && mmio.read(WX) as i32 == logical
+                            {
+                                self.we_glitch_discard_insert = true;
+                            }
+                        }
+                    }
+                    // CGB-compat up-pulse LCDC.4 train: buffer each BG tile
+                    // so a line-end re-resolve against the COMPLETE journal
+                    // can fix the tiles fetched before the whole pulse train
+                    // was journaled (see cgb_train_reresolve).
+                    if self.wg_cgb && !event.fetching_window && !self.wg_hist.is_empty() {
+                        let first_x = (self.x as i32 + event.fifo_size as i32
+                            - 8
+                            - pending_discard as i32)
+                            .max(0);
+                        if (0..160).contains(&first_x) {
+                            self.bg_tile_buf.push(CapturedBgTile {
+                                n: event.tile_index as u64,
+                                tn: event.tile_num,
+                                first_x: first_x as u8,
+                                y: self.fetcher.latched_y(),
+                                live_low_tds: self.fetcher.last_low_tds(),
+                                live_high_tds: self.fetcher.last_high_tds(),
+                            });
+                        }
+                    }
+                    // WINDOW analog (win_train_reresolve): the window internal
+                    // line is win_y_pos (not latched_y, which the window fetch
+                    // does not update).
+                    if self.wg_cgb && event.fetching_window && !self.wg_hist.is_empty() {
+                        let first_x = (self.x as i32 + event.fifo_size as i32
+                            - 8
+                            - pending_discard as i32)
+                            .max(0);
+                        if (0..160).contains(&first_x) {
+                            self.win_tile_buf.push(CapturedWinTile {
+                                n: event.tile_index as u64,
+                                tn: event.tile_num,
+                                first_x: first_x as u8,
+                                y: self.win_y_pos,
+                                live_low_tds: self.fetcher.last_low_tds(),
+                                live_high_tds: self.fetcher.last_high_tds(),
+                            });
+                        }
+                    }
+                }
+                // The window fetch anchor persists for the rest of
+                // the line — the hardware fetch grid stays phase-locked
+                // to the restart (pushes every 8 dots from the anchor),
+                // so the reactivation-insert columns stay at
+                // window_start + 8k. It resets at the next M3 arm or window
+                // restart.
+                // Sub-cc column adjustment: a BG tile whose column was committed
+                // at TileNumber under the OLD scx, but whose pixels are
+                // PLOTTED after the write's apply cc (write_cc + 2*cgb),
+                // must render under the NEW scx (a mid-mode-3 SCX write
+                // samples the column at plot time, not fetch time). Only the single in-flight straddle
+                // tile (armed at the write) is corrected, and only at the
+                // exact plot-vs-apply phase (gap == 4); see the gap comment
+                // below.
+                let mut armed_this_event = false;
+                if self.subcc_rekey_armed
+                    && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
+                {
+                    // The single in-flight tile (column committed under the
+                    // OLD scx before the write) just pushed. Its first
+                    // displayed pixel sits at display column == the xpos the
+                    // fetcher used (xpos == display_x + fifo - pending); its
+                    // plot cc is abs_cc + (xpos - current display x). If that
+                    // plot cc is strictly after the apply cc the tile must
+                    // render under the NEW scx (the hardware SCX change samples
+                    // the column at plot, not fetch); re-key the 8 newest
+                    // FIFO entries with the NEW-scx column using the
+                    // fetcher's exact xpos/cgb_adj. Disarm afterwards.
+                    self.subcc_rekey_armed = false;
+                    let dsf = mmio.is_double_speed_mode() as u32;
+                    let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
+                    // plot cc = abs_cc + the dot distance to this tile's
+                    // first displayed pixel. The dot delta must be scaled
+                    // to master cc (1 dot = 1<<ds cc) so the gap resonance
+                    // is in master cc at both speeds.
+                    let plot_cc = self.abs_cc as i64
+                        + ((xpos as i64 - self.x as i64) << dsf);
+                    // SS (validated Stage 1b, broke-0 across the full
+                    // suite incl. DMG): the in-flight straddle flips to NEW
+                    // at the exact plot-vs-apply phase gap==4.
+                    let gap = plot_cc - self.subcc_scx_apply_cc as i64;
+                    // DMG SS + low-X sprite: the sprite-fetch dot during the
+                    // discard prologue shifts the whole line's BG-fetch phase
+                    // one tile, so a steady-state mid-line SCX write's
+                    // OLD->NEW column boundary also lands one tile LATER than
+                    // the no-sprite cadence the gap==4 rekey assumes. The
+                    // in-flight tile plots just before the boundary, so keep
+                    // it OLD (suppress the flip); the NEXT tile, fetched after
+                    // the write, is already NEW. Mirrors the CGB gap==1
+                    // first-line revert. Without the sprite (scx_during_m3_4/5)
+                    // gap==4 stays as the validated steady-state flip.
+                    let dmg_ss_lowx_sprite = dsf == 0
+                        && !mmio.is_cgb_features_enabled()
+                        && self.lcdc_has(LCDCFlags::SpriteDisplayEnable)
+                        && self.sprites_on_line.iter().any(|s| s.x <= 8);
+                    // DS (Stage 2): the gap proxy is ambiguous across
+                    // initial-scx, but the underlying resonance is that the
+                    // write's apply cc lands at the MIDPOINT of the armed
+                    // tile's fetcher step. The BG fetcher advances one step
+                    // every 2 dots == (2<<ds) cc; the armed tile's column
+                    // was latched at TileNumber (subcc_last_tn_cc) and
+                    // The hardware SCX-write handling re-derives that
+                    // single tile NEW only when apply falls half a step
+                    // (1<<ds cc) past the latch, modulo the step:
+                    // (apply_cc - tn_cc) % (2<<ds) == (1<<ds)
+                    // At DS this is (apply-tn)%4==2, which flips ds_3/4/5
+                    // across every initial-scx (0761/0360/...) where the
+                    // cruder gap/span proxies disagree. SS keeps gap==4
+                    // (the DMG cadence differs and the mod phase regresses
+                    // the DMG SS set, so SS is left exactly as Stage 1b).
+                    let flip = if dsf == 0 {
+                        gap == 4 && !dmg_ss_lowx_sprite
+                    } else {
+                        let step = 2i64 << dsf;
+                        let phase = (self.subcc_scx_apply_cc as i64
+                            - self.subcc_last_tn_cc as i64).rem_euclid(step);
+                        phase == (1i64 << dsf)
+                    };
+                    // DS two-tile straddle gate: a low-X sprite on the line
+                    // shifts the BG fetch phase one tile while the DS FIFO
+                    // carries an extra tile, so the OLD->NEW scx boundary lands
+                    // one tile LATER than the non-sprite DS cadence and the
+                    // in-flight straddle tile stays OLD instead of flipping to
+                    // NEW (with a further one-tile LY0 shift handled below).
+                    // The non-sprite DS cases (lowspr==0) are a single-tile
+                    // straddle handled correctly by the NEW rewrite below and
+                    // MUST keep it.
+                    let ds_two_tile = dsf == 1
+                        && mmio.is_cgb_features_enabled()
+                        && self.sprites_on_line.iter().any(|s| s.x <= 16);
+                    if flip {
+                        let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                        let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                        if ds_two_tile {
+                            // DS spx straddle: a low-X sprite shifts the BG
+                            // fetch phase one tile while the DS FIFO carries an
+                            // extra tile, so the OLD->NEW scx boundary lands one
+                            // tile LATER than the non-sprite DS cadence. The
+                            // in-flight straddle tile -- which the non-sprite DS
+                            // flip would push to the NEW scx -- actually plots
+                            // just before the boundary, so it stays the OLD scx
+                            // (natural xpos column) on EVERY line. On the first
+                            // rendered line (LY==0) the boundary lands one tile
+                            // later still, so the NEXT tile (already fetched
+                            // under the NEW scx) must also revert to the OLD scx;
+                            // on LY>=1 that next tile keeps the NEW scx.
+                            if old_col != new_col {
+                                let bg_y = (self.scy_delayed as u16
+                                    + mmio.read(LY) as u16) & 0xFF;
+                                let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
+                                let off = (xpos as usize).saturating_sub(self.x as usize);
+                                self.fetcher.pixel_fifo.overwrite_at(off, &pixels);
+                            }
+                            // First-line second-tile revert: on LY==0 the
+                            // fetcher dispatch can land the OLD->NEW boundary
+                            // one tile later than on LY>=1, so the second
+                            // straddle tile (already fetched NEW) reverts to
+                            // OLD. Whether that one-tile shift happens depends
+                            // on the sprite-fetch sub-tile phase: an even
+                            // shifting sprite x consumes the extra dot that
+                            // pushes the second tile's fetch past the apply on
+                            // LY0 (sprite x==2), an odd one does not (x==1),
+                            // so the revert is gated on the low sprite x parity.
+                            let lowspr_even = self
+                                .sprites_on_line
+                                .iter()
+                                .filter(|s| s.x <= 16)
+                                .map(|s| s.x)
+                                .min()
+                                .is_some_and(|x| x % 2 == 0);
+                            if mmio.read(LY) == 0 && lowspr_even {
+                                self.ds_straddle_next_old = true;
+                                armed_this_event = true;
+                            }
+                        } else if new_col != old_col {
+                            let bg_y = (self.scy_delayed as u16
+                                + mmio.read(LY) as u16) & 0xFF;
+                            let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
+                            self.fetcher.pixel_fifo.overwrite_newest(&pixels);
+                        }
+                    } else if dsf == 0
+                        && mmio.is_cgb_features_enabled()
+                        && gap == 1
+                        && self.sprites_on_line.iter().any(|s| s.x >= 1 && s.x <= 8)
+                    {
+                        // First rendered line (LY=0) straddle, CGB SS: the
+                        // line after LCD-enable runs its mode-3 fetcher
+                        // through a different warmup/dispatch phase, so the
+                        // write's apply lands one fetcher step EARLIER
+                        // relative to the in-flight tile (gap==1 here vs
+                        // gap==5 on LY>=1, same xpos). The armed tile stays
+                        // OLD (it plots just before the boundary), AND the
+                        // NEXT tile -- which the per-dot fetcher already
+                        // read NEW because the first-line dispatch lags the
+                        // boundary by one tile -- must be reverted to OLD so
+                        // the OLD->NEW boundary lands one tile later, exactly
+                        // as the hardware first-line xpos
+                        // does. On LY>=1 (gap==5) this revert does NOT fire,
+                        // so those lines keep the boundary one tile earlier.
+                        self.subcc_revert_next_old = true;
+                        armed_this_event = true;
+                    }
+                }
+                // Sprite-shifted revert: the tile pushed right after the
+                // armed straddle tile was fetched with the NEW scx one tile
+                // too early (FIFO depth 8 vs 9 due to a sprite-fetch dot);
+                // rewrite its 8 entries back to the OLD-scx column so the
+                // OLD->NEW boundary lands one tile later (matching the hardware
+                // fetcher-xpos boundary).
+                if self.subcc_revert_next_old
+                    && !armed_this_event
+                    && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
+                {
+                    self.subcc_revert_next_old = false;
+                    let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
+                    let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                    let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                    if new_col != old_col {
+                        let bg_y = (self.scy_delayed as u16
+                            + mmio.read(LY) as u16) & 0xFF;
+                        let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
+                        self.fetcher.pixel_fifo.overwrite_newest(&pixels);
+                    }
+                }
+                // DS two-tile straddle, SECOND tile (LY0 only): this tile was
+                // fetched under the NEW scx (the per-dot fetcher advanced past
+                // the apply) but on the first rendered line the OLD->NEW
+                // boundary lands one tile later, so it plots under the OLD scx
+                // at its natural column. Rewrite it in place by exact display
+                // offset (xpos - self.x) so the low-X sprite's FIFO shift does
+                // not misplace it.
+                if self.ds_straddle_next_old
+                    && !armed_this_event
+                    && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
+                {
+                    self.ds_straddle_next_old = false;
+                    let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
+                    let new_col2 = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                    let old_col2 = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                    if new_col2 != old_col2 {
+                        let bg_y = (self.scy_delayed as u16
+                            + mmio.read(LY) as u16) & 0xFF;
+                        let pixels = self.bg_pixels_at_col(mmio, old_col2, bg_y);
+                        let off = (xpos as usize).saturating_sub(self.x as usize);
+                        self.fetcher.pixel_fifo.overwrite_at(off, &pixels);
+                    }
+                }
+                // First-tile (f1) prologue straddle (DMG SS): the in-flight
+                // 2nd tile -- whose column was latched under the OLD scx one
+                // dot before a mid-prologue (x==0) SCX write -- just pushed.
+                // On hardware it plots after the write, so re-key its 8 newest
+                // FIFO entries to the NEW scx column (the first queued tile,
+                // pushed before the write, keeps OLD). Uses the fetcher's exact
+                // latched xpos/cgb_adj so the column matches the hardware
+                // plot-time sample.
+                if self.prologue_rekey_armed
+                    && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
+                {
+                    self.prologue_rekey_armed = false;
+                    let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
+                    let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                    let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                    if new_col != old_col {
+                        let bg_y = (self.scy_delayed as u16
+                            + mmio.read(LY) as u16) & 0xFF;
+                        let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
+                        self.fetcher.pixel_fifo.overwrite_newest(&pixels);
+                    }
+                }
+                self.record_fetch_debug_event(event, mmio);
+        }
+        push_this_dot
+    }
+
     fn step_mode3_dot(&mut self, mmio: &mut mmio::Mmio, fast: bool) {
         // Shift the DMG WE per-dot visibility history (see we_dot_hist).
         self.we_dot_hist = [
@@ -8528,331 +8867,8 @@ impl Ppu {
         } else {
             0
         };
-        if cadence_even
-            && let Some(event) = self.fetcher.step(mmio, fetcher_lcdc_state, crate::ppu::fetcher::FetchPos {
-                window_line: self.win_y_pos,
-                display_x: self.x,
-                pending_discard,
-                scy: self.scy_delayed,
-                scx: self.scx_delayed,
-            }) {
-                if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::TileNumber) {
-                    self.subcc_last_tn_cc = self.abs_cc;
-                }
-                if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo) {
-                    push_this_dot = true;
-                    // The display-x at which this tile's first pixel will
-                    // pop (the hardware push-at-empty dot), SIGNED: during
-                    // the SCX fine-scroll discard prologue the boundary
-                    // sits at the hardware position -(pending discards) < 0.
-                    if !mmio.is_cgb_features_enabled() {
-                        let first_x = self.x as i32 + event.fifo_size as i32
-                            - 8
-                            - pending_discard as i32;
-                        if (0..160).contains(&first_x) {
-                            // Visible boundary: queue for the pop-side
-                            // WE-off zero-pixel insert check.
-                            if let Some(slot) = self
-                                .we_glitch_tile_starts
-                                .iter_mut()
-                                .find(|s| s.is_none())
-                            {
-                                *slot = Some(first_x as u8);
-                            }
-                        } else if first_x < 0 && !mmio.is_cgb() {
-                            // Discard-prologue boundary (a known hardware
-                            // quirk): evaluate the WE-off insert HERE, at
-                            // the push dot. logical position = first_x+7
-                            // (hardware clamps out-of-range to 0, matching
-                            // WX==0). A hit inserts a color-0 pixel that
-                            // the prologue itself swallows — one discard
-                            // dot consumes it instead of a real pixel
-                            // (see we_glitch_discard_insert). Pre-CGB
-                            // MACHINES only (non-CGB hardware): the CGB
-                            // PPU has no insert glitch even in DMG-compat.
-                            let logical = first_x + 7;
-                            let logical =
-                                if (0..=167).contains(&logical) { logical } else { 0 };
-                            if self.window_y_triggered
-                                && !self.fetcher.is_fetching_window()
-                                && !self.we_dot_hist[2]
-                                && !self.we_insert_suppressed
-                                && mmio.read(WX) as i32 == logical
-                            {
-                                self.we_glitch_discard_insert = true;
-                            }
-                        }
-                    }
-                    // CGB-compat up-pulse LCDC.4 train: buffer each BG tile
-                    // so a line-end re-resolve against the COMPLETE journal
-                    // can fix the tiles fetched before the whole pulse train
-                    // was journaled (see cgb_train_reresolve).
-                    if self.wg_cgb && !event.fetching_window && !self.wg_hist.is_empty() {
-                        let first_x = (self.x as i32 + event.fifo_size as i32
-                            - 8
-                            - pending_discard as i32)
-                            .max(0);
-                        if (0..160).contains(&first_x) {
-                            self.bg_tile_buf.push(CapturedBgTile {
-                                n: event.tile_index as u64,
-                                tn: event.tile_num,
-                                first_x: first_x as u8,
-                                y: self.fetcher.latched_y(),
-                                live_low_tds: self.fetcher.last_low_tds(),
-                                live_high_tds: self.fetcher.last_high_tds(),
-                            });
-                        }
-                    }
-                    // WINDOW analog (win_train_reresolve): the window internal
-                    // line is win_y_pos (not latched_y, which the window fetch
-                    // does not update).
-                    if self.wg_cgb && event.fetching_window && !self.wg_hist.is_empty() {
-                        let first_x = (self.x as i32 + event.fifo_size as i32
-                            - 8
-                            - pending_discard as i32)
-                            .max(0);
-                        if (0..160).contains(&first_x) {
-                            self.win_tile_buf.push(CapturedWinTile {
-                                n: event.tile_index as u64,
-                                tn: event.tile_num,
-                                first_x: first_x as u8,
-                                y: self.win_y_pos,
-                                live_low_tds: self.fetcher.last_low_tds(),
-                                live_high_tds: self.fetcher.last_high_tds(),
-                            });
-                        }
-                    }
-                }
-                // The window fetch anchor persists for the rest of
-                // the line — the hardware fetch grid stays phase-locked
-                // to the restart (pushes every 8 dots from the anchor),
-                // so the reactivation-insert columns stay at
-                // window_start + 8k. It resets at the next M3 arm or window
-                // restart.
-                // Sub-cc column adjustment: a BG tile whose column was committed
-                // at TileNumber under the OLD scx, but whose pixels are
-                // PLOTTED after the write's apply cc (write_cc + 2*cgb),
-                // must render under the NEW scx (a mid-mode-3 SCX write
-                // samples the column at plot time, not fetch time). Only the single in-flight straddle
-                // tile (armed at the write) is corrected, and only at the
-                // exact plot-vs-apply phase (gap == 4); see the gap comment
-                // below.
-                let mut armed_this_event = false;
-                if self.subcc_rekey_armed
-                    && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
-                {
-                    // The single in-flight tile (column committed under the
-                    // OLD scx before the write) just pushed. Its first
-                    // displayed pixel sits at display column == the xpos the
-                    // fetcher used (xpos == display_x + fifo - pending); its
-                    // plot cc is abs_cc + (xpos - current display x). If that
-                    // plot cc is strictly after the apply cc the tile must
-                    // render under the NEW scx (the hardware SCX change samples
-                    // the column at plot, not fetch); re-key the 8 newest
-                    // FIFO entries with the NEW-scx column using the
-                    // fetcher's exact xpos/cgb_adj. Disarm afterwards.
-                    self.subcc_rekey_armed = false;
-                    let dsf = mmio.is_double_speed_mode() as u32;
-                    let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
-                    // plot cc = abs_cc + the dot distance to this tile's
-                    // first displayed pixel. The dot delta must be scaled
-                    // to master cc (1 dot = 1<<ds cc) so the gap resonance
-                    // is in master cc at both speeds.
-                    let plot_cc = self.abs_cc as i64
-                        + ((xpos as i64 - self.x as i64) << dsf);
-                    // SS (validated Stage 1b, broke-0 across the full
-                    // suite incl. DMG): the in-flight straddle flips to NEW
-                    // at the exact plot-vs-apply phase gap==4.
-                    let gap = plot_cc - self.subcc_scx_apply_cc as i64;
-                    // DMG SS + low-X sprite: the sprite-fetch dot during the
-                    // discard prologue shifts the whole line's BG-fetch phase
-                    // one tile, so a steady-state mid-line SCX write's
-                    // OLD->NEW column boundary also lands one tile LATER than
-                    // the no-sprite cadence the gap==4 rekey assumes. The
-                    // in-flight tile plots just before the boundary, so keep
-                    // it OLD (suppress the flip); the NEXT tile, fetched after
-                    // the write, is already NEW. Mirrors the CGB gap==1
-                    // first-line revert. Without the sprite (scx_during_m3_4/5)
-                    // gap==4 stays as the validated steady-state flip.
-                    let dmg_ss_lowx_sprite = dsf == 0
-                        && !mmio.is_cgb_features_enabled()
-                        && self.lcdc_has(LCDCFlags::SpriteDisplayEnable)
-                        && self.sprites_on_line.iter().any(|s| s.x <= 8);
-                    // DS (Stage 2): the gap proxy is ambiguous across
-                    // initial-scx, but the underlying resonance is that the
-                    // write's apply cc lands at the MIDPOINT of the armed
-                    // tile's fetcher step. The BG fetcher advances one step
-                    // every 2 dots == (2<<ds) cc; the armed tile's column
-                    // was latched at TileNumber (subcc_last_tn_cc) and
-                    // The hardware SCX-write handling re-derives that
-                    // single tile NEW only when apply falls half a step
-                    // (1<<ds cc) past the latch, modulo the step:
-                    // (apply_cc - tn_cc) % (2<<ds) == (1<<ds)
-                    // At DS this is (apply-tn)%4==2, which flips ds_3/4/5
-                    // across every initial-scx (0761/0360/...) where the
-                    // cruder gap/span proxies disagree. SS keeps gap==4
-                    // (the DMG cadence differs and the mod phase regresses
-                    // the DMG SS set, so SS is left exactly as Stage 1b).
-                    let flip = if dsf == 0 {
-                        gap == 4 && !dmg_ss_lowx_sprite
-                    } else {
-                        let step = 2i64 << dsf;
-                        let phase = (self.subcc_scx_apply_cc as i64
-                            - self.subcc_last_tn_cc as i64).rem_euclid(step);
-                        phase == (1i64 << dsf)
-                    };
-                    // DS two-tile straddle gate: a low-X sprite on the line
-                    // shifts the BG fetch phase one tile while the DS FIFO
-                    // carries an extra tile, so the OLD->NEW scx boundary lands
-                    // one tile LATER than the non-sprite DS cadence and the
-                    // in-flight straddle tile stays OLD instead of flipping to
-                    // NEW (with a further one-tile LY0 shift handled below).
-                    // The non-sprite DS cases (lowspr==0) are a single-tile
-                    // straddle handled correctly by the NEW rewrite below and
-                    // MUST keep it.
-                    let ds_two_tile = dsf == 1
-                        && mmio.is_cgb_features_enabled()
-                        && self.sprites_on_line.iter().any(|s| s.x <= 16);
-                    if flip {
-                        let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                        let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                        if ds_two_tile {
-                            // DS spx straddle: a low-X sprite shifts the BG
-                            // fetch phase one tile while the DS FIFO carries an
-                            // extra tile, so the OLD->NEW scx boundary lands one
-                            // tile LATER than the non-sprite DS cadence. The
-                            // in-flight straddle tile -- which the non-sprite DS
-                            // flip would push to the NEW scx -- actually plots
-                            // just before the boundary, so it stays the OLD scx
-                            // (natural xpos column) on EVERY line. On the first
-                            // rendered line (LY==0) the boundary lands one tile
-                            // later still, so the NEXT tile (already fetched
-                            // under the NEW scx) must also revert to the OLD scx;
-                            // on LY>=1 that next tile keeps the NEW scx.
-                            if old_col != new_col {
-                                let bg_y = (self.scy_delayed as u16
-                                    + mmio.read(LY) as u16) & 0xFF;
-                                let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
-                                let off = (xpos as usize).saturating_sub(self.x as usize);
-                                self.fetcher.pixel_fifo.overwrite_at(off, &pixels);
-                            }
-                            // First-line second-tile revert: on LY==0 the
-                            // fetcher dispatch can land the OLD->NEW boundary
-                            // one tile later than on LY>=1, so the second
-                            // straddle tile (already fetched NEW) reverts to
-                            // OLD. Whether that one-tile shift happens depends
-                            // on the sprite-fetch sub-tile phase: an even
-                            // shifting sprite x consumes the extra dot that
-                            // pushes the second tile's fetch past the apply on
-                            // LY0 (sprite x==2), an odd one does not (x==1),
-                            // so the revert is gated on the low sprite x parity.
-                            let lowspr_even = self
-                                .sprites_on_line
-                                .iter()
-                                .filter(|s| s.x <= 16)
-                                .map(|s| s.x)
-                                .min()
-                                .is_some_and(|x| x % 2 == 0);
-                            if mmio.read(LY) == 0 && lowspr_even {
-                                self.ds_straddle_next_old = true;
-                                armed_this_event = true;
-                            }
-                        } else if new_col != old_col {
-                            let bg_y = (self.scy_delayed as u16
-                                + mmio.read(LY) as u16) & 0xFF;
-                            let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
-                            self.fetcher.pixel_fifo.overwrite_newest(&pixels);
-                        }
-                    } else if dsf == 0
-                        && mmio.is_cgb_features_enabled()
-                        && gap == 1
-                        && self.sprites_on_line.iter().any(|s| s.x >= 1 && s.x <= 8)
-                    {
-                        // First rendered line (LY=0) straddle, CGB SS: the
-                        // line after LCD-enable runs its mode-3 fetcher
-                        // through a different warmup/dispatch phase, so the
-                        // write's apply lands one fetcher step EARLIER
-                        // relative to the in-flight tile (gap==1 here vs
-                        // gap==5 on LY>=1, same xpos). The armed tile stays
-                        // OLD (it plots just before the boundary), AND the
-                        // NEXT tile -- which the per-dot fetcher already
-                        // read NEW because the first-line dispatch lags the
-                        // boundary by one tile -- must be reverted to OLD so
-                        // the OLD->NEW boundary lands one tile later, exactly
-                        // as the hardware first-line xpos
-                        // does. On LY>=1 (gap==5) this revert does NOT fire,
-                        // so those lines keep the boundary one tile earlier.
-                        self.subcc_revert_next_old = true;
-                        armed_this_event = true;
-                    }
-                }
-                // Sprite-shifted revert: the tile pushed right after the
-                // armed straddle tile was fetched with the NEW scx one tile
-                // too early (FIFO depth 8 vs 9 due to a sprite-fetch dot);
-                // rewrite its 8 entries back to the OLD-scx column so the
-                // OLD->NEW boundary lands one tile later (matching the hardware
-                // fetcher-xpos boundary).
-                if self.subcc_revert_next_old
-                    && !armed_this_event
-                    && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
-                {
-                    self.subcc_revert_next_old = false;
-                    let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
-                    let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                    let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                    if new_col != old_col {
-                        let bg_y = (self.scy_delayed as u16
-                            + mmio.read(LY) as u16) & 0xFF;
-                        let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
-                        self.fetcher.pixel_fifo.overwrite_newest(&pixels);
-                    }
-                }
-                // DS two-tile straddle, SECOND tile (LY0 only): this tile was
-                // fetched under the NEW scx (the per-dot fetcher advanced past
-                // the apply) but on the first rendered line the OLD->NEW
-                // boundary lands one tile later, so it plots under the OLD scx
-                // at its natural column. Rewrite it in place by exact display
-                // offset (xpos - self.x) so the low-X sprite's FIFO shift does
-                // not misplace it.
-                if self.ds_straddle_next_old
-                    && !armed_this_event
-                    && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
-                {
-                    self.ds_straddle_next_old = false;
-                    let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
-                    let new_col2 = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                    let old_col2 = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                    if new_col2 != old_col2 {
-                        let bg_y = (self.scy_delayed as u16
-                            + mmio.read(LY) as u16) & 0xFF;
-                        let pixels = self.bg_pixels_at_col(mmio, old_col2, bg_y);
-                        let off = (xpos as usize).saturating_sub(self.x as usize);
-                        self.fetcher.pixel_fifo.overwrite_at(off, &pixels);
-                    }
-                }
-                // First-tile (f1) prologue straddle (DMG SS): the in-flight
-                // 2nd tile -- whose column was latched under the OLD scx one
-                // dot before a mid-prologue (x==0) SCX write -- just pushed.
-                // On hardware it plots after the write, so re-key its 8 newest
-                // FIFO entries to the NEW scx column (the first queued tile,
-                // pushed before the write, keeps OLD). Uses the fetcher's exact
-                // latched xpos/cgb_adj so the column matches the hardware
-                // plot-time sample.
-                if self.prologue_rekey_armed
-                    && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
-                {
-                    self.prologue_rekey_armed = false;
-                    let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
-                    let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                    let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                    if new_col != old_col {
-                        let bg_y = (self.scy_delayed as u16
-                            + mmio.read(LY) as u16) & 0xFF;
-                        let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
-                        self.fetcher.pixel_fifo.overwrite_newest(&pixels);
-                    }
-                }
-                self.record_fetch_debug_event(event, mmio);
+        if self.mode3_fetch_step(mmio, cadence_even, fetcher_lcdc_state, pending_discard) {
+            push_this_dot = true;
         }
 
         if self.fetcher.pixel_fifo.size() == 0 {
