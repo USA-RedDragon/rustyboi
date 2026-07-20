@@ -3088,7 +3088,6 @@ dependencies = [
  "libm",
  "serde",
  "serde_bytes",
- "serde_json",
  "web-time",
  "zip",
 ]
@@ -3096,9 +3095,6 @@ dependencies = [
 [[package]]
 name = "rustyboi-debugger"
 version = "0.1.0"
-dependencies = [
- "rustyboi-core",
-]
 
 [[package]]
 name = "rustyboi-egui"
@@ -3226,7 +3222,6 @@ dependencies = [
  "rustyboi-core",
  "rustyboi-frontend",
  "rustyboi-session",
- "serde",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",

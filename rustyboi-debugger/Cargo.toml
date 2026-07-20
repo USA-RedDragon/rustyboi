@@ -11,4 +11,3 @@ name = "rustyboi_debugger_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
-rustyboi-core = { path = "../rustyboi-core" }

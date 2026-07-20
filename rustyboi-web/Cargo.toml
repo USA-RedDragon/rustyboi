@@ -34,7 +34,6 @@ wasm-bindgen-futures = "=0.4.76"
 js-sys = "=0.3.103"
 console_error_panic_hook = "=0.1.7"
 
-serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.150"
 
 [dependencies.web-sys]
@@ -99,3 +98,9 @@ wasm-bindgen-test = "=0.3.76"
 # normal `make web` never links it. See `make coverage-web`.
 [target.'cfg(all(target_arch = "wasm32", wasm_bindgen_unstable_test_coverage))'.dependencies]
 minicov = "=0.3.8"
+
+# cargo-machete matches `extern crate` names by source text; these deps are used
+# under their renamed `_lib` lib names (see the `[lib] name` comments), which the
+# tool cannot see. Without this it reports them as unused on every run.
+[package.metadata.cargo-machete]
+ignored = ["rustyboi-core", "rustyboi-frontend"]
