@@ -48,6 +48,23 @@ class RustyboiActivity : GameActivity() {
     /** Single-threaded background reader so multiple picks serialize. */
     private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
+    /**
+     * Run [body] on [ioExecutor]. `submit`'s Future is discarded, so any
+     * Throwable escaping the lambda would be captured by it silently and the
+     * native side would wait forever for its completion callback. Catch
+     * everything, log, and fire [onFailure] so native always hears back.
+     */
+    private fun submitLogged(name: String, onFailure: () -> Unit, body: () -> Unit) {
+        ioExecutor.submit {
+            try {
+                body()
+            } catch (t: Throwable) {
+                Log.e(TAG, "$name failed", t)
+                onFailure()
+            }
+        }
+    }
+
     private lateinit var pickRomLauncher: ActivityResultLauncher<Array<String>>
     private lateinit var pickTreeLauncher: ActivityResultLauncher<Uri?>
 
@@ -59,7 +76,7 @@ class RustyboiActivity : GameActivity() {
                 nativeOnRomPickCancelled()
                 return@registerForActivityResult
             }
-            ioExecutor.submit {
+            submitLogged("pickRom", onFailure = { nativeOnRomPickCancelled() }) {
                 val name = queryDisplayName(uri)
                 val bytes = readAllBytes(uri)
                 if (bytes == null) {
@@ -173,19 +190,19 @@ class RustyboiActivity : GameActivity() {
      */
     @Suppress("unused")
     fun scanLibrary(treeUriString: String) {
-        ioExecutor.submit {
+        submitLogged("scanLibrary", onFailure = { nativeOnLibraryScanResult("") }) {
             val treeUri = try {
                 Uri.parse(treeUriString)
             } catch (e: Exception) {
                 Log.w(TAG, "scanLibrary: bad uri", e)
                 nativeOnLibraryScanResult("")
-                return@submit
+                return@submitLogged
             }
             val root = DocumentFile.fromTreeUri(this, treeUri)
             if (root == null || !root.canRead()) {
                 Log.w(TAG, "scanLibrary: tree not readable: $treeUri")
                 nativeOnLibraryScanResult("")
-                return@submit
+                return@submitLogged
             }
             val out = JSONArray()
             // CRC32 cache keyed by document URI ("size:crc"), so a big library is
@@ -264,19 +281,19 @@ class RustyboiActivity : GameActivity() {
      */
     @Suppress("unused")
     fun loadRomEntry(romUriString: String) {
-        ioExecutor.submit {
+        submitLogged("loadRomEntry", onFailure = { nativeOnRomLoadFailed() }) {
             val romUri = try {
                 Uri.parse(romUriString)
             } catch (e: Exception) {
                 Log.w(TAG, "loadRomEntry: bad uri", e)
                 nativeOnRomLoadFailed()
-                return@submit
+                return@submitLogged
             }
             val romBytes = readAllBytes(romUri)
             if (romBytes == null) {
                 Log.w(TAG, "loadRomEntry: failed to read ROM bytes")
                 nativeOnRomLoadFailed()
-                return@submit
+                return@submitLogged
             }
             val romDoc = DocumentFile.fromSingleUri(this, romUri)
             val displayName = romDoc?.name ?: queryDisplayName(romUri) ?: "rom.gb"
