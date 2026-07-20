@@ -44,10 +44,6 @@ pub struct Audio {
     nr51: u8, // Sound panning
     nr52: u8, // Master control/status
 
-    // Frame sequencer
-    frame_sequencer_step: u8,
-    frame_sequencer_timer: u16,
-
     // Audio enabled flag
     audio_enabled: bool,
 
@@ -131,10 +127,11 @@ pub struct Audio {
     // never serialized
     #[serde(skip)]
     channel_tap: Option<Vec<ChannelSample>>,
-    // The analog output stage (DAC-off fade + output high-pass). RC charge, not
-    // machine state: never serialized, and re-seeded from the model by
-    // `set_analog_model` on construction and after a savestate load.
-    #[serde(skip)]
+    // The analog output stage (DAC-off fade + output high-pass). Serialized so
+    // a load / rewind step resumes the filter where it was instead of ringing
+    // out a restart transient; its model-derived charge factor is the one part
+    // that is re-seeded by `set_analog_model` rather than stored.
+    #[serde(default)]
     analog: analog::AnalogStage,
 }
 
@@ -176,8 +173,6 @@ impl Audio {
             nr51: 0,
             nr52: 0,
             len_cc: 0,
-            frame_sequencer_step: 0,
-            frame_sequencer_timer: 8192,
             audio_enabled: false,
             fractional_cycles: 0.0,
             cycles_per_sample: default_cycles_per_sample(),
@@ -931,23 +926,6 @@ impl Audio {
         self.channel2.set_length_counter(0);
         self.channel3.set_length_counter(0);
         self.channel4.set_length_counter(0);
-    }
-
-    /// Clock the frame sequencer one step. Called by the timer at the exact dot
-    /// of each DIV-bit-12 (bit-13 in double speed) falling edge, so the sequencer
-    /// stays phase-locked to DIV (and reacts to DIV writes).
-    pub(crate) fn clock_frame_sequencer(&mut self) {
-        if self.audio_enabled {
-            // Length/envelope/sweep are cc-event driven; the step counter and the
-            // channels' fs_step mirrors are serialized savestate fields, so they
-            // keep ticking to preserve the wire format.
-            let step = self.frame_sequencer_step;
-            self.channel1.set_fs_step(step);
-            self.channel2.set_fs_step(step);
-            self.channel3.set_fs_step(step);
-            self.channel4.set_fs_step(step);
-            self.frame_sequencer_step = (self.frame_sequencer_step + 1) % 8;
-        }
     }
 
     /// True while the APU is powered (NR52 bit 7). The min-event idle fast path

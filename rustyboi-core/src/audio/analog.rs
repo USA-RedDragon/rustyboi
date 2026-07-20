@@ -19,6 +19,7 @@
 
 use crate::audio::controller::HOST_SAMPLE_RATE;
 use crate::gb::DMG_CPU_HZ;
+use serde::{Deserialize, Serialize};
 
 /// Digital `0..=15` to the DAC's analog output. Negative slope: digital 0 is
 /// analog +1, digital 15 is analog -1, and the (unreachable) digital 7.5 is 0.
@@ -70,22 +71,41 @@ impl AnalogModel {
 /// nothing audible at -180 dBFS.
 const FLUSH: f32 = 1e-9;
 
-/// The analog stage's continuous state. Deliberately NOT serialized: this is
-/// the charge on a physical RC network, not machine state, and every field
-/// re-settles within milliseconds. Keeping it out of the savestate also keeps
-/// the wire format untouched — the cost is a small transient right after a
-/// load, which is inaudible next to the load itself.
-#[derive(Clone)]
+/// The analog stage's continuous state.
+///
+/// The charge on the RC network IS serialized. It is not "machine state" in the
+/// register sense, but restoring it to a default restarts the high-pass from
+/// zero, which rings out as an audible transient (~6 ms on DMG at the charge
+/// factor above) on every load — and RetroArch's rewind unserializes once per
+/// frame, so the default would put that transient on every rewound frame.
+/// Carrying it makes a load analog-continuous.
+///
+/// `charge` is the exception: it is a pure function of the machine model, and
+/// `Mmio::reseed_hardware_flags` re-applies it from the serialized `hardware`
+/// identity on every load (via `set_analog_model`), so it is derived rather
+/// than stored. It still defaults to the DMG factor rather than `0.0`, so a
+/// stage that somehow escapes reseeding filters rather than collapsing.
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct AnalogStage {
     /// Per-host-sample charge factor for this model, shared by the fade and
     /// the high-pass (one RC family per machine).
+    #[serde(skip, default = "dmg_charge_per_sample")]
     charge: f32,
     /// Per-channel analog level, which the DAC drives while it is on and which
     /// decays from wherever it was left once the DAC goes off.
+    #[serde(default)]
     fade: [f32; 4],
     /// High-pass capacitors, one per stereo side.
+    #[serde(default)]
     cap_l: f32,
+    #[serde(default)]
     cap_r: f32,
+}
+
+/// The `charge` stand-in for a stage deserialized before `set_analog_model`
+/// re-derives it. Matches [`AnalogStage::default`].
+fn dmg_charge_per_sample() -> f32 {
+    AnalogModel::Dmg.charge_per_sample()
 }
 
 impl Default for AnalogStage {

@@ -57,6 +57,15 @@ pub struct Movie {
 
 /// Magic + version for the on-disk container. Bumping the version is a breaking
 /// change to the byte format.
+///
+/// Deliberately independent of the savestate format: a
+/// [`MovieStart::SaveState`] blob is stored opaquely (length-prefixed) and this
+/// container never inspects its contents, so a change to the savestate layout
+/// does NOT change this format and must not bump this version. It only means a
+/// savestate-anchored movie recorded against an older layout can no longer be
+/// replayed (`play_movie` surfaces whatever `GB::from_state_bytes` returns);
+/// `PowerOn` movies are unaffected, and bumping here would wrongly reject them
+/// too.
 const MOVIE_MAGIC: &[u8; 4] = b"RBMV";
 const MOVIE_VERSION: u8 = 1;
 
