@@ -5696,11 +5696,6 @@ impl Ppu {
         true
     }
 
-    // Replace the 8 oldest BG-FIFO entries with the tile at BG tile-map column
-    // `tile_col` (0..32) on the pixel row `bg_y` (already SCY+LY, 0..256),
-    // reproducing the fetcher's BG addressing (LCDC tile-map/tile-data select,
-    // CGB attribute bank + x/y flip). Used by the mode-3-start fine-scroll re-fetch
-    // when a mid-discard SCX write moves the first displayed tile's column.
     // Compute the 8 BG pixels for tile-map column `tile_col` on pixel
     // row `bg_y`, reproducing the fetcher's addressing. Shared by the fine-scroll
     // first-tile rewrite and the sub-cc SCX column re-key.
@@ -5738,37 +5733,13 @@ impl Ppu {
         pixels
     }
 
+    // Replace the 8 oldest BG-FIFO entries with the tile at BG tile-map column
+    // `tile_col` (0..32) on the pixel row `bg_y` (already SCY+LY, 0..256),
+    // reproducing the fetcher's BG addressing (LCDC tile-map/tile-data select,
+    // CGB attribute bank + x/y flip). Used by the mode-3-start fine-scroll re-fetch
+    // when a mid-discard SCX write moves the first displayed tile's column.
     fn rewrite_first_fifo_tile(&mut self, mmio: &mmio::Mmio, tile_col: u16, bg_y: u16) {
-        let lcdc = self.lcdc;
-        let cgb = mmio.is_cgb_features_enabled();
-        let map_base: u16 = if (lcdc & (LCDCFlags::BGTileMapDisplaySelect as u8)) != 0 {
-            0x9C00
-        } else {
-            0x9800
-        };
-        let map_y = (bg_y / 8) & 0x1F;
-        let map_addr = map_base + (map_y * 32 + (tile_col & 0x1F));
-        let tile_num = mmio.read_vram_bank(0, map_addr);
-        let tile_attrs = if cgb { mmio.read_vram_bank(1, map_addr) } else { 0 };
-        let y_flip = cgb && (tile_attrs & 0x40) != 0;
-        let x_flip = cgb && (tile_attrs & 0x20) != 0;
-        let tile_line = (bg_y % 8) as u8;
-        let eff_line = if y_flip { 7 - tile_line } else { tile_line };
-        let data_addr: u16 = if (lcdc & (LCDCFlags::BGWindowTileDataSelect as u8)) != 0 {
-            0x8000 + (tile_num as u16) * 16 + (eff_line as u16) * 2
-        } else {
-            let signed = tile_num as i8;
-            ((0x9000u16 as i16).wrapping_add((signed as i16) * 16 + (eff_line as i16) * 2)) as u16
-        };
-        let bank = if cgb && (tile_attrs & 0x08) != 0 { 1 } else { 0 };
-        let low = mmio.read_vram_bank(bank, data_addr);
-        let high = mmio.read_vram_bank(bank, data_addr + 1);
-        let mut pixels = [crate::ppu::fifo::BgPixel::default(); 8];
-        for (i, px) in pixels.iter_mut().enumerate() {
-            let bit = if x_flip { i as u8 } else { 7 - i as u8 };
-            let idx = (((high >> bit) & 1) << 1) | ((low >> bit) & 1);
-            *px = crate::ppu::fifo::BgPixel { color: idx, attrs: tile_attrs };
-        }
+        let pixels = self.bg_pixels_at_col(mmio, tile_col, bg_y);
         self.fetcher.pixel_fifo.overwrite_oldest(&pixels);
     }
 
