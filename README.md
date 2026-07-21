@@ -43,9 +43,9 @@ adjudication.
 | magentests | 11 | 11 |
 | little_things_extra | 4 | 4 |
 | sketchtests | 6 | 6 |
-| gbc_hw_tests | 323 | 342 |
+| gbc_hw_tests | 334 | 342 |
 | gambatte | 5248 | 5257 |
-| **Total** | **6826** | **6858** |
+| **Total** | **6837** | **6858** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core
