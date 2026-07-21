@@ -3642,6 +3642,16 @@ impl Mmio {
             // 12cc CPU-prefetch overlap lands the read on 131168 — and the byte-exact
             // F3..F9 sequence across ds_1..ds_6
             12
+        } else if self.io_registers.read(ppu::LCD_CONTROL)
+            & (ppu::LCDCFlags::DisplayEnable as u8)
+            == 0
+        {
+            // LCD off: the block fires straight out of the FF55 write with no
+            // PPU period to synchronise to, so the CPU reclaims one M-cycle of
+            // the prefetch overlap the LCD-on path pays (AntonioND hdma_start_3,
+            // LCD off + HDMA5=$80: the TIMA sample transitions 0B->0C at
+            // REPETITIONS=3 and 0C->0D at 7; the +6 lands both one NOP early).
+            2
         } else {
             6
         };
