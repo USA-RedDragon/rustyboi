@@ -31,6 +31,18 @@ pending) · `parked` (not silicon-verified yet).
 |---|---|---|---|
 | HBlank DMA transfers exactly one 0x10-byte block per HBlank | mooneye (cgb) | **rust** | Fix in `memory/mmio.rs`, guarded by `hblank_dma_tests`. The *specific* arm-line double-fire is a sub-dot phase artifact that a mode-2-synced ROM arm does not hit (the same-HBlank block count stays ≤1 even pre-fix); reproducing it needs the exact CPU/PPU phase the Crystal cutscene produced. Revisit — likely easiest to confirm/author against the hardware bench. |
 
+## Hardware-bench measurement ROMs (`bench` grading — no verdict, raw capture)
+
+These are the inverse of the table above: cells where the behavior is NOT
+silicon-verified, so no ROM may assert it. They are built to `build-bench/`,
+carry no manifest row, and record raw bytes to cart SRAM for an operator to read
+back. Each is retired the moment the bench answers it — either into a real
+graded ROM, or into a documented fix.
+
+| Question | ROM | Our model's (unverified) position |
+|---|---|---|
+| Does KEY0 / DMG-compat mode on CGB silicon change the APU, or does the sound die ignore it? | `apu/compat_wave_ram.dmgoncgb.bench` | CGB rules apply in compat mode (the CH3 wave-RAM quirk is gated on silicon, not cart mode — the `cgb` argument to `audio.sync_cc` in `memory/mmio.rs`). Basis: SameBoy `Core/apu.c` uses `GB_is_cgb` 12× and `GB_is_cgb_in_cgb_mode` 0×, plus "the sound die has no mode bit". Instrumenting all four gated sites over the 4,950-row corpus found ZERO discriminating accesses, so no existing suite can confirm or refute it. |
+
 ## Method (to run down the rest)
 
 1. Enumerate every in-code Rust test asserting hardware behavior (`grep -rn '#\[test\]'
