@@ -35,6 +35,18 @@
 # disagree with EACH OTHER; hdma_valid_sources is the one row we match on the
 # GBA unit but not the SP unit. Bench material, not an emulator verdict.
 #
+# DO NOT model the AGB timers/tac_set_when_inc_{16,64,256,1024} rows. All four
+# fail identically on one cell class (TAC=$07 = enable + freq-3 written from
+# DISABLED: the SP capture takes one extra TIMA increment, the CGB capture does
+# not), which looks like a clean AGB rule -- but the two AGB units disagree with
+# each other by 1145 bytes on tac_set_disabled and 1310 on tac_set_everything,
+# in exactly that +-1 TIMA shape, and only the SP unit was captured for these
+# four ROMs. TCAGBD 5.5 calls the AGB TAC-write behaviour a race that 'cannot be
+# predicted for every device'. An AGB-only TAC quirk was already added once on
+# no oracle and removed when a capture contradicted it (see Timer::set_tac);
+# fitting these four rows would repeat that, keyed to one unit. Needs the
+# hardware bench, not a constant.
+#
 # IMPORTANT revision caveat: AntonioND's captures are from ONE unit per class
 # and the CGB unit's silicon revision is undocumented. Some rev-sensitive
 # tests (speed-switch sub-timing, STOP sub-dot, mode2/3 LCD timing) may not

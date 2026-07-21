@@ -385,6 +385,8 @@ pub struct Serial {
     step_t: u32,
     bits_shifted: u8,
     cgb: bool,
+    #[serde(default)]
+    agb: bool,
     // Link-peer exchange state. `rx_latch` is the peer's response byte,
     // latched at transfer start from the device's preloaded shift register
     // (0xFF when disconnected, preserving ones-shift-in). `tx_acc` collects
@@ -425,11 +427,16 @@ impl Serial {
             step_t: 0,
             bits_shifted: 0,
             cgb: false,
+            agb: false,
             rx_latch: 0xFF,
             tx_acc: 0,
             link_wait: false,
             link_wait_since: 0,
         }
+    }
+
+    pub(crate) fn set_agb(&mut self, agb: bool) {
+        self.agb = agb;
     }
 
     pub(crate) fn set_cgb(&mut self, cgb: bool) {
@@ -476,7 +483,27 @@ impl Serial {
         let fast = self.cgb && (self.sc & SC_FAST_CLOCK) != 0;
         // DIV-align residue mask: `% 8` for the fast clock, `% 0x100` for slow.
         let (step, align_mask) = if fast { (16u32, 0x07u64) } else { (512u32, 0xFFu64) };
-        (step, phase - (divider as u64 & align_mask) + (step as u64) * 8)
+        // AGB fast-clock half-period term. On CGB the 256 KHz transfer takes a
+        // constant 124 cc from the SC write (AntonioND sio_irq_delay real_gbc:
+        // the ISR `inc a` count is 0x1C for all 128 iterations). AGB instead
+        // ALTERNATES 0x1B/0x1D in a period-8 pattern, i.e. the same mean with a
+        // +-4 cc jitter, and the discriminator is divider bit 7: every one of
+        // the 128 captured iterations takes 120 cc when it is set and 128 when
+        // it is clear. Modelled as an extra half-bit-period (8 cc) of head
+        // start, since the fast clock's period is 16 cc.
+        //
+        // The slow (8192 Hz) column needs no term: it already matches the AGB
+        // capture byte-for-byte through the 0xFF DIV alignment plus the +4 cc
+        // AGB post-boot divider skew (mooneye boot_div-A).
+        let agb_fast_half = if self.agb && fast {
+            (divider as u64 & 0x80) >> 4
+        } else {
+            0
+        };
+        (
+            step,
+            phase - (divider as u64 & align_mask) - agb_fast_half + (step as u64) * 8,
+        )
     }
 
     /// Schedule (or cancel) the transfer event. `divider` is the timer's

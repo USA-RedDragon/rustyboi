@@ -2078,6 +2078,7 @@ impl Mmio {
 
     pub(crate) fn set_serial_cgb(&mut self, cgb: bool) {
         self.serial.set_cgb(cgb);
+        self.serial.set_agb(self.is_agb());
     }
 
     /// CGB *hardware* flag: true whenever running on
