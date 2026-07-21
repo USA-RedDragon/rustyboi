@@ -31,7 +31,9 @@
 #    rewritten; the swept display subject stays screen-only),
 #  - toggle_lcdc=FF40:00 (final LCDC readback, fully R/W per Pan Docs),
 #  - wave_write_to_0xC003=C003:55 (constant WRAM write, cpu_bus_1 class).
-# The 4 remaining fails have NO hardware-derivable oracle (proven per-test):
+# temp is EXCLUDED (not graded): a `nop` dev stub that writes no FF82
+# verdict of any kind, so grading it would assert nothing (see line_for).
+# The 3 remaining fails have NO hardware-derivable oracle (proven per-test):
 #  - 500-scx-timing / minimal (byte-identical ROMs, cmp-verified): dual-halt
 #    TIMA measure of mode-3 length -> $8000 (FF80-82 never written). Intended
 #    control flow confirmed by patched-ROM probes (halt1 wakes at line-1
@@ -564,7 +566,6 @@ stat_write_glitch_l1_a|dmg|memauto|gb-test-roms/gbmicrotest/stat_write_glitch_l1
 stat_write_glitch_l1_b|dmg|memauto|gb-test-roms/gbmicrotest/stat_write_glitch_l1_b.gb
 stat_write_glitch_l1_c|dmg|memauto|gb-test-roms/gbmicrotest/stat_write_glitch_l1_c.gb
 stat_write_glitch_l1_d|dmg|memauto|gb-test-roms/gbmicrotest/stat_write_glitch_l1_d.gb
-temp|dmg|memauto|gb-test-roms/gbmicrotest/temp.gb
 timer_div_phase_c|dmg|memauto|gb-test-roms/gbmicrotest/timer_div_phase_c.gb
 timer_div_phase_d|dmg|memauto|gb-test-roms/gbmicrotest/timer_div_phase_d.gb
 timer_tima_inc_256k_a|dmg|memauto|gb-test-roms/gbmicrotest/timer_tima_inc_256k_a.gb

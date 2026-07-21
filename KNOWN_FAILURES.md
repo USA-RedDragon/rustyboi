@@ -26,7 +26,7 @@ The other two suites are unchanged at this revision **[R]**:
 
 ```sh
 $ RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 tools/run-suites.sh gbmicrotest gambatte
-PASS  gbmicrotest          passed=509/513 (floor: passed>=509)
+PASS  gbmicrotest          passed=509/512 (floor: passed>=509)
 PASS  gambatte             passed=5248/5257 failed=9 (floor: failed<=9)
 ```
 
@@ -67,9 +67,11 @@ Verdict classes:
 
 ---
 
-## gbmicrotest — 4 failures (509/513)
+## gbmicrotest — 3 failures (509/512)
 
 The suite's protocol is `FF82==0x01` pass with `FF80`=actual, `FF81`=expected (60 frames). 13 additional no-verdict ROMs are graded via `mem <addr>=<val>` with disassembly-justified bytes (see the manifest header for per-test provenance).
+
+`temp.gb` is **EXCLUDED** (no longer graded, so the total is 512 not 513): it is a `nop` dev stub that writes no `FF82` verdict of any kind, so grading it asserts nothing (see below and `gen_manifests.py:line_for`). It is dropped on the same basis as `cpu/corrupted_stop` and `timers/tac_set_everything`, not counted as a permanent fail.
 
 ### 1–2. `500-scx-timing.gb` and `minimal.gb` — BLOCKED-ON-ORACLE
 
@@ -88,7 +90,7 @@ $ md5sum gb-test-roms/gbmicrotest/minimal.gb gb-test-roms/gbmicrotest/500-scx-ti
 
 **Unblock:** capture the absolute byte on real DMG hardware (measurement → cart SRAM → reader). +2 tests.
 
-### 3. `temp.gb` — UN-GRADEABLE (dev stub)
+### `temp.gb` — UN-GRADEABLE (dev stub), now EXCLUDED
 
 **Content [R]:**
 
@@ -98,9 +100,9 @@ $ xxd -s 0x100 -l 4 gb-test-roms/gbmicrotest/temp.gb   # entry: nop; jp $0150
 $ xxd -s 0x150 -l 32 gb-test-roms/gbmicrotest/temp.gb  # $0150: all zero bytes (nop sled)
 ```
 
-**What happens [V]:** PC slides through zeroed ROM as `nop`s, continues into VRAM-as-code, and collapses into an `RST $38` loop whose pushes walk SP through IO/OAM/WRAM. Deterministic on silicon — but the trajectory executes boot-logo VRAM bytes as opcodes and no capture of the end state exists. There is no verdict write of any kind.
+**What happens [V]:** PC slides through zeroed ROM as `nop`s, continues into VRAM-as-code, and collapses into an `RST $38` loop whose pushes walk SP through IO/OAM/WRAM. Deterministic on silicon — but the trajectory executes boot-logo VRAM bytes as opcodes and no capture of the end state exists. **There is no verdict write of any kind.** Confirmed [R]: its graded end state is `FF82=64 FF80=2B FF81=0B`, byte-identical to `minimal`/`500-scx-timing` (which are cmp-verified never to write those bytes) — i.e. pure `skip_bios` HRAM residue. Because the `memauto` oracle asserts `FF82==0x01` and this ROM never makes that claim, grading it asserts nothing, so it is excluded rather than reported as a permanent fail.
 
-### 4. `halt_op_dupe_delay.gb` — ANALOG
+### 3. `halt_op_dupe_delay.gb` — ANALOG
 
 **Failure [R]:** `FF80(actual)=01 FF81(expected)=55`.
 
@@ -697,7 +699,7 @@ visible with the trace **[R: the `RB_SRAM_TRACE` output in Method]**:
 
 ## Floor arithmetic
 
-- **gbmicrotest:** 509/513 is the maximum for any register-level emulator without inventing oracles. +2 (`500-scx-timing`, `minimal`) become gradeable the day a hardware capture of the absolute byte exists; `temp` is capturable in principle; `halt_op_dupe_delay` requires characterizing analog die physics.
+- **gbmicrotest:** 509/512 is the maximum for any register-level emulator without inventing oracles (`temp` is now excluded as un-gradeable — it writes no verdict, so it was never a real fail). +2 (`500-scx-timing`, `minimal`) become gradeable the day a hardware capture of the absolute byte exists; `halt_op_dupe_delay` requires characterizing analog die physics.
 - **gambatte:** 7 (residue tail) + 1 (fexx) + 1 (C113) = **9 is the permanent minimum for any deterministic emulator, including a perfect gate-level one** — every failing byte is pinned oppositely by a *currently-passing* capture of the same physical quantity, and the exhaustive subset search confirms the current choices are globally optimal.
 - **gbc_hw_tests:** 313/342 is a ratcheted progress floor. It is no longer "nothing like a proven ceiling" — the day's work moved most of what remains *out* of the fixable class. Sorting the 29 by what actually blocks them:
   - **2 cells, in 1 row, are a plain modelling gap.** `tac_set_disabled#agb`'s two `FF05(TIMA)` cells are each exactly one count short (§6). This is the only unambiguous, uncontested accuracy work left in the suite, and closing it flips 1 row (the row's third cell is a `memset` fill, a different defect).

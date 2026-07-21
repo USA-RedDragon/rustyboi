@@ -453,8 +453,18 @@ def gen_gbmicrotest(roms: Path, out: Path) -> None:
     except ValueError:
         dma_ref_line = dma_ref
 
-    def line_for(rom: Path) -> str:
+    def line_for(rom: Path) -> str | None:
         stem = rom.stem
+        # temp: a `nop` dev stub, UN-GRADEABLE by construction. Entry is
+        # `nop; jp $0150` into a zero-filled ROM, so it writes no FF82 verdict
+        # of any kind (its end state FF82=64/FF80=2B/FF81=0B is skip_bios HRAM
+        # residue, byte-identical to minimal/500-scx-timing, which are
+        # cmp-verified never to touch those bytes). `memauto` asserts FF82==01,
+        # a claim this ROM never makes, so grading it asserts nothing about
+        # correctness -- excluded like corrupted_stop / tac_set_everything
+        # rather than counted as a permanent fail.
+        if stem == "temp":
+            return None
         if stem == "400-dma":
             return f"{stem}|dmg|oamdump|{rom}|{dma_ref_line}"
         if stem in gbmicro_vram_verdict:
@@ -465,7 +475,9 @@ def gen_gbmicrotest(roms: Path, out: Path) -> None:
         )
 
     lines = (
-        [line_for(rom) for rom in sorted(gm.glob("*.gb"))] if gm.is_dir() else []
+        [row for rom in sorted(gm.glob("*.gb")) if (row := line_for(rom))]
+        if gm.is_dir()
+        else []
     )
     write_manifest(
         out,
@@ -504,7 +516,9 @@ def gen_gbmicrotest(roms: Path, out: Path) -> None:
             '   rewritten; the swept display subject stays screen-only),',
             ' - toggle_lcdc=FF40:00 (final LCDC readback, fully R/W per Pan Docs),',
             ' - wave_write_to_0xC003=C003:55 (constant WRAM write, cpu_bus_1 class).',
-            'The 4 remaining fails have NO hardware-derivable oracle (proven per-test):',
+            'temp is EXCLUDED (not graded): a `nop` dev stub that writes no FF82',
+            'verdict of any kind, so grading it would assert nothing (see line_for).',
+            'The 3 remaining fails have NO hardware-derivable oracle (proven per-test):',
             ' - 500-scx-timing / minimal (byte-identical ROMs, cmp-verified): dual-halt',
             '   TIMA measure of mode-3 length -> $8000 (FF80-82 never written). Intended',
             '   control flow confirmed by patched-ROM probes (halt1 wakes at line-1',
