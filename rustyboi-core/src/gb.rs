@@ -3726,10 +3726,13 @@ mod reset_identity_tests {
         }
     }
 
-    /// A reset AGB must still be an AGB in both places `set_agb` fans out to:
-    /// the `Mmio` itself and the APU channels. (The timer used to be a third
-    /// leg; its only AGB behaviour was the TAC-enable bump, removed after a
-    /// real GBA-SP capture contradicted it -- see `Timer::set_tac`.)
+    /// A reset AGB must still be an AGB in all three places `set_agb` fans out
+    /// to: the `Mmio` itself, the APU channels, and the timer. The timer leg is
+    /// back -- not the old TAC-enable bump removed in 989e45d0, but the
+    /// old-TAC-DISABLED TAC-write glitch, whose latching DIV bit pair differs
+    /// between CGB and AGB silicon (`Timer::disabled_tac_write_glitch`). Its
+    /// flags are `#[serde(skip)]`, so nothing but this re-seeding keeps a reset
+    /// or savestate-loaded machine off the DMG (never-glitch) path.
     #[test]
     fn agb_fanout_survives_in_place_reset() {
         let mut gb = machine(Hardware::AGB);
@@ -3741,6 +3744,42 @@ mod reset_identity_tests {
             wave_signature(&mut machine(Hardware::AGB)),
             "APU forgot it is an AGB after reset"
         );
+        assert_eq!(
+            gb.mmio.timer_rev_flags(),
+            (true, true),
+            "timer forgot it is CGB-family AGB silicon after reset"
+        );
+    }
+
+    /// The same flags for every family, from construction and across BOTH ways
+    /// the identity can be lost: an in-place reset and a savestate round-trip.
+    /// A CGB is CGB-not-AGB, an AGB is both, DMG-family silicon is neither (so
+    /// it never glitches). The flags are `#[serde(skip)]`, so the round-trip leg
+    /// is what pins `post_load_fixup` -> `reseed_hardware_flags` ->
+    /// `set_serial_cgb` actually reaching the timer.
+    #[test]
+    fn timer_rev_flags_track_the_machine_identity() {
+        for (hardware, want) in [
+            (Hardware::DMG, (false, false)),
+            (Hardware::MGB, (false, false)),
+            (Hardware::CGB, (true, false)),
+            (Hardware::CGBE, (true, false)),
+            (Hardware::AGB, (true, true)),
+        ] {
+            let mut gb = machine(hardware);
+            assert_eq!(gb.mmio.timer_rev_flags(), want, "{hardware:?}: at construction");
+
+            gb.reset();
+            assert_eq!(gb.mmio.timer_rev_flags(), want, "{hardware:?}: after reset");
+
+            let state = gb.to_state_bytes().expect("serialize");
+            let restored = GB::from_state_bytes(&state).expect("deserialize");
+            assert_eq!(
+                restored.mmio.timer_rev_flags(),
+                want,
+                "{hardware:?}: after a savestate round-trip"
+            );
+        }
     }
 
     /// Catch-all for the serialized half of the identity (`is_mgb`, `cgb_de`,

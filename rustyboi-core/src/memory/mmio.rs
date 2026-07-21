@@ -1438,6 +1438,7 @@ impl Mmio {
     pub(crate) fn set_agb(&mut self, agb: bool) {
         self.is_agb = agb;
         self.audio.set_agb(agb);
+        self.timer.set_agb(agb);
     }
 
     /// Set the MGB (Game Boy Pocket) hardware flag. Only gates the undocumented
@@ -2118,6 +2119,10 @@ impl Mmio {
     pub(crate) fn set_serial_cgb(&mut self, cgb: bool) {
         self.serial.set_cgb(cgb);
         self.serial.set_agb(self.is_agb());
+        // The timer's old-TAC-disabled glitch is per-silicon-family; re-apply
+        // BOTH flags here so it does not depend on set_agb/set_serial_cgb order.
+        self.timer.set_cgb(cgb);
+        self.timer.set_agb(self.is_agb());
     }
 
     /// CGB *hardware* flag: true whenever running on
@@ -2305,6 +2310,15 @@ impl Mmio {
     /// value sets the TIMA/serial/APU pre-tick phase). For state snapshots.
     pub fn timer_internal_counter(&self) -> u16 {
         self.timer.internal_counter()
+    }
+
+    /// The timer's (CGB, AGB) silicon flags. `#[serde(skip)]`, so this is what
+    /// pins that `set_serial_cgb`/`set_agb` re-seed them after a reset or a
+    /// savestate load rather than silently reverting the TAC-write glitch
+    /// family to DMG.
+    #[cfg(test)]
+    pub(crate) fn timer_rev_flags(&self) -> (bool, bool) {
+        self.timer.rev_flags()
     }
 
     /// Write a raw byte into the generic IO-register backing store, bypassing

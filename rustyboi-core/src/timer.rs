@@ -134,6 +134,16 @@ pub(crate) struct Timer {
     /// not on the early grid — its IF-set stays late).
     #[serde(skip, default)]
     isr_on_early_grid: bool,
+    /// CGB *silicon* (including CGB-in-DMG-compat) and AGB silicon. Only the
+    /// old-TAC-disabled TAC-write glitch reads these: which DIV bit pair can
+    /// latch that glitch is a per-family property (see
+    /// `disabled_tac_write_glitch`). Reseeded from `Mmio::set_serial_cgb` /
+    /// `Mmio::set_agb`, so they ride the machine identity rather than the
+    /// savestate.
+    #[serde(skip, default)]
+    is_cgb: bool,
+    #[serde(skip, default)]
+    is_agb: bool,
 }
 
 fn disabled_time() -> u64 {
@@ -177,7 +187,25 @@ impl Timer {
             last_fire_cc: DISABLED_TIME,
             last_fire_cc_ei: DISABLED_TIME,
             isr_on_early_grid: false,
+            is_cgb: false,
+            is_agb: false,
         }
+    }
+
+    /// CGB silicon flag (true for CGB-in-DMG-compat too — the glitch is a
+    /// property of the timer silicon, not of the compat mode).
+    pub(crate) fn set_cgb(&mut self, cgb: bool) {
+        self.is_cgb = cgb;
+    }
+
+    /// AGB silicon flag.
+    pub(crate) fn set_agb(&mut self, agb: bool) {
+        self.is_agb = agb;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rev_flags(&self) -> (bool, bool) {
+        (self.is_cgb, self.is_agb)
     }
 
     /// The cc the most recent still-undispatched TIMA IRQ became deliverable, or
@@ -490,6 +518,59 @@ impl Timer {
     /// quirk was the sole reason our AGB diverged (TIMA 0x02 vs the captured 0x01).
     /// Dropping it fixes that row and changes nothing else anywhere in the corpus.
     /// Pan Docs: Timer obscure behaviour — https://gbdev.io/pandocs/Timer_Obscure_Behaviour.html
+    /// Whether a TAC write that ENABLES the timer over a DISABLED old TAC
+    /// glitch-ticks TIMA once. DMG never does: with the old TAC disabled the
+    /// edge detector's input was already 0, so there is no falling edge — that
+    /// is AntonioND's DMG rule ("if OLD_TAC disabled -> GLITCH = 0",
+    /// tac_set_everything/DMG.txt), and his GBC notes mark the same case
+    /// `XXXXXXXXX`, i.e. explicitly NOT the DMG rule.
+    ///
+    /// On CGB/AGB the old mux output is not gated by the old enable bit, so the
+    /// detector still sees `SYS[old_bit] -> SYS[new_bit]` and falls when the old
+    /// bit is high and the new one is low (the guard below). WHICH bit pair
+    /// actually latches that narrow pulse is per-family and NOT derivable from
+    /// the guard alone — it is a propagation-delay race, so each pair is taken
+    /// only where two physical units agree:
+    ///   - CGB, D64 -> E256: the author committed two CGB captures of
+    ///     tac_set_everything that differ at 223 bytes, EVERY one of them in the
+    ///     old-TAC-disabled region (the old-TAC-enabled half is byte-identical)
+    ///     -- yet both agree on this pair. Reproduces real_gbc.sav byte-exactly
+    ///     on tac_set_disabled (0 mismatches / 14336 cells).
+    ///   - AGB, D16 -> E256: both AGB units (real_gba, real_gba_sp) glitch here,
+    ///     and the author annotates the cell `(GBA 1)` in
+    ///     tac_set_when_inc_*/info_*.txt.
+    ///
+    /// The neighbouring pairs are deliberately NOT modelled: the two CGB units
+    /// contradict each other on D1024->E16/E256, D64->E16 and D256->E64, and the
+    /// two AGB units contradict each other on everything except D16->E256.
+    /// Fitting those would be fitting one die's metastability.
+    ///
+    /// This is NOT the AGB quirk removed in 989e45d0. That one fired on old-TAC-
+    /// ENABLED writes and broke timers/timer_reset_test; this path is unreachable
+    /// unless the old TAC is disabled, so that row stays fixed.
+    ///
+    /// The CGB TIMA-parity term is a ripple-carry pulse width effect: a seed
+    /// whose low bit is 1 needs the carry to propagate past bit 0, which the
+    /// narrow glitch pulse only achieves when SYS bit 3 is also high (widening
+    /// it). Derived from tac_set_disabled's 7 TIMA seeds, which split exactly on
+    /// bit 0 and on no other property.
+    fn disabled_tac_write_glitch(&self, data: u8, cc: u64) -> bool {
+        let sys = cc.wrapping_sub(self.div_anchor);
+        let old_bit = 1u64 << (TIMA_CLOCK[(self.tac & TAC_FREQUENCY_MASK) as usize] - 1);
+        let new_bit = 1u64 << (TIMA_CLOCK[(data & TAC_FREQUENCY_MASK) as usize] - 1);
+        // The falling edge itself: old-selected bit high, new-selected bit low.
+        if sys & old_bit == 0 || sys & new_bit != 0 {
+            return false;
+        }
+        if self.is_agb {
+            old_bit == 8 && new_bit == 128
+        } else if self.is_cgb {
+            old_bit == 32 && new_bit == 128 && (self.tima & 1 == 0 || sys & 8 != 0)
+        } else {
+            false
+        }
+    }
+
     fn set_tac(&mut self, data: u8) {
         let cc = self.access_cc();
         if (self.tac ^ data) != 0 {
@@ -519,6 +600,26 @@ impl Timer {
                 self.update_tima(cc);
                 self.tmatime = DISABLED_TIME;
                 next = DISABLED_TIME;
+            }
+
+            // Enabling the timer over a DISABLED old TAC: on CGB/AGB silicon the
+            // stale mux output can still glitch a tick through. Applied before
+            // the re-anchor below so the fresh overflow schedule starts from the
+            // bumped TIMA.
+            if self.tac & TAC_ENABLE == 0
+                && data & TAC_ENABLE != 0
+                && self.disabled_tac_write_glitch(data, cc)
+            {
+                // A real tick, not a bare +1: it carries into an overflow, which
+                // reloads TMA and raises the timer IRQ. AntonioND's CGB capture
+                // pins this — the TIMA=0xFF glitch cells read back TIMA=TMA(0x00)
+                // WITH IF bit 2 set (tac_set_disabled, old TAC D64 -> E256).
+                if self.tima == 0xFF {
+                    self.tima = self.tma;
+                    self.pending_irq = true;
+                } else {
+                    self.tima += 1;
+                }
             }
 
             if data & TAC_ENABLE != 0 {
@@ -799,5 +900,99 @@ impl Addressable for Timer {
             TAC => self.set_tac(value & 0b00000111),
             _ => panic!("Timer: Invalid write address {:04X}", addr),
         }
+    }
+}
+
+#[cfg(test)]
+mod disabled_tac_write_glitch_tests {
+    //! The old-TAC-DISABLED TAC-write glitch. DMG has none; CGB latches it for
+    //! D64 -> E256 and AGB for D16 -> E256. Both pairs are the ones two physical
+    //! units agree on in AntonioND's gbc-hw-tests captures -- see
+    //! `Timer::disabled_tac_write_glitch` for the provenance and for why the
+    //! neighbouring pairs are deliberately unmodelled.
+    use super::*;
+
+    /// TAC encodings used here: `Dn` disabled / `En` enabled, n = clocks per tick.
+    const D16: u8 = 0b001;
+    const D64: u8 = 0b010;
+    const E256: u8 = 0b111;
+    const E64: u8 = 0b110;
+
+    /// Drive one `tac_set_disabled`-shaped probe: seed TIMA/TMA, reset DIV, let
+    /// the divider reach `sys`, then write the new TAC. Returns (TIMA, IRQ).
+    fn probe(cgb: bool, agb: bool, old_tac: u8, new_tac: u8, sys: u64, tima: u8) -> (u8, bool) {
+        let mut t = Timer::new();
+        t.set_cgb(cgb);
+        t.set_agb(agb);
+        t.bump_cc_by(0x1000);
+        t.write(TAC, old_tac);
+        t.write(TMA, 0);
+        t.write(DIV, 0);
+        t.write(TIMA, tima);
+        t.bump_cc_by(sys);
+        t.write(TAC, new_tac);
+        (t.read(TIMA), t.take_pending_irq())
+    }
+
+    /// The falling edge the glitch rides: old-selected DIV bit high (D64 -> bit
+    /// 5), new-selected bit low (E256 -> bit 7). SYS=32 satisfies both.
+    #[test]
+    fn cgb_latches_d64_to_e256_and_dmg_never_does() {
+        assert_eq!(probe(true, false, D64, E256, 32, 0x10).0, 0x11, "CGB must glitch D64 -> E256");
+        assert_eq!(probe(false, false, D64, E256, 32, 0x10).0, 0x10, "DMG must never glitch");
+    }
+
+    /// The CGB parity term: an odd TIMA needs the carry to propagate past bit 0,
+    /// which the narrow pulse only manages when SYS bit 3 is also high. SYS=32
+    /// has bit 3 clear, SYS=40 has it set.
+    #[test]
+    fn cgb_odd_tima_needs_sys_bit3() {
+        assert_eq!(probe(true, false, D64, E256, 32, 0x11).0, 0x11, "odd TIMA, SYS bit3 clear");
+        assert_eq!(probe(true, false, D64, E256, 40, 0x11).0, 0x12, "odd TIMA, SYS bit3 set");
+        // An even TIMA latches either way.
+        assert_eq!(probe(true, false, D64, E256, 32, 0x10).0, 0x11);
+        assert_eq!(probe(true, false, D64, E256, 40, 0x10).0, 0x11);
+    }
+
+    /// AGB takes D16 -> E256 instead, and does NOT take the CGB pair.
+    #[test]
+    fn agb_latches_d16_to_e256_only() {
+        assert_eq!(probe(true, true, D16, E256, 40, 0x10).0, 0x11, "AGB must glitch D16 -> E256");
+        assert_eq!(probe(true, true, D64, E256, 32, 0x10).0, 0x10, "AGB must not take the CGB pair");
+        assert_eq!(probe(true, false, D16, E256, 40, 0x10).0, 0x10, "CGB must not take the AGB pair");
+    }
+
+    /// Pairs neither family latches stay clean even when the falling edge is
+    /// present (D64 -> E64 shares a bit, D16 -> E64 is an unmodelled pair).
+    #[test]
+    fn unmodelled_pairs_stay_clean() {
+        for (cgb, agb) in [(true, false), (true, true)] {
+            assert_eq!(probe(cgb, agb, D64, E64, 32, 0x10).0, 0x10);
+            assert_eq!(probe(cgb, agb, D16, E64, 40, 0x10).0, 0x10);
+        }
+    }
+
+    /// The glitch is a real tick: from 0xFF it overflows, reloading TMA and
+    /// raising the timer IRQ. Both cells are read straight off the CGB capture
+    /// (tac_set_disabled, old TAC D64 -> E256, single speed):
+    ///   seed 0xFF (odd, so SYS bit 3 required) at SYS=40 -> TIMA 0x00, IF&4=4
+    ///   seed 0xFE (even) at SYS=32                       -> TIMA 0xFF, IF&4=0
+    #[test]
+    fn glitch_from_ff_overflows_and_raises_irq() {
+        let (tima, irq) = probe(true, false, D64, E256, 40, 0xFF);
+        assert_eq!(tima, 0x00, "overflow must reload TMA (0)");
+        assert!(irq, "overflow must raise the timer IRQ");
+        let (tima, irq) = probe(true, false, D64, E256, 32, 0xFE);
+        assert_eq!(tima, 0xFF);
+        assert!(!irq, "a non-overflowing glitch must not raise the IRQ");
+    }
+
+    /// An odd seed one short of overflow does NOT tick when SYS bit 3 is clear,
+    /// so it must not overflow either -- the parity term gates the IRQ too.
+    #[test]
+    fn odd_ff_without_sys_bit3_neither_ticks_nor_fires() {
+        let (tima, irq) = probe(true, false, D64, E256, 32, 0xFF);
+        assert_eq!(tima, 0xFF, "no tick, so no overflow");
+        assert!(!irq);
     }
 }
