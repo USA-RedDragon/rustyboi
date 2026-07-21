@@ -30,6 +30,16 @@ impl Mode {
             Self::Agb => 'a',
         }
     }
+
+    /// Default silicon for a mode, used when no `rev=` token pins a
+    /// sub-revision. Single source of truth for the mode->Hardware mapping.
+    pub(crate) fn default_hardware(self) -> Hardware {
+        match self {
+            Self::Dmg => Hardware::DMG,
+            Self::Cgb => Hardware::CGB,
+            Self::Agb => Hardware::AGB,
+        }
+    }
 }
 
 /// Memory region a `.dump` oracle is captured from. The base address is fixed
@@ -210,6 +220,15 @@ pub(crate) struct TestCase {
     /// manifest token; analogous to `rev=` hardware pins, but for the
     /// cartridge side of the fixture. Default = strict decode.
     pub cart_lazy_sram_cs: bool,
+}
+
+impl TestCase {
+    /// Silicon this case actually runs on: the `rev=` pin when present, else
+    /// the mode default. Everything that depends on the machine identity (the
+    /// `GB::new` model AND the `--real-bios` boot image) must agree on this.
+    pub(crate) fn hardware(&self) -> Hardware {
+        self.revision.unwrap_or_else(|| self.mode.default_hardware())
+    }
 }
 
 pub(crate) fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<TestCase> {

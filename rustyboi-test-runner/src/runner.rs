@@ -141,15 +141,15 @@ pub fn bios_filename(hw: Hardware) -> Option<&'static str> {
     }
 }
 
-/// Locate the boot ROM file for a hardware mode. Tries `bios_dir` first (if
-/// given), then `bios/` relative to CWD and to the crate manifest dir, then the
-/// worktree default. Returns the first existing path.
-fn resolve_bios_path(mode: Mode, bios_dir: Option<&PathBuf>) -> Option<PathBuf> {
-    let hw = match mode {
-        Mode::Dmg => Hardware::DMG,
-        Mode::Cgb => Hardware::CGB,
-        Mode::Agb => Hardware::AGB,
-    };
+/// Locate the boot ROM file for a specific silicon revision. Tries `bios_dir`
+/// first (if given), then `bios/` relative to CWD and to the crate manifest
+/// dir, then the worktree default. Returns the first existing path.
+///
+/// Keyed on `Hardware`, not `Mode`: a `rev=`-pinned case runs on the pinned
+/// silicon, so it must boot that revision's image (cgb0_boot.bin for rev=cgb0,
+/// cgbE_boot.bin for rev=cgbe, ...). Keying this on the mode booted the mode
+/// default and silently graded pinned rows against the wrong boot ROM.
+fn resolve_bios_path(hw: Hardware, bios_dir: Option<&PathBuf>) -> Option<PathBuf> {
     let file = bios_filename(hw)?;
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(dir) = bios_dir {
@@ -170,7 +170,7 @@ fn resolve_bios_path(mode: Mode, bios_dir: Option<&PathBuf>) -> Option<PathBuf> 
 /// ran (so callers can branch on which path produced the state).
 fn seed_initial_state(gb: &mut GB, case: &TestCase, options: &RunOptions) -> bool {
     if options.real_bios
-        && let Some(path) = resolve_bios_path(case.mode, options.bios_dir.as_ref())
+        && let Some(path) = resolve_bios_path(case.hardware(), options.bios_dir.as_ref())
         && let Ok(()) = gb.load_bios(&path.to_string_lossy())
     {
         gb.run_boot_rom();
@@ -254,13 +254,9 @@ pub(crate) fn validate_bios(
     bios_dir: Option<&PathBuf>,
 ) -> Result<usize, String> {
     let cgb = matches!(mode, Mode::Cgb | Mode::Agb);
-    let hw = match mode {
-        Mode::Dmg => Hardware::DMG,
-        Mode::Cgb => Hardware::CGB,
-        Mode::Agb => Hardware::AGB,
-    };
+    let hw = mode.default_hardware();
 
-    let bios_path = resolve_bios_path(mode, bios_dir)
+    let bios_path = resolve_bios_path(hw, bios_dir)
         .ok_or_else(|| format!("no boot ROM found for {:?}", mode))?;
     let rom_data = fs::read(rom_path).map_err(|e| format!("read ROM: {e}"))?;
 
@@ -434,11 +430,7 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
     // A `rev=` manifest token pins a specific boot sub-revision (the mooneye
     // boot_regs/boot_div/boot_hwio tests each target one silicon revision);
     // otherwise the case runs on the default model for its mode.
-    let hardware = case.revision.unwrap_or(match case.mode {
-        Mode::Dmg => Hardware::DMG,
-        Mode::Cgb => Hardware::CGB,
-        Mode::Agb => Hardware::AGB,
-    });
+    let hardware = case.hardware();
     let mut gb = GB::new(hardware);
     gb.insert(cartridge);
     if case.cart_lazy_sram_cs {
@@ -1604,6 +1596,42 @@ mod tests {
             cart_lazy_sram_cs: false,
         };
         assert_eq!(artifact_stem(&case), "my_rom_cgb_serial");
+    }
+
+    // Regression: `--real-bios` used to pick the boot image from the manifest
+    // MODE, so every `rev=`-pinned row booted the mode default -- a rev=cgb0
+    // row booted cgb_boot.bin, a rev=agb row (mode cgb) booted cgb_boot.bin
+    // instead of agb_boot.bin. The boot image must follow the same effective
+    // Hardware the case actually runs on.
+    #[test]
+    fn bios_follows_the_rev_pin_not_the_mode() {
+        let pinned = |mode: Mode, revision: Option<Hardware>| {
+            bios_filename(
+                TestCase {
+                    rom_path: PathBuf::from("x.gb"),
+                    mode,
+                    oracle: Oracle::Serial,
+                    revision,
+                    input: Vec::new(),
+                    frames: None,
+                    cart_lazy_sram_cs: false,
+                }
+                .hardware(),
+            )
+            .unwrap()
+        };
+
+        // Unpinned rows keep the mode default.
+        assert_eq!(pinned(Mode::Dmg, None), "dmg_boot.bin");
+        assert_eq!(pinned(Mode::Cgb, None), "cgb_boot.bin");
+        assert_eq!(pinned(Mode::Agb, None), "agb_boot.bin");
+
+        // A rev= pin overrides the mode default. These are the pins actually
+        // used by gbc_hw_tests (cgb+agb / cgb+cgbe) and licensee_boot_div.
+        assert_eq!(pinned(Mode::Cgb, Some(Hardware::AGB)), "agb_boot.bin");
+        assert_eq!(pinned(Mode::Cgb, Some(Hardware::CGBE)), "cgbE_boot.bin");
+        assert_eq!(pinned(Mode::Cgb, Some(Hardware::CGB0)), "cgb0_boot.bin");
+        assert_eq!(pinned(Mode::Dmg, Some(Hardware::MGB)), "mgb_boot.bin");
     }
 
     #[test]
