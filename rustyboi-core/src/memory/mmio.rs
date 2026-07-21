@@ -3731,7 +3731,20 @@ impl Mmio {
                 }
             }
             DmaSrcKind::Wram => {
-                self.dma_conflict_wram_read(self.dma.source_base.wrapping_add(pos as u16))
+                let src = self.dma.source_base.wrapping_add(pos as u16);
+                let wram_byte = self.dma_conflict_wram_read(src);
+                // DMG src E000-FFFF: the echo fetch also asserts the external-RAM
+                // /CS on the bus WRAM shares with the cartridge (gb-ctr: all
+                // A000-FFFF DMA sources are external-RAM transfers, and the result
+                // "depends on several factors, including the connected
+                // cartridge"), so a lazy-/CS board contends with WRAM. Only the
+                // DMG reaches this arm above E0 -- `dma_src_kind` routes CGB
+                // E000+ to `ExternalBus`, where WRAM is not on the cart bus at
+                // all. No-op below E0 and on strict boards / RAMG off.
+                match (&self.cartridge, self.dma.source_base >> 8 >= 0xE0) {
+                    (Some(cart), true) => wram_byte & cart.dma_sram_bus_read(src),
+                    _ => wram_byte,
+                }
             },
             _ => self.read_during_dma(self.dma.source_base.wrapping_add(pos as u16)),
         }
@@ -5579,12 +5592,27 @@ impl memory::Addressable for Mmio {
                 WRAM_START..=WRAM_END => self.wram.read(addr),
                 WRAM_BANK_START..=WRAM_BANK_END => self.banked_wram().read(addr),
                 ECHO_RAM_START..=ECHO_RAM_END => {
+                    let echo_addr = addr;
                     let addr = addr - 0x2000;
-                    match addr {
+                    let wram_byte = match addr {
                         0..WRAM_START => panic!("This is literally never possible"),
                         WRAM_START..=WRAM_END => self.wram.read(addr),
                         WRAM_BANK_START..=ECHO_RAM_MIRROR_END => self.banked_wram().read(addr),
                         0xDE00..=0xFFFF => panic!("This is literally never possible"),
+                    };
+                    // DMG carries WRAM on the same external bus as the cartridge
+                    // and asserts the external-RAM /CS across A000-FDFF (gb-ctr
+                    // "external bus" CPU-read figure, case b). A lazy-/CS board
+                    // decodes /CS & A13 only, so it drives SRAM[addr & 0x1FFF]
+                    // here while WRAM drives the echo byte: the bus settles to
+                    // the wired-AND. Pan Docs records the same failure mode --
+                    // "in some flash cartridges, echo RAM interferes with SRAM
+                    // normally at A000-BFFF". No-op on CGB (WRAM has its own
+                    // bus) and on strict boards / RAMG off, where
+                    // `dma_sram_bus_read` returns 0xFF.
+                    match (&self.cartridge, self.is_cgb()) {
+                        (Some(cart), false) => wram_byte & cart.dma_sram_bus_read(echo_addr),
+                        _ => wram_byte,
                     }
                 },
                 // While a transfer is placing bytes into OAM the DMA owns the
