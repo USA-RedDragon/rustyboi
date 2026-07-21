@@ -1186,12 +1186,22 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
         write_manifest(out, "gbc_hw_tests", _GBCHW_HEADER, lines)
         return
 
-    MAGIC = bytes([0x12, 0x34, 0x56, 0x78])
-    # Raw full-dump captures whose meaningful data is a magic-terminated prefix
-    # followed by per-unit power-on garbage: grade only `[0 .. last_magic+4)`.
+    # Raw 128K flash-card full-dump captures whose meaningful data is a
+    # magic-terminated prefix followed by residue: grade only `[0 .. length)`.
+    # Explicit lengths, not a rfind() of the last magic -- on a card that is not
+    # erased between runs the residue can itself contain magic markers from an
+    # EARLIER test, and "through the last magic" then over-captures into them.
     PREFIX_ONLY = {
-        "serial/sc_change_freq_gbc",  # 128K card dump; prefix 0x1004
-        "timers/timer_reset_2",       # 128K card dump; prefix 0x1084
+        # One magic in the whole dump, at 0x1000 -> the last-magic rule and the
+        # explicit length agree here. Left as measured.
+        "serial/sc_change_freq_gbc": 0x1004,
+        # Five magics (0x280, 0x900, 0xC00, 0x1000, 0x1080); the last-magic rule
+        # captured through 0x1084 and swept in four of them. The test's own
+        # output ends at the FIRST one: [0x284 .. 0x904) is byte-identical to
+        # timers/tma_set's capture in every device column, i.e. stale content
+        # left on the card by an earlier run, and tma_set is the only dir in
+        # timers/ that matches. Real output is 644 bytes.
+        "timers/timer_reset_2": 0x284,
     }
     # Genuinely nondeterministic / ungradeable byte-exact (documented):
     #  - corrupted_stop: 128K raw card dump, nonzero to 0x1FFFF (garbage tail);
@@ -1220,9 +1230,7 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
     refs_root = out / "refs" / "gbc-hw-tests"
 
     def sav_len(d_key: str, data: bytes) -> int:
-        if d_key in PREFIX_ONLY:
-            return data.rfind(MAGIC) + 4
-        return len(data)
+        return PREFIX_ONLY.get(d_key, len(data))
 
     def emit(test_id: str, mode: str, rom: Path, ref: Path, rev: str = "") -> None:
         # cart=lazy_sram_cs: every capture in this suite was taken on

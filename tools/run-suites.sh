@@ -166,7 +166,11 @@ threshold() {
         magentests)         echo "11 -" ;;
         little_things_extra) echo "4 -" ;;
         sketchtests)        echo "6 120" ;;
+<<<<<<< HEAD
         gbc_hw_tests)       echo "251 800" ;;  # real-silicon SRAM captures (CGB+DMG+AGB columns); 800 frames = slow mode2/echo tests settle
+=======
+        gbc_hw_tests)       echo "266 3000" ;;  # real-silicon SRAM captures (CGB+DMG+AGB columns); the sram path runs a FLAT budget with no done-marker, so a short budget truncates a ROM mid-write (mode2_*_timing_* need ~3000); saturating past 3000
+>>>>>>> eee14b84 (suites: stop grading gbc_hw_tests timer_reset_2 against another test's residue)
         gambatte)           echo "5248 -" ;;  # gated on failed<=9 (GAMBATTE_MAX_FAIL)
         *)                  echo "" ;;
     esac
