@@ -571,6 +571,55 @@ impl Timer {
         }
     }
 
+    /// AGB-only: a TAC write that keeps the timer ENABLED and moves the frequency
+    /// select from DIV bit 3 (16) up to DIV bit 5 (64) glitch-ticks TIMA even when
+    /// BOTH bits currently read 1 -- the case AntonioND's rule says cannot tick.
+    ///
+    /// His GBC pseudocode (tac_set_everything/GBC_1.txt) gates the old-TAC-enabled
+    /// glitch on the new bit being LOW:
+    ///   GLITCH = (SYS & OLD.clocks/2) != 0 && (SYS & NEW.clocks/2) == 0
+    /// AGB drops the second term for this one pair: the switch itself deselects the
+    /// mux for a fraction of a cycle, so the edge detector sees a narrow 1 -> 0 -> 1
+    /// notch and latches a tick that never appears on CGB.
+    ///
+    /// Oracle: timers/tac_set_enabled. Both AGB captures (real_gba.sav,
+    /// real_gba_sp.sav) are byte-IDENTICAL (md5 af46986d...), so the test is
+    /// deterministic on AGB silicon and two physical units agree. Our diff against
+    /// it was 112 bytes, and those 112 are EXACTLY the cells with old TAC = E16,
+    /// new TAC = E64, SYS bit 3 high AND SYS bit 5 high: all 7 TIMA seeds x the 4
+    /// probed SYS phases {40,44,56,60} x both speed passes x both register aliases
+    /// (0x06/0x0E -- TAC bit 3 is a don't-care), 7*4*2*2 = 112. Seed-independent and
+    /// SYS-periodic, which is the signature of a real decode hazard; contrast the
+    /// scattered per-seed cells that mark metastability elsewhere in this corpus.
+    ///
+    /// Deliberately NOT generalised to "any upward pair". The ROM probes only
+    /// SYS = 12..72, where DIV bits 7 and 9 are never high, so E16->E256, E16->E1024
+    /// and E64->E1024 have no cell in which the new bit reads 1 -- the capture cannot
+    /// distinguish "bit 3 -> bit 5" from "any slower target", and guessing would be
+    /// unoracled. The DOWNWARD pair IS observable and is observed NOT to glitch:
+    /// old E64 -> new E16 matches the reference at all 7 seeds x all 16 SYS phases,
+    /// including {40,44,56,60} where both bits are high.
+    ///
+    /// This is NOT the AGB quirk reverted in 989e45d0, and it cannot re-break
+    /// timers/timer_reset_test:
+    ///   - That quirk fired when the frequency change moved the feeding bit HIGH ->
+    ///     LOW. This one requires both bits HIGH, so the two are disjoint by
+    ///     construction -- there is no write on which both could fire.
+    ///   - timer_reset_test writes E64 (TACF_65KHZ) once and then E16
+    ///     (TACF_262KHZ) 32 times. E64 -> E16 is the DOWNWARD direction, which this
+    ///     rule excludes, and the following 31 writes are E16 -> E16, which never
+    ///     reach here at all (`self.tac ^ data == 0` skips the whole body). The row
+    ///     stays green for both AGB and CGB.
+    fn agb_e16_to_e64_glitch(&self, data: u8, cc: u64) -> bool {
+        if !self.is_agb || self.tac & TAC_ENABLE == 0 || data & TAC_ENABLE == 0 {
+            return false;
+        }
+        let sys = cc.wrapping_sub(self.div_anchor);
+        let old_bit = 1u64 << (TIMA_CLOCK[(self.tac & TAC_FREQUENCY_MASK) as usize] - 1);
+        let new_bit = 1u64 << (TIMA_CLOCK[(data & TAC_FREQUENCY_MASK) as usize] - 1);
+        old_bit == 8 && new_bit == 32 && sys & old_bit != 0 && sys & new_bit != 0
+    }
+
     fn set_tac(&mut self, data: u8) {
         let cc = self.access_cc();
         if (self.tac ^ data) != 0 {
@@ -587,7 +636,8 @@ impl Timer {
                     >> (TIMA_CLOCK[(data & 3) as usize] - 1))
                     & 1
                     != 0;
-                let shift = if new_enabled && new_bit_high {
+                let shift = if new_enabled && new_bit_high && !self.agb_e16_to_e64_glitch(data, cc)
+                {
                     TMA_OFF
                 } else {
                     (1u64 << (old_clk - 1)) + TMA_OFF
@@ -994,5 +1044,96 @@ mod disabled_tac_write_glitch_tests {
         let (tima, irq) = probe(true, false, D64, E256, 32, 0xFF);
         assert_eq!(tima, 0xFF, "no tick, so no overflow");
         assert!(!irq);
+    }
+}
+
+#[cfg(test)]
+mod enabled_tac_write_glitch_tests {
+    //! The old-TAC-ENABLED TAC-write glitch. DMG/CGB follow AntonioND's rule
+    //! (old-selected DIV bit high AND new-selected bit low); AGB additionally
+    //! ticks for E16 -> E64 when BOTH bits are high. See
+    //! `Timer::agb_e16_to_e64_glitch` for provenance and for why the rule is not
+    //! generalised to the other upward pairs.
+    use super::*;
+
+    const E16: u8 = 0b101;
+    const E64: u8 = 0b110;
+    const E256: u8 = 0b111;
+
+    /// One `tac_set_enabled`-shaped probe: the old TAC is ENABLED, so TIMA also
+    /// ticks normally while the divider runs out to `sys`. Callers compare AGB
+    /// against CGB rather than against an absolute value.
+    fn probe(agb: bool, old_tac: u8, new_tac: u8, sys: u64, tima: u8) -> u8 {
+        let mut t = Timer::new();
+        t.set_cgb(true);
+        t.set_agb(agb);
+        t.bump_cc_by(0x1000);
+        t.write(TAC, old_tac);
+        t.write(TMA, 0);
+        t.write(DIV, 0);
+        t.write(TIMA, tima);
+        t.bump_cc_by(sys);
+        t.write(TAC, new_tac);
+        t.read(TIMA)
+    }
+
+    /// The four SYS phases the ROM probes where DIV bits 3 and 5 are BOTH high.
+    /// AGB ticks once more than CGB at every one of them, for every TIMA seed the
+    /// ROM uses -- the full 112-cell diff against real_gba.sav.
+    #[test]
+    fn agb_ticks_e16_to_e64_when_both_bits_high() {
+        for sys in [40, 44, 56, 60] {
+            for seed in [0xFB, 0xFC, 0xFD, 0xFE, 0xFF, 0x00, 0x01] {
+                let cgb = probe(false, E16, E64, sys, seed);
+                let agb = probe(true, E16, E64, sys, seed);
+                assert_eq!(
+                    agb,
+                    cgb.wrapping_add(1),
+                    "AGB must tick once more at SYS={sys} seed={seed:#04X}"
+                );
+            }
+        }
+    }
+
+    /// Both bits high is required: where DIV bit 5 is low the shared rule already
+    /// ticks, so AGB and CGB must agree (no double count).
+    #[test]
+    fn new_bit_low_is_the_shared_rule() {
+        for sys in [24, 28, 72] {
+            assert_eq!(probe(true, E16, E64, sys, 0x10), probe(false, E16, E64, sys, 0x10));
+        }
+    }
+
+    /// The downward pair is directly observed NOT to glitch: E64 -> E16 matches
+    /// the CGB reference at every SYS phase, including those where both bits are
+    /// high. This is also the transition timers/timer_reset_test performs, and the
+    /// direction the quirk reverted in 989e45d0 got wrong.
+    #[test]
+    fn downward_pair_never_glitches() {
+        for sys in 0..96u64 {
+            assert_eq!(
+                probe(true, E64, E16, sys, 0x10),
+                probe(false, E64, E16, sys, 0x10),
+                "E64 -> E16 must not glitch on AGB at SYS={sys}"
+            );
+        }
+    }
+
+    /// Not generalised: the other upward pairs stay on the shared rule.
+    #[test]
+    fn other_upward_pairs_stay_unmodelled() {
+        for sys in 0..96u64 {
+            assert_eq!(probe(true, E16, E256, sys, 0x10), probe(false, E16, E256, sys, 0x10));
+            assert_eq!(probe(true, E64, E256, sys, 0x10), probe(false, E64, E256, sys, 0x10));
+        }
+    }
+
+    /// A TAC write that does not change the value at all is skipped wholesale, so
+    /// timer_reset_test's 31 repeated E16 writes cannot reach the AGB rule.
+    #[test]
+    fn identical_tac_write_is_inert() {
+        for sys in [40, 44, 56, 60] {
+            assert_eq!(probe(true, E16, E16, sys, 0x10), probe(false, E16, E16, sys, 0x10));
+        }
     }
 }
