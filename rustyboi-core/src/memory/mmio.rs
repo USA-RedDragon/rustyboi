@@ -2222,13 +2222,20 @@ impl Mmio {
         if !self.is_cgb_features_enabled() {
             return true;
         }
-        // CGB-native LCD-waiting halts stay legacy: their real-silicon
-        // observables sit at R+4 (one dot OFF the model's boundary grid), so
-        // an on-grid wake cannot reproduce them without a per-mode register
-        // access sub-cycle convention that has not been derived yet (the
-        // vbl_irq_delay_timer / last_ly_ly_change / mode1_disablestat_end
-        // gbc_mode knife-edge cells). IE cannot change while halted, so the
-        // predicate is stable across the halt window.
+        // CGB-native LCD-waiting halts keep the legacy event-snapped wake,
+        // and that IS the hardware model, not a shortcut: with identical IF
+        // raise ccs, CGB silicon pins the woken stream to R+4 (one dot OFF
+        // the pre-halt boundary grid) on every knife-edge capture cell
+        // (vbl_irq_delay_timer_gbc IF train, last_ly_ly_change LY153 window,
+        // mode1_disablestat_end_gbc). A real SM83 can only do that if the
+        // native-mode halt exit RE-PHASES the CPU clock to the waking IRQ
+        // edge instead of resuming on the pre-halt grid (DMG and CGB-compat
+        // provably resume on-grid; KEY0 compat mode evidently restores the
+        // DMG-style clock gating). Known residue of this model: AGB silicon
+        // disagrees with CGB by exactly one dot on mode1_disablestat_end
+        // (wants the on-grid wake there) while agreeing on vbl_irq_delay —
+        // the AGB exit is not yet separately modeled. IE cannot change while
+        // halted, so the predicate is stable across the halt window.
         (self.ie_register & 0x02) == 0
             && !self.is_double_speed_mode()
             && !self.is_speed_switch_armed()
