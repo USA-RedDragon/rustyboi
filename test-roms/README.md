@@ -31,7 +31,6 @@ The filename carries the ROM's runner metadata, so the manifest can't drift:
   | `sgb` / `sgb2` | `rgbfix -s -l 0x33`, `.gb` | SGB / SGB2 (`rev=` pin) |
   | `sgbcart` | `rgbfix -s -l 0x33`, `.gb` | DMG |
   | `sgblocked` | plain, `.gb` | SGB (`rev=` pin) |
-  | `dmgoncgb` | plain, `.gb` | CGB (DMG-compat mode) |
 
   SGB ROMs need **both** header entries Pan Docs "Unlocking SGB Functions"
   requires — SGB flag `$0146 = $03` and old licensee `$014B = $33` — or the SGB
@@ -56,45 +55,6 @@ The filename carries the ROM's runner metadata, so the manifest can't drift:
   - `png`: the ROM renders a frame and reaches `LD B,B`; the runner compares the
     160×144 framebuffer to `refs/<category>/<name>.<model>.png`. Use for
     render-only behavior the CPU cannot read back.
-  - `bench`: **not an oracle at all** — a hardware-bench measurement ROM. See
-    below.
-
-## Measurement ROMs (`bench`)
-
-The two gradings above both assert an expected value, which is right for
-silicon-verified behavior and wrong for everything else. A `bench` ROM is for the
-opposite case: a cell where our model is SameBoy-derived or first-principles and
-**no** existing ROM anywhere can discriminate it. Asserting our current behavior
-there would freeze an unverified inference into a permanent oracle — the exact
-failure mode the provenance rule below exists to prevent.
-
-So a `bench` ROM has no verdict. It records **raw bytes** to cart SRAM behind the
-`RBHW` record header (`include/rbhw_capture.inc`: format tag, ROM id, power-on
-run counter, silicon fingerprint vector, payload length, CRC16) and an operator
-reads the save back off the cart. Interpretation happens off-cart, by a human,
-against the header comment of the ROM that produced the bytes. Each ROM's header
-comment carries its own operator protocol (which console, what to read out, how
-to read each outcome) and its payload format.
-
-Consequently they are **deliberately not manifest rows**. `tools/gen_manifests.py`
-emits one graded row per ROM under `build/`, so the Makefile routes `.bench.`
-ROMs to `build-bench/` instead — outside the scanned tree. The `rustyboi` suite
-count is unaffected by adding one. They are also fixed with an MBC5+RAM+BATTERY
-header (cart type `0x1B`, 8 KiB RAM) rather than the plain ROM-only header the
-graded ROMs use, because the capture has to survive power-off on a real cart.
-
-Run one by hand — there is no runner integration by design:
-
-```
-make -C test-roms roms
-# flash test-roms/build-bench/<category>/<name>.<model>.bench.gb to an
-# MBC5+RAM+battery cart, run it on the console named in its header comment,
-# then read the .sav back with a GBxCart RW.
-```
-
-Open questions and their ROMs are tracked in `COVERAGE.md`. A `bench` ROM is
-retired as soon as the bench answers it — either into a real graded ROM, or into
-a documented fix.
 
 ## Build & run
 

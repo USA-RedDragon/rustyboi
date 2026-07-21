@@ -2,14 +2,7 @@
 #
 # Each src/<category>/<name>.<model>.<grading>.asm builds to
 # build/<category>/<name>.<model>.<grading>.{gb,gbc}. The <model> token in the
-# filename selects the header.
-#
-# The one exception is the <grading> token `bench`: those are hardware-bench
-# MEASUREMENT ROMs, which record raw bytes to cart SRAM and have no pass/fail
-# verdict at all, so they must never become a graded manifest row. They build to
-# build-bench/ instead — outside the tree tools/gen_manifests.py scans — and are
-# fixed with an MBC5+RAM+BATTERY header (cart type 0x1B, 8 KiB RAM) so the
-# capture survives power-off on a real cart. See test-roms/README.md.
+# filename selects the header:
 #
 #   dmg        -> .gb  (no -C)
 #   cgb, agb   -> .gbc (-C)
@@ -26,9 +19,6 @@
 #                 Game Boy must behave like a monochrome game. Flagging matters —
 #                 an unflagged build would be gated out of SGB behaviour anyway
 #                 and could not tell a correct DMG from an ungated one.
-#   dmgoncgb   -> .gb  the same plain DMG cart as `dmg`, but meant to be RUN on
-#                 CGB silicon, i.e. in DMG-compatibility mode. The header is
-#                 identical to `dmg`; the token records the intended console.
 #   sgblocked  -> .gb  built for SGB hardware but deliberately WITHOUT those
 #                 entries, so the SGB's command-unlock gate stays closed. Only
 #                 for ROMs that assert the locked-out behaviour.
@@ -57,19 +47,14 @@ roms:
 	@set -e; for src in $(SRCS); do \
 	  rel=$${src#src/}; base=$${rel%.asm}; \
 	  model=$$(echo "$$base" | awk -F. '{print $$(NF-1)}'); \
-	  grading=$$(echo "$$base" | awk -F. '{print $$NF}'); \
 	  case "$$model" in \
-	    dmg|dmgoncgb) ext=gb;  fixflags="-v -p 0xFF" ;; \
+	    dmg)       ext=gb;  fixflags="-v -p 0xFF" ;; \
 	    cgb|cgbe|agb) ext=gbc; fixflags="-v -C -p 0xFF" ;; \
 	    sgb|sgb2|sgbcart) ext=gb; fixflags="-v -s -l 0x33 -p 0xFF" ;; \
 	    sgblocked) ext=gb;  fixflags="-v -p 0xFF" ;; \
-	    *) echo "unknown model '$$model' in $$src (expected dmg|dmgoncgb|cgb|cgbe|agb|sgb|sgb2|sgbcart|sgblocked)"; exit 1 ;; \
+	    *) echo "unknown model '$$model' in $$src (expected dmg|cgb|cgbe|agb|sgb|sgb2|sgbcart|sgblocked)"; exit 1 ;; \
 	  esac; \
-	  case "$$grading" in \
-	    bench) dir=build-bench; fixflags="$$fixflags -m 0x1B -r 0x02" ;; \
-	    *)     dir=build ;; \
-	  esac; \
-	  out=$$dir/$$base.$$ext; \
+	  out=build/$$base.$$ext; \
 	  mkdir -p "$$(dirname "$$out")"; \
 	  echo "  RGBDS $$out"; \
 	  $(RGBASM) -i $(INC)/ -o "$$out.o" "$$src"; \
@@ -85,4 +70,4 @@ manifest: | roms
 	@cd .. && $(PYTHON) tools/gen_manifests.py --only rustyboi
 
 clean:
-	rm -rf build build-bench
+	rm -rf build

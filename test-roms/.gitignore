@@ -2,5 +2,4 @@
 # keep this unslashed: agent worktrees symlink build to a prebuilt checkout, and
 # a trailing slash matches only a real directory, leaving the symlink untracked.
 build
-build-bench
 *.o
