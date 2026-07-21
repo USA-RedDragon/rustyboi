@@ -18,6 +18,17 @@
 # gates (the FF41 coincidence tail-hold and the LY-register read). Same
 # conclusion the mooneye_wilbertpol ly_lyc/line-153 rows reached; gambatte's
 # explicitly-cgb04c oracles keep the CGB-C model, which is left untouched.
+#
+# `rev=cgbe` names the POST-C model, not the CPU-CGB-06 stepping: rustyboi
+# has no `CGBD` variant and gb.rs documents `CGBE` as "CPU-CGB-D/E". Both
+# routes that justify the pin (SameBoy's `model <= GB_MODEL_CGB_C` gate and
+# the $FEA0-$FEFF decode) are C-vs-post-C gates; neither separates D from E,
+# and no suite we grade holds both a D and an E oracle for one behaviour
+# (age has no D, mealybug no E, samesuite merges them as `cgbDE`). So a
+# hypothetical `rev=cgbd` would be INERT -- grouped post-C nothing moves,
+# grouped with A/B/C the suite regresses. The remaining lcd_frame_timings
+# failures are therefore NOT a revision mis-assignment; see KNOWN_FAILURES.md
+# for the bench protocol that would settle D-vs-E by measurement.
 # The GBP column is not graded (DMG silicon, covered by real_gb.sav). The AGB
 # column IS graded, one row per dir, on Hardware::AGB via a `rev=agb` token
 # (the row stays mode `cgb` so the default mode set selects it; `rev=`
