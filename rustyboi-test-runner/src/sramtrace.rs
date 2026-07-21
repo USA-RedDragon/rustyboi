@@ -617,7 +617,12 @@ mod tests {
         assert!(line.contains("from=FF0F(IF)"), "{line}");
         assert!(line.contains("src=A"), "{line}");
 
+        // A byte with no recorded store: no pc to point at, and the reason is
+        // ambiguous — the run may never have touched it, or may have stored the
+        // value it already held. The line must say so rather than name a pc.
         let unwritten = trace.blame_line(0x02, 0x00, 0xFF);
-        assert!(unwritten.contains("never written"), "{unwritten}");
+        assert!(unwritten.contains("off=0x0002"), "{unwritten}");
+        assert!(unwritten.contains("pc=?"), "{unwritten}");
+        assert!(unwritten.contains("never changed during the run"), "{unwritten}");
     }
 }
