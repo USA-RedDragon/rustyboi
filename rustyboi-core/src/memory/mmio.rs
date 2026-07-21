@@ -2855,8 +2855,20 @@ impl Mmio {
         // transfer + trailing setup (no second `+5`), else the post-stall STAT read
         // lands ~5 dots late at double speed (2xshort_ds_1 reads mode 0 where
         // hardware still reads mode 3 at `cc + 2 < mode-0 time`).
-        let (per_byte, setup) = if self.is_double_speed_mode() { (4, 5) } else { (2, 4) };
+        //
+        // The DS `setup` is 5 rather than the hardware trailing `+4` because a
+        // single kick's prefetch overlap absorbs one cc. A back-to-back second
+        // kick has no prefetch of its own to absorb (the pair shares one prefetch
+        // sequence, as above), so it must charge the raw hardware `+4`. Charging 5
+        // there put the following read one cc late: every other plain DS
+        // gdma/hdma boundary pair brackets mode-0 time at `m0t-cc` = 5 (out3, mode 3)
+        // and 1 (out0, mode 0) — 4 cc, one M-cycle apart — while 2xshort_ds sat at
+        // 4 and 1, a 3 cc spread that no pair of reads one M-cycle apart can have.
+        let (per_byte, mut setup) = if self.is_double_speed_mode() { (4, 5) } else { (2, 4) };
         let prefetch_fudge = if self.dma.prefetch_stat_bias { 0 } else { 5 };
+        if self.is_double_speed_mode() && self.dma.prefetch_stat_bias {
+            setup -= 1;
+        }
         self.pending_dma_stall += (effective_length as u32) * per_byte + setup + prefetch_fudge;
         // The OAM-DMA M-cycles for the transfer were folded into the loop above.
         // Suppress `step_dma` for the true dma-event duration (the transfer
