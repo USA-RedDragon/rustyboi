@@ -479,16 +479,32 @@ mod tests {
 pub(crate) mod firmware_test {
     /// `[sgb1, sgb2]`, or empty if either dump is missing. Searched relative to
     /// the crate directory's parent (the workspace root's `bios/`).
+    ///
+    /// Skipping is silent so a contributor without the dumps still gets a green
+    /// `cargo test` — but a skip-if-absent test that is ALWAYS absent is a test
+    /// that never runs, and these cover the border decode and the layer split
+    /// that no hardware suite can adjudicate. `RB_REQUIRE_SGB_FIRMWARE=1` (set
+    /// by the CI unit-test job, which provisions the dumps) turns the skip into
+    /// a hard failure so the coverage cannot rot back to vacuous unnoticed.
     pub(crate) fn dumps() -> Vec<Vec<u8>> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_default();
+        let required = std::env::var_os("RB_REQUIRE_SGB_FIRMWARE").is_some_and(|v| v == "1");
         let mut out = Vec::new();
         for name in ["bios/sgb1.sfc", "bios/sgb2.sfc"] {
             match std::fs::read(root.join(name)) {
                 Ok(d) => out.push(d),
-                Err(_) => return Vec::new(),
+                Err(e) => {
+                    assert!(
+                        !required,
+                        "RB_REQUIRE_SGB_FIRMWARE=1 but {}/{name} is unreadable ({e}): the \
+                         firmware-backed tests would have skipped silently",
+                        root.display()
+                    );
+                    return Vec::new();
+                }
             }
         }
         out

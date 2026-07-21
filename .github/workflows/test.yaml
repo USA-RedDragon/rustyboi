@@ -187,6 +187,50 @@ jobs:
               make suite SUITE=${{ matrix.suite }} RB_BIN=runner/rustyboi-test-runner${{ matrix.exe }}
           fi
 
+  # The hardware suites gate core behaviour, but they cannot see anything that
+  # is not observable to a test ROM -- decoders, savestates, the SGB border
+  # layer split. Those are covered by the crates' own unit tests, which nothing
+  # else in CI runs.
+  unit-tests:
+    name: 'unit tests / workspace'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      BIOS_URL: ${{ secrets.BIOS_URL }}
+      BIOS_PASSWORD: ${{ secrets.BIOS_PASSWORD }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Cache cargo + build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: unit-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: unit-tests-
+      # Unlike the gallery sweep, sgb1/sgb2.sfc are NOT optional here: they are
+      # the only inputs to the SGB border tests, which skip silently without
+      # them. RB_REQUIRE_SGB_FIRMWARE=1 below makes that skip fatal, so a dump
+      # missing from the archive fails the job instead of quietly deleting the
+      # coverage.
+      - name: Download boot ROMs + SGB firmware
+        shell: bash
+        run: |
+          [ -n "$BIOS_URL" ]      || { echo "::error::BIOS_URL secret is required (the SGB border tests need sgb1/sgb2.sfc)"; exit 1; }
+          [ -n "$BIOS_PASSWORD" ] || { echo "::error::BIOS_PASSWORD secret is required"; exit 1; }
+          curl -fsSL "$BIOS_URL" -o /tmp/bios.zip
+          unzip -P "$BIOS_PASSWORD" -q -o /tmp/bios.zip -d bios
+          for f in sgb1.sfc sgb2.sfc; do
+            [ -f "bios/$f" ] || { echo "::error::$f not in the BIOS archive; the SGB firmware tests cannot run"; exit 1; }
+          done
+      # rustyboi-web is wasm-only and does not build for the host target.
+      - name: Run workspace unit tests
+        shell: bash
+        env:
+          RB_REQUIRE_SGB_FIRMWARE: '1'
+        run: cargo test --workspace --exclude rustyboi-web
+
   frontend-render:
     name: 'frontend / render / ${{ matrix.os }}'
     strategy:
@@ -222,13 +266,17 @@ jobs:
     name: Test success check
     if: always()
     runs-on: ubuntu-24.04
-    needs: [test, frontend-render]
+    needs: [test, unit-tests, frontend-render]
     steps:
       - name: Check all matrix jobs succeeded
         shell: bash
         run: |
           if [ "${{ needs.test.result }}" != success ]; then
             echo "::error::One or more test jobs failed: ${{ needs.test.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.unit-tests.result }}" != success ]; then
+            echo "::error::Workspace unit tests failed: ${{ needs.unit-tests.result }}"
             exit 1
           fi
           if [ "${{ needs.frontend-render.result }}" != success ]; then
