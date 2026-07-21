@@ -439,6 +439,16 @@ fn stat_change_triggers_m2_cgb(
     }
 }
 
+/// How the console and the CPU's current clock phase bend the STAT-write
+/// trigger windows: `agb` picks AGB's silicon stepping, `rephased` says the
+/// write cc sits on the re-phased native halt-exit grid rather than the
+/// quantized M-cycle grid (see the mode-1 last-line bound below).
+#[derive(Clone, Copy)]
+pub(super) struct StatWritePhase {
+    pub agb: bool,
+    pub rephased: bool,
+}
+
 fn stat_change_triggers_m0lyc_or_m1_cgb(
     old: u8,
     data: u8,
@@ -446,8 +456,9 @@ fn stat_change_triggers_m0lyc_or_m1_cgb(
     lc: &LyCounter,
     cc: u64,
     m0_irq_time: u64,
-    agb: bool,
+    phase: StatWritePhase,
 ) -> bool {
+    let StatWritePhase { agb, rephased } = phase;
     let ly = lc.ly as i64;
     let time_to_next_ly = lc.time as i64 - cc as i64;
     let ds = lc.ds as i64;
@@ -487,8 +498,17 @@ fn stat_change_triggers_m0lyc_or_m1_cgb(
     // the double-speed sweep in the same capture matches CGB, so the term is
     // SS-scoped.
     let agb_ss = agb && !lc.ds;
+    // The last-line m1-enable window closes 3 dots before the LY=0 latch. `cc`
+    // is the CPU's write cc, so the bound has to be read on the CPU's clock
+    // phase: a halt exit that RE-PHASES the CPU to the waking IRQ edge (the
+    // CGB-native LCD-waiting wake, `!halt_grid_quantized`) puts every write one
+    // dot above the on-grid value, so the same silicon boundary reads as `> 4`
+    // there and `> 3` on the quantized grid that DMG-compat resumes on. The
+    // mode1_disablestat_end sweeps probe this boundary from both phases and
+    // hardware returns the identical 5-fire sweep for both cart modes.
     let m1_fire = (data & STAT_M1EN != 0)
-        && (not_last_line || time_to_next_ly > 4 + 2 * ds + 2 * agb_ss as i64);
+        && (not_last_line
+            || time_to_next_ly > 3 + rephased as i64 + 2 * ds + 2 * agb_ss as i64);
     !m1_blocked && (m1_fire || lyc_fire)
 }
 
@@ -499,7 +519,7 @@ pub(super) fn stat_change_triggers_cgb(
     cc: u64,
     m0_irq_time: u64,
     lyc_reg: u8,
-    agb: bool,
+    phase: StatWritePhase,
 ) -> bool {
     let newly_enabled = data & !old & (STAT_LYCEN | STAT_M2EN | STAT_M1EN | STAT_M0EN);
     let lyc_cmp = get_lyc_cmp_ly(lc, cc);
@@ -513,7 +533,7 @@ pub(super) fn stat_change_triggers_cgb(
     }
     let ly = lc.ly as i64;
     let time_to_next_ly = lc.time as i64 - cc as i64;
-    stat_change_triggers_m0lyc_or_m1_cgb(old, data, lycperiod, lc, cc, m0_irq_time, agb)
+    stat_change_triggers_m0lyc_or_m1_cgb(old, data, lycperiod, lc, cc, m0_irq_time, phase)
         || stat_change_triggers_m2_cgb(old, data, ly, time_to_next_ly, lc.ds)
 }
 

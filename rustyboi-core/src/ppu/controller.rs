@@ -6894,7 +6894,10 @@ impl Ppu {
                 cc,
                 m0_for_trigger,
                 lyc_reg,
-                mmio.is_agb(),
+                stat_irq::StatWritePhase {
+                    agb: mmio.is_agb(),
+                    rephased: !mmio.halt_grid_quantized(),
+                },
             )
         } else {
             stat_irq::stat_change_triggers_dmg(old, &lc, cc, m0_for_trigger, lyc_reg)
