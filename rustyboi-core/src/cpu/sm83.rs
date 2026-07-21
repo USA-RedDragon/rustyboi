@@ -360,6 +360,12 @@ impl SM83 {
                 }
                 self.halted = false;
                 just_unhalted = true;
+                // Record the waking source class: only a VBLANK-woken CGB-native
+                // stream leaves its exit M-cycle uncharged (see the read-phase
+                // residue in get_ly_reg_at_cc).
+                mmio.mmio.set_halt_wake_vblank(
+                    pending_interrupt == Some(registers::InterruptFlag::VBlank),
+                );
                 // One-shot guard consumed: the woken stream is live, re-arm for
                 // the next HALT (the mmio-side flag persists on the stream and
                 // is cleared by the next HALT's reset_halt_wakeup).

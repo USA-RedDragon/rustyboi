@@ -1067,6 +1067,16 @@ pub struct Mmio {
     #[serde(skip, default)]
     halt_wake_grid_cgb: bool,
 
+    // True when the HALT this stream woke from was ended by a VBLANK IRQ.
+    // On a CGB-native cart that is the one wake class whose exit M-cycle is
+    // never charged as real time (sm83.rs gives it the DMG setup window,
+    // while an LCD wake charges the extra CGB exit M-cycle and the timer's
+    // raise cc already IS the wake boundary), so it is the only class whose
+    // resumed stream still carries the un-charged exit residue. Cleared on
+    // the next HALT.
+    #[serde(skip, default)]
+    halt_wake_vblank: bool,
+
     // (mooneye intr_2) master_cc at which the mode-2 STAT
     // IRQ event last raised IF (the m2 event time). A
     // DMG halt wake landing within 2cc of it takes the real +4 halt-exit M-cycle as
@@ -1244,6 +1254,7 @@ impl Mmio {
             lcd_raise_kind: 0,
             staged_lcd_kind: 0,
             halt_wake_grid_cgb: false,
+            halt_wake_vblank: false,
             last_m2_irq_fire_cc: None,
             last_m2_irq_ly: 0,
             cgb_m0_halt_ly_advance: None,
@@ -2300,6 +2311,15 @@ impl Mmio {
         self.halt_wake_grid_cgb
     }
 
+    pub(crate) fn set_halt_wake_vblank(&mut self, v: bool) {
+        self.halt_wake_vblank = v;
+    }
+
+    #[inline]
+    pub(crate) fn halt_wake_vblank(&self) -> bool {
+        self.halt_wake_vblank
+    }
+
     /// Initialize the timer's internal 16-bit counter at boot. See
     /// `Timer::set_internal_counter`.
     pub(crate) fn set_timer_internal_counter(&mut self, value: u16) {
@@ -3311,6 +3331,7 @@ impl Mmio {
         // stream has ended).
         self.halt.wakeup_skew = false;
         self.halt_wake_grid_cgb = false;
+        self.halt_wake_vblank = false;
         self.m2_halt_stall_charged_cgb = false;
         self.halt.wake_m0m2 = false;
         self.ssds_haltskew_ly_advance = false;

@@ -10937,7 +10937,33 @@ impl Ppu {
             ly_reg = stat_irq::inc_ly(ly_reg as u32) as i64;
             time += line_time;
         }
-        let to_next = time - cc; // time-to-next-LY
+        // UN-CHARGED HALT-EXIT RESIDUE (CGB-native, VBLANK-woken). The CGB-native
+        // halt exit re-phases the CPU clock to the waking IRQ edge (see
+        // `halt_grid_quantized`), but only the VBLANK class leaves that exit
+        // M-cycle uncharged: sm83.rs gives a CGB-native VBLANK wake the DMG setup
+        // window, while an LCD wake charges the extra CGB exit M-cycle as a REAL
+        // stall and the timer's raise cc already IS the wake boundary. So a
+        // VBLANK-woken CGB-native stream resumes one master cc off the hardware
+        // phase, and every later FF44 read samples one cc early — including the
+        // reads thousands of instructions past the wake, since nothing re-anchors
+        // the stream until the next HALT or LCD enable.
+        //
+        // Both wake models carry it: `halt_wake_grid_cgb` marks the quantized
+        // (M-cycle-grid) exit and `halt_wakeup_skew` the legacy event-snapped one
+        // (this stream crosses into double speed and switches models mid-run).
+        // Applied to the raw `to_next` so the line-153 window and the
+        // anticipation/glitch window shift together — they resolve the same read.
+        // The write side already carries the mirror-image one-dot constant for
+        // grid-woken streams (see `cgb_halt_wake_write_bias`).
+        //
+        // DMG and CGB-compat are excluded because they provably resume on the
+        // pre-halt grid rather than re-phasing (same reference as
+        // `halt_grid_quantized`); including them regresses the whole dmg_mode
+        // half of the AntonioND ly_equals_lyc family.
+        let uncharged_halt_exit = (mmio.halt_wake_grid_cgb() || mmio.halt_wakeup_skew())
+            && mmio.is_cgb_features_enabled()
+            && mmio.halt_wake_vblank();
+        let to_next = time - cc - uncharged_halt_exit as i64; // time-to-next-LY
         if ly_reg == last_line {
             // Line 153: FF44 reads 0 early. At single speed the LY register read
             // (`time - cc <= cpl - isAgb`) returns 0 for the WHOLE of line 153
@@ -11174,12 +11200,24 @@ impl Ppu {
                     } else {
                         ly_reg
                     }
-                } else if mmio.is_cgb_de() {
-                    // CGB-D/E does NOT fold: it reads the stale pre-increment
-                    // `ly`. AGB inherits the folding C-side path — see above.
-                    ly_reg
                 } else {
                     // Steady-state glitch dot: partial-latch fold `ly & (ly+1)`.
+                    //
+                    // This arm used to except CGB-D/E ("D/E reads the stale
+                    // pre-increment `ly`"), which was an overgeneralization from a
+                    // SINGLE post-STOP cell. age's own CGB-E expected table
+                    // (lcd-align-ly.inc) lists `glitch: LY & (LY + 1)` four times
+                    // and three are unconditional on E — only alignment offset 2 at
+                    // normal speed is wrapped in `IF DEF(CGB_E)` to remove it, and
+                    // that cell resolves through the post-STOP arm above, which
+                    // keeps its own per-revision fold. So CGB-E folds here too; the
+                    // B/C-vs-E difference is WHICH alignment offsets reach the
+                    // glitch dot, not whether the mechanism exists.
+                    //
+                    // The except-arm was unreachable at the pre-correction read
+                    // phase (flipping it changed nothing); with the un-charged
+                    // halt-exit residue above removed it becomes live and the
+                    // AntonioND ly_equals_lyc gbc_mode captures go byte-exact.
                     ly_reg & (ly_reg + 1)
                 }
             } else {
