@@ -5931,7 +5931,7 @@ impl Ppu {
         let obj_enabled = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
         let mut sprite_xs: Vec<i32> = self.sprites_on_line.iter().map(|s| s.x as i32).collect();
         sprite_xs.sort_unstable();
-        cycles += sprite_tile_walk_cost(&sprite_xs, scx, nwx, targetx, obj_enabled || is_cgb);
+        cycles += sprite_tile_walk_cost(&sprite_xs, scx, nwx, targetx, obj_enabled || mmio.is_cgb());
 
         cycles.max(0) as u128
     }
@@ -6003,7 +6003,13 @@ impl Ppu {
         let target_x = 167;
         let mut sprite_xs: Vec<i32> = self.sprites_on_line.iter().map(|s| s.x as i32).collect();
         sprite_xs.sort_unstable();
-        cycles += sprite_tile_walk_cost(&sprite_xs, scx, nwx, target_x, obj_enabled || is_cgb);
+        // The CGB "OBJ-disable does not shorten mode 3" quirk is a property of the
+        // CGB PPU SILICON, not of CGB mode: a CGB running a DMG cart in compat mode
+        // still pays the OBJ fetch cost with LCDC.1 clear (gbc-hw-tests
+        // mode2_read_oam_spr_dis_dmg_mode -- the mode-3 end sits 16 dots later than
+        // an obj-free line). Real DMG silicon does skip it, so key on `mmio.is_cgb()`
+        // (hardware) rather than the KEY0 compat flag threaded in as `is_cgb`.
+        cycles += sprite_tile_walk_cost(&sprite_xs, scx, nwx, target_x, obj_enabled || mmio.is_cgb());
 
         (cycles.max(0) as u128, win)
     }
