@@ -52,7 +52,7 @@ objc2-uniform-type-identifiers = { version = "=0.3.2", features = ["UTType", "UT
 winit = { workspace = true, features = ["android-game-activity"] }
 android_logger = "=0.15.1"
 jni = "=0.21.1"
-libc = "=0.2.188"
+libc = "=0.2.189"
 ndk-context = "=0.1.1"
 ndk-sys = "=0.6.0"
 oboe = { version = "=0.6.1", features = ["java-interface", "ndk-context"] }
