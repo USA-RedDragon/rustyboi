@@ -10989,9 +10989,37 @@ impl Ppu {
             && mmio.is_cgb()
             && self.frames_since_enable == 0
             && self.internal_ly_val != 0) as i64;
+        // Double-speed LYC-comparator anticipation on CGB-D/E and AGB: ONE EXTRA DOT.
+        //
+        // `get_lyc_cmp_ly` models the comparator switching to the upcoming LY a
+        // fixed TWO DOTS early mid-frame (`2 + 2*ds` master cc) and six dots into
+        // the wrap line (`line_time - 6 - 6*ds`). At double speed D/E silicon
+        // switches ONE DOT EARLIER than that (3 dots mid-frame, 5 dots into the
+        // wrap line). Subtracting 2 master cc from the counter time is exactly
+        // `advance_offset += 2`, so ONE term covers both branches.
+        //
+        // This is the SAME CGB-C-vs-post-C split the `tail_hold` term below takes,
+        // on the other speed branch: C-model silicon holds the plain dot counts at
+        // double speed, D/E anticipates one dot more. Gating on C-vs-D/E is not a
+        // free parameter — it is forced from both sides. gambatte's oracles are
+        // explicitly cgb04c and its DS coincidence probes (ly0/lycint152_lyc0flag_ds_3,
+        // ly0/lycint152_lyc153flag_ds_3, lycint_lycflag_ds_3, enable_display/
+        // frame{0,1}_m2stat_count_ds_1) all FAIL under an ungated term, while
+        // AntonioND's CGB-D/E and GBA-SP captures REQUIRE it. Same conclusion the
+        // suite manifest header already reached for the line-153 rollover.
+        //
+        // Scoped to this FF41 read resolve, NOT to `get_lyc_cmp_ly` itself: the
+        // STAT-IRQ-trigger paths share that helper and are co-tuned to the plain
+        // offsets (hardware applies `tail_hold` only in the register read too).
+        //
+        // The 31 gbc-hw-tests lcd_frame_timings cells that miss ONLY the
+        // coincidence bit sit at exactly time-to-next-LY == 2 in double speed with
+        // the comparator one line behind (lyc_0 ly=153/lyc=0 on the wrap branch;
+        // lyc_152_153, lyc_1_143 and lyc_2_144 mid-frame).
+        let ds_anticipate = 2 * (lc.ds && (mmio.is_agb() || mmio.is_cgb_de())) as i64;
         let lc_master = stat_irq::LyCounter {
             ly: lc.ly,
-            time: (self.p_now as i64 + lc.time as i64 + ss_plus1).max(0) as u64,
+            time: (self.p_now as i64 + lc.time as i64 + ss_plus1 - ds_anticipate).max(0) as u64,
             ds: lc.ds,
         };
         let cmp = stat_irq::get_lyc_cmp_ly(&lc_master, access_cc);
@@ -11019,7 +11047,17 @@ impl Ppu {
         // exactly at t2n = 6 and that branch cleared it (C0 for a wanted C4, the
         // single failing cell in each of vbl_irq_delay_timer / mode1_disablestat
         // / mode1_disablevbl / vbl_mode1_lcdoff real_gb).
-        Some(lyc_reg == cmp.ly && cmp.time_to_next_ly > 2 - tail_hold)
+        // `ds_anticipate` shifted the counter time, so it shifted every
+        // NON-crossing time-to-next-LY down by the same amount. Subtract it from
+        // the threshold too, so the term moves ONLY which LY the comparator
+        // reports and leaves this clear-window anchored at the same absolute cc.
+        // Without the compensation the window travels with the switch and clears
+        // the flag one probe early on the far side: interrupts/
+        // vbl_irq_delay_timer_gbc_mode (real_gbc + real_gba_sp) reads its
+        // LY==LYC probe at time-to-next-LY 3 and wants $C4, and an uncompensated
+        // threshold returns $C0 — a REGRESSION, in the opposite direction to the
+        // cells this term fixes.
+        Some(lyc_reg == cmp.ly && cmp.time_to_next_ly > 2 - tail_hold - ds_anticipate)
     }
 
 
