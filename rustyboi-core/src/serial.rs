@@ -459,8 +459,74 @@ impl Serial {
     /// start, latched here — at transfer start — the way the peer's shift
     /// register contents would be.
     pub(crate) fn schedule_sc(&mut self, value: u8, divider: u16, phase: u64, link: LinkStart) {
+        // Measured before `sc` moves: a clock-source change mid-transfer carries
+        // phase from the outgoing clock into the incoming one.
+        let carry = self.clock_change_carry(value, divider);
         self.sc = value;
-        self.schedule(divider, phase, link);
+        self.schedule(divider, phase, link, carry);
+    }
+
+    /// Half-period head start carried across a mid-transfer serial clock-source
+    /// change (an SC write that flips bit 1 while a transfer is already in
+    /// flight).
+    ///
+    /// Our scheduler re-anchors the whole 8-bit window at the write, snapping to
+    /// the incoming clock's half-period grid; hardware instead runs a serial
+    /// counter that the SC write does not reset, so phase already accumulated
+    /// under the outgoing clock survives the switch. AntonioND
+    /// sc_change_freq_gbc measures the residue directly: in exactly 25% of
+    /// divider phases — the same 25% in both switch directions — hardware
+    /// completes half an incoming-bit-period before we do (8 cc of the 16 cc
+    /// fast period on slow->fast, 256 cc of the 512 cc slow period on
+    /// fast->slow).
+    ///
+    /// The discriminator is each clock's quarter-period divider bit (the bit of
+    /// weight P/4: bit 2 for the 16 cc fast clock, bit 7 for the 512 cc slow
+    /// one). The carry applies when the outgoing clock had passed its quarter
+    /// mark while the incoming one has not — i.e. the outgoing clock was the
+    /// further through its bit period of the two, so the banked phase is worth a
+    /// half period on the new grid. Both directions obey this single rule; a
+    /// same-frequency SC write cannot satisfy it, since the two bits coincide.
+    ///
+    /// This makes the CGB column of sc_change_freq_gbc byte-exact over all 4096
+    /// captured ruler bytes. The AGB column obeys the same rule for its first
+    /// ~1100 of 2048 iterations and then dithers by +-1 M-cycle (and, on the
+    /// slow side, +-64), which is NOT a divider function and is deliberately
+    /// left unmodelled: our loop period is exactly constant (the divider
+    /// advances 10564 cc per iteration for all 2047 gaps), and iterations 1096
+    /// and 1104 present bit-identical inputs (div%8 == 4, bit 2 set, bit 7 set)
+    /// while the capture reads 0 for one and +1 for the other. A slow drift
+    /// crossing the M-cycle rounding boundary fits, which is what TCAGBD §5.1
+    /// describes — a serial oscillator that is not DIV-derived. One capture of
+    /// one GBA SP cannot separate that from a high-divider-bit dependence
+    /// (2048 samples, every divider value distinct, none revisited), so fitting
+    /// it would be an unoracled AGB quirk of the kind this tree has added and
+    /// reverted once already. Needs the hardware bench, not a constant.
+    fn clock_change_carry(&self, next_sc: u8, divider: u16) -> Option<u64> {
+        // Only an in-flight internal-clock transfer has banked phase to carry.
+        // A link hold has no running clock, and a fresh start begins on an idle
+        // counter (AntonioND sio_irq_delay grades that path and is unaffected).
+        if !self.active || self.link_wait || !self.internal_start() {
+            return None;
+        }
+        let started = (next_sc & SC_TRANSFER_START) != 0 && (next_sc & SC_INTERNAL_CLOCK) != 0;
+        if !started {
+            return None;
+        }
+        let out_fast = self.cgb && (self.sc & SC_FAST_CLOCK) != 0;
+        let in_fast = self.cgb && (next_sc & SC_FAST_CLOCK) != 0;
+        if out_fast == in_fast {
+            return None;
+        }
+        // Quarter-period divider bit, and the half period carried, per clock.
+        let quarter = |fast: bool| if fast { 0x04u16 } else { 0x80u16 };
+        let banked = (divider & quarter(out_fast)) != 0;
+        let fresh = (divider & quarter(in_fast)) == 0;
+        Some(if banked && fresh {
+            if in_fast { 8 } else { 256 }
+        } else {
+            0
+        })
     }
 
     fn internal_start(&self) -> bool {
@@ -479,7 +545,7 @@ impl Serial {
     /// adds the serial unit has "an internal timer that can't be reseted by any
     /// means"). Our DIV-coupling follows the later reverse-engineered model and
     /// is NOT supported by TCAGBD. Unresolved vs hardware.
-    fn event_time(&self, divider: u16, phase: u64) -> (u32, u64) {
+    fn event_time(&self, divider: u16, phase: u64, carry: Option<u64>) -> (u32, u64) {
         let fast = self.cgb && (self.sc & SC_FAST_CLOCK) != 0;
         // DIV-align residue mask: `% 8` for the fast clock, `% 0x100` for slow.
         let (step, align_mask) = if fast { (16u32, 0x07u64) } else { (512u32, 0xFFu64) };
@@ -495,14 +561,21 @@ impl Serial {
         // The slow (8192 Hz) column needs no term: it already matches the AGB
         // capture byte-for-byte through the 0xFF DIV alignment plus the +4 cc
         // AGB post-boot divider skew (mooneye boot_div-A).
-        let agb_fast_half = if self.agb && fast {
-            (divider as u64 & 0x80) >> 4
-        } else {
-            0
+        //
+        // A mid-transfer clock-source change supplies its own head start
+        // (`clock_change_carry`) and supersedes this term rather than stacking
+        // with it: both name the same banked serial-counter phase, and the
+        // switch measures it against the outgoing clock, which is the stronger
+        // statement. sio_irq_delay never reaches that path — it writes SC=$00
+        // between transfers, so every start there is a fresh one.
+        let head_start = match carry {
+            Some(carry) => carry,
+            None if self.agb && fast => (divider as u64 & 0x80) >> 4,
+            None => 0,
         };
         (
             step,
-            phase - (divider as u64 & align_mask) - agb_fast_half + (step as u64) * 8,
+            phase - (divider as u64 & align_mask) - head_start + (step as u64) * 8,
         )
     }
 
@@ -510,7 +583,7 @@ impl Serial {
     /// internal counter and `phase` the master cc at the SC write's resolution
     /// cc. The completion cc is DIV-aligned then advanced by the 8-bit span:
     /// `event_cc = cc - (cc - div_anchor) % align + step * 8`.
-    fn schedule(&mut self, divider: u16, phase: u64, link: LinkStart) {
+    fn schedule(&mut self, divider: u16, phase: u64, link: LinkStart, carry: Option<u64>) {
         if !self.internal_start() {
             self.active = false;
             self.link_wait = false;
@@ -518,7 +591,7 @@ impl Serial {
         }
         // The SC write resolves at the exact write cc, so `event_time` gives the
         // completion cc directly with no phase offset to fold in.
-        let (step, complete_at) = self.event_time(divider, phase);
+        let (step, complete_at) = self.event_time(divider, phase, carry);
         self.step_t = step;
         self.bits_shifted = 0;
         self.tx_acc = 0;
@@ -561,7 +634,9 @@ impl Serial {
         debug_assert!(self.active && self.link_wait);
         self.rx_latch = rx;
         self.link_wait = false;
-        let (step, complete_at) = self.event_time(divider, phase);
+        // A link resume re-anchors the window wholesale on an idle counter, so
+        // there is no banked phase to carry.
+        let (step, complete_at) = self.event_time(divider, phase, None);
         self.step_t = step;
         self.complete_at = complete_at;
     }
