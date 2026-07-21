@@ -117,6 +117,68 @@ needed to *lower* one. The `gambatte` suite is the exception: it is gated on
 
 Live totals are in the README's `<!-- SUITE-PROGRESS -->` table.
 
+### blargg_singles, `cgb_sound-agb/*` — `suites/blargg_singles.manifest` (`blargg_mem`)
+
+Most of `blargg_singles` is the ordinary per-subtest split of blargg's ROMs
+against DMG/CGB. The **10** `cgb_sound-agb/*` rows are different in kind: they
+re-run blargg's `cgb_sound` subtests on `Hardware::AGB` (the `rev=agb` manifest
+token, mode `cgb`) and therefore assert what **real Game Boy Advance silicon**
+does, so they need a stated oracle like any other real-hardware grade.
+
+They exist because AGB is not a CGB stepping. It runs CGB software in
+compatibility mode, but its APU is a *distinct revision* whose observable
+divergences (notably the wave-RAM access behaviour these subtests probe) are
+real hardware behaviour rather than emulation error — grading AGB against the
+CGB expectations would assert the wrong result. The ROMs are the stock blargg
+`cgb_sound/rom_singles/*.gb` — the same 12 files the plain `cgb_sound/*` rows
+use, no AGB-specific build — supplied by the **c-sp game-boy-test-roms v7.0**
+release zip (the bulk `$CSP_URL` fetch in `tools/run-suites.sh`, gated by the
+`.rb-setup-complete` sentinel rather than a named `sync_*` function) and
+extracted into `gb-test-roms/blargg/`.
+
+**Oracle** (retrieved 2026-07-21). Two published community tabulations of
+blargg's `cgb_sound` on real AGB, which **agree on the pass/fail split**:
+
+- [gbdev.gg8.se wiki, "Test ROMs"](https://gbdev.gg8.se/wiki/articles/Test_ROMs),
+  §[Real hardware (using a GB flash card)](https://gbdev.gg8.se/wiki/articles/Test_ROMs#Real_hardware_.28using_a_GB_flash_card.29),
+  row *"CGB sound (in corresponding mode)"* × column *"Game Boy Advance
+  (Regular and SP)"*, verbatim:
+  `Failed 2/12  01:ok 02:ok 03:ok  04:ok 05:ok 06:ok  07:ok 08:ok 09:01  10:ok 11:ok 12:02`
+- [Emulation General Wiki, "GB/C Tests"](https://emulation.gametechwiki.com/index.php/GB/C_Tests),
+  §Test ROMs, *"blargg's test ROMs"* table, **AGB** column, `CGB Sound` block:
+  01–08 and 10–11 `Pass`; **09 "wave read while on" `Fail`** and **12 "wave"
+  `Fail`**.
+
+> **Provenance caveat — read before trusting these rows.** These are two
+> *tabulations*, not two demonstrably independent hardware runs. Only the gg8
+> table carries the **failure codes** (`09:01`, `12:02`); the Emulation General
+> table records bare Pass/Fail, so the codes rest on gg8 **alone**. Neither
+> page documents the unit, its revision, a capture date, or a methodology
+> beyond gg8's "using a GB flash card", and nothing establishes that the second
+> table was measured rather than copied from the first — they may share a
+> single origin. What is corroborated is the *outcome* (10 pass / 2 fail, and
+> which two fail); the strength of the evidence is "two agreeing community
+> tabulations", not "two independent silicon runs". The Emulation General page
+> additionally carries an upstream "this article is outdated" banner.
+
+**Why 09 and 12 are excluded rather than missing.** Real AGB *fails* both, so
+the hardware-correct expectation for them is a *specific failure code*, not a
+pass. The `blargg_mem` oracle cannot express that: `Oracle::BlarggMem`
+(`rustyboi-test-runner/src/expectation.rs`) is a **unit variant carrying no
+parameters**, and `evaluate_blargg_mem` (`runner.rs`) returns `Ok` only when the
+`$A000` status byte is `0x00` once the `DE B0 61` signature appears — every
+non-zero code is a failure with no "expected failure" form. Verified against the
+current implementation, not assumed. Adding 09 and 12 as ordinary rows would
+therefore assert the *opposite* of the hardware result, so they are dropped by
+an explicit `AGB_EXPECTED_FAIL` set in `tools/gen_manifests.py`. Run directly
+at `rev=agb`, rustyboi reproduces both with the gg8 codes — 09 → `code=01`,
+12 → `code=02` — so the exclusion hides no disagreement (measured 2026-07-21).
+
+12 subtests − 2 excluded = the **10** rows present. Count them with
+`grep -c '^cgb_sound-agb'` — an unanchored `grep -c cgb_sound-agb` also matches
+the manifest's own comment header and so over-counts (it has previously been
+misread as 11).
+
 ### daid — `suites/daid.manifest` (`png_shootout`)
 
 Eight PPU / STOP / double-speed screen tests authored by "daid", pulled from
