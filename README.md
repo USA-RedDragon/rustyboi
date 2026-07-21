@@ -24,7 +24,7 @@ adjudication.
 | mooneye | 193 | 193 |
 | mooneye_wilbertpol | 194 | 194 |
 | age | 56 | 56 |
-| gbmicrotest | 509 | 513 |
+| gbmicrotest | 509 | 512 |
 | samesuite_apu | 70 | 70 |
 | samesuite_nonapu | 6 | 6 |
 | samesuite_sgb | 2 | 2 |
@@ -43,9 +43,9 @@ adjudication.
 | magentests | 11 | 11 |
 | little_things_extra | 4 | 4 |
 | sketchtests | 6 | 6 |
-| gbc_hw_tests | 334 | 342 |
+| gbc_hw_tests | 338 | 342 |
 | gambatte | 5248 | 5257 |
-| **Total** | **6837** | **6858** |
+| **Total** | **6841** | **6857** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core
