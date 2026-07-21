@@ -30,7 +30,7 @@ adjudication.
 | samesuite_sgb | 2 | 2 |
 | sgb | 1 | 1 |
 | blargg | 15 | 15 |
-| blargg_singles | 41 | 41 |
+| blargg_singles | 51 | 51 |
 | scribbltests | 10 | 10 |
 | turtle_tests | 4 | 4 |
 | little_things_gb | 4 | 4 |
@@ -43,9 +43,9 @@ adjudication.
 | magentests | 11 | 11 |
 | little_things_extra | 4 | 4 |
 | sketchtests | 6 | 6 |
-| gbc_hw_tests | 229 | 343 |
+| gbc_hw_tests | 215 | 343 |
 | gambatte | 5248 | 5257 |
-| **Total** | **6706** | **6833** |
+| **Total** | **6702** | **6843** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core

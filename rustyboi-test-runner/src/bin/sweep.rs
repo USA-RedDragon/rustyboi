@@ -1268,6 +1268,11 @@ fn capture_media(
     if chan_out.is_some() || audio_rec.is_some() {
         gb.set_channel_tap(true);
     }
+    // The mixing mode is a property of the machine, so it rides in the .rba
+    // header rather than per sample; the decoder needs it to reproduce NR51.
+    if let Some(enc) = audio_rec.as_mut() {
+        enc.set_agb(gb.mixes_digitally());
+    }
 
     // Native `.rbr` recording of the first `rec_frames` frames (a short gallery
     // loop). Pixel-only — never drains audio or touches the manifest hashes.
@@ -1663,6 +1668,9 @@ fn capture_bios(
     }
     if audio_rec.is_some() {
         gb.set_channel_tap(true);
+    }
+    if let Some(enc) = audio_rec.as_mut() {
+        enc.set_agb(gb.mixes_digitally());
     }
 
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -2608,11 +2616,21 @@ mod tests {
     /// could not reconstruct the filter state anyway (see `mix`'s docs). So the
     /// mixer is the whole of what `.rba` encodes, and the whole of what this
     /// asserts.
+    ///
+    /// Run over both mixing modes: DMG mixes through analog per-channel DACs,
+    /// AGB mixes digitally, and NR51's unrouted case differs between them (an
+    /// AGB recording carries that in its `.rba` header flag). Pinning only the
+    /// analog side would leave the digital mixer's clone unguarded.
     #[test]
     fn rba_decode_matches_the_cores_own_mix_bit_for_bit() {
+        check_rba_mix_parity(Hardware::DMG);
+        check_rba_mix_parity(Hardware::AGB);
+    }
+
+    fn check_rba_mix_parity(hw: Hardware) {
         use rustyboi_core_lib::audio::Audio;
 
-        let mut gb = GB::new(Hardware::DMG);
+        let mut gb = GB::new(hw);
         gb.insert(Cartridge::from_bytes(&vec![0u8; 0x8000]).unwrap());
         gb.skip_bios();
         gb.set_channel_tap(true);
@@ -2640,7 +2658,9 @@ mod tests {
         gb.write_memory(0xFF22, 0x37);
         gb.write_memory(0xFF23, 0x80);
 
+        let agb = gb.mixes_digitally();
         let mut enc = rustyboi_replay::AudioEncoder::new();
+        enc.set_agb(agb);
         let mut tapped: Vec<rustyboi_replay::ChannelSample> = Vec::new();
         for f in 0..40 {
             gb.run_until_frame(true);
@@ -2688,13 +2708,13 @@ mod tests {
             let n = dec.frame_into(frame, &mut got).expect("decode frame");
             assert!(n > 0, "frame {frame} decoded nothing at sample {at}");
             for k in 0..n {
-                let want = Audio::mix_tap_sample(tapped[at + k]);
+                let want = Audio::mix_tap_sample(tapped[at + k], agb);
                 let have = (got[k * 2], got[k * 2 + 1]);
                 assert_eq!(
                     have,
                     want,
-                    "sample {} (frame {frame}) drifted: the replay mixer is no \
-                     longer a bit-for-bit clone of the core's",
+                    "{hw:?} sample {} (frame {frame}) drifted: the replay mixer \
+                     is no longer a bit-for-bit clone of the core's",
                     at + k
                 );
             }

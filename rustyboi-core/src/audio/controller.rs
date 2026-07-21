@@ -982,6 +982,28 @@ impl Audio {
     /// palette encoder behind it) requires. The DAC-off fade and the output
     /// high-pass are continuous and therefore live strictly downstream.
     fn channel_outputs(&self) -> [f32; 4] {
+        if self.analog.model().is_agb() {
+            // Pan Docs (Game Boy Advance audio): "the GBA APU has no DACs.
+            // Instead, they are emulated digitally such that a disabled 'DAC'
+            // behaves like an enabled DAC receiving 0 as its input." So the
+            // DAC-on test that gates the other models away from the converter
+            // is simply absent here — every channel always converts its own
+            // digital nibble, which a disabled channel already holds at 0.
+            //
+            // "Additionally, CH3's DAC has its output inverted. In particular,
+            // this causes the channel to emit a loud spike when disabled."
+            // SameBoy `update_sample`: "For some reason, channel 3 is inverted
+            // on the AGB" (`value ^= 0xF`). Negating the analog level is the
+            // same thing on the DAC's linear negative slope, and it keeps the
+            // result inside the 16-level alphabet the tap requires, since
+            // `-dac_analog(d) == dac_analog(15 - d)`.
+            return [
+                analog::dac_analog(self.channel1.pcm_nibble()),
+                analog::dac_analog(self.channel2.pcm_nibble()),
+                -analog::dac_analog(self.channel3.pcm_nibble()),
+                analog::dac_analog(self.channel4.pcm_nibble()),
+            ];
+        }
         [
             self.channel1.get_output(),
             self.channel2.get_output(),
@@ -1006,7 +1028,7 @@ impl Audio {
     /// `rustyboi_replay::mix` is a bit-for-bit clone of this function and the
     /// f32 operation order is load-bearing (the compat gallery rebuilds audio
     /// through it); the two must change together.
-    fn mix_stereo(ch: [f32; 4], nr50: u8, nr51: u8, enabled: bool) -> (f32, f32) {
+    fn mix_stereo(ch: [f32; 4], nr50: u8, nr51: u8, enabled: bool, agb: bool) -> (f32, f32) {
         if !enabled {
             return (0.0, 0.0);
         }
@@ -1014,14 +1036,26 @@ impl Audio {
         let mut left_mix = 0.0;
         let mut right_mix = 0.0;
 
+        // On AGB every channel contributes to both sides unconditionally; NR51
+        // selects between the channel's own level and a fixed unrouted level
+        // rather than between summing and not summing (see
+        // `analog::agb_unrouted_levels`). The `else` arm is what makes this
+        // differ from an analog mixer, where the unrouted contribution is
+        // structurally zero.
+        let unrouted = analog::agb_unrouted_levels();
+
         for (i, &out) in ch.iter().enumerate() {
             if nr51 & (1 << (i + 4)) != 0 {
                 left_mix += out;
+            } else if agb {
+                left_mix += unrouted[i];
             }
         }
         for (i, &out) in ch.iter().enumerate() {
             if nr51 & (1 << i) != 0 {
                 right_mix += out;
+            } else if agb {
+                right_mix += unrouted[i];
             }
         }
 
@@ -1040,9 +1074,20 @@ impl Audio {
     /// The result is PRE-analog-stage: it carries neither the DAC-off fade nor
     /// the output high-pass, both of which are continuous, stateful, and
     /// downstream of the tap.
-    pub fn mix_tap_sample(sample: ChannelSample) -> (f32, f32) {
+    /// `agb` selects the digital-mixing NR51 semantics; it is a property of the
+    /// machine, constant for a whole recording, which is why it is a separate
+    /// argument rather than a fifth field of [`ChannelSample`]. Widening the
+    /// per-sample tuple would widen the `.rba` per-plane palettes for a value
+    /// that never changes.
+    pub fn mix_tap_sample(sample: ChannelSample, agb: bool) -> (f32, f32) {
         let (ch, nr50, nr51, enabled) = sample;
-        Self::mix_stereo(ch, nr50, nr51, enabled)
+        Self::mix_stereo(ch, nr50, nr51, enabled, agb)
+    }
+
+    /// Whether this machine mixes digitally (AGB). Callers holding tap data
+    /// need it to reconstruct the mix; see [`Audio::mix_tap_sample`].
+    pub fn mixes_digitally(&self) -> bool {
+        self.analog.model().is_agb()
     }
 
 
@@ -1088,7 +1133,8 @@ impl Audio {
             tap.push((raw, self.nr50, self.nr51, self.audio_enabled));
         }
         let faded = self.analog.fade(raw, self.channel_dacs_on());
-        let (left, right) = Self::mix_stereo(faded, self.nr50, self.nr51, self.audio_enabled);
+        let agb = self.analog.model().is_agb();
+        let (left, right) = Self::mix_stereo(faded, self.nr50, self.nr51, self.audio_enabled, agb);
         self.analog.high_pass(left, right)
     }
 }
@@ -1930,6 +1976,204 @@ mod tests {
             post[3999].abs() < 1e-4,
             "the unpowered DAC never coasted to 0 ({})",
             post[3999]
+        );
+    }
+
+    // ---- AGB output stage -------------------------------------------------
+    //
+    // Pan Docs, "Game Boy Advance audio": on the GBA the APU's mixing is done
+    // digitally rather than by analog circuitry, which has three observable
+    // consequences modelled below. Every test here pins the CGB side in the
+    // same body, so it fails both if the AGB behaviour is missing AND if the
+    // fork leaks onto the other models.
+
+    /// A powered APU parked at the returned abs cc, wired to `model`'s analog
+    /// stage. `powered_apu` with an explicit machine identity.
+    fn powered_apu_on(model: analog::AnalogModel) -> (Audio, u64) {
+        let (mut audio, abs) = powered_apu();
+        audio.set_analog_model(model);
+        (audio, abs)
+    }
+
+    /// Set up channel 2 as a live 50%-duty square at volume 15, then kill its
+    /// DAC (NR22 = 0, clearing the upper five bits). Returns the channel's
+    /// pre-mix output after the DAC is dead.
+    fn ch2_output_after_dac_off(model: analog::AnalogModel) -> f32 {
+        let (mut audio, mut abs) = powered_apu_on(model);
+        audio.write(NR21, 0x80);
+        audio.write(NR22, 0xF0);
+        audio.write(NR23, 0x00);
+        audio.write(NR24, 0x83);
+        abs += 64;
+        sync(&mut audio, abs);
+        audio.write(NR22, 0x00); // DAC off
+        abs += 64;
+        sync(&mut audio, abs);
+        audio.channel_outputs()[1]
+    }
+
+    /// Item 1: "the GBA APU has no DACs. Instead, they are emulated digitally
+    /// such that a disabled 'DAC' behaves like an enabled DAC receiving 0 as
+    /// its input."
+    ///
+    /// So the DAC-on gate that parks a CGB channel at analog 0 is absent on
+    /// AGB: the channel converts digital 0 like any live DAC would, which the
+    /// negative slope puts at analog +1.
+    #[test]
+    fn agb_has_no_dacs_so_a_dead_dac_still_converts_digital_zero() {
+        assert_eq!(
+            ch2_output_after_dac_off(analog::AnalogModel::CgbMgb),
+            0.0,
+            "on CGB a dead DAC is disconnected and contributes analog 0"
+        );
+        assert_eq!(
+            ch2_output_after_dac_off(analog::AnalogModel::Agb),
+            1.0,
+            "on AGB there is no DAC to disable -- the channel must still \
+             convert its digital 0, which the negative slope maps to analog +1"
+        );
+    }
+
+    /// Item 2: "Additionally, CH3's DAC has its output inverted. In particular,
+    /// this causes the channel to emit a loud spike when disabled."
+    ///
+    /// Both halves are asserted: the inversion while the channel plays, and the
+    /// spike to the far rail when it is disabled (which on AGB means converting
+    /// digital 0 through an inverted slope, i.e. analog -1 instead of +1).
+    #[test]
+    fn agb_inverts_channel_three_and_spikes_when_it_is_disabled() {
+        // Playing: step CH3 through its wave and compare AGB against CGB
+        // sample-for-sample. They must be exact negations of each other.
+        let (mut cgb, mut cgb_abs) = powered_apu_on(analog::AnalogModel::CgbMgb);
+        let (mut agb, mut agb_abs) = powered_apu_on(analog::AnalogModel::Agb);
+        let mut saw_nonzero = false;
+        for (audio, abs) in [(&mut cgb, &mut cgb_abs), (&mut agb, &mut agb_abs)] {
+            // A non-constant wave: alternating $0 and $F nibbles.
+            for i in 0..16u16 {
+                audio.write(0xFF30 + i, if i % 2 == 0 { 0x0F } else { 0xF0 });
+            }
+            audio.write(NR30, 0x80); // CH3 DAC on
+            audio.write(NR32, 0x20); // volume 100%
+            audio.write(NR33, 0x00);
+            audio.write(NR34, 0x83); // trigger
+            *abs += 64;
+            sync(audio, *abs);
+        }
+        for _ in 0..2000 {
+            cgb_abs += 8;
+            agb_abs += 8;
+            sync(&mut cgb, cgb_abs);
+            sync(&mut agb, agb_abs);
+            assert_eq!(cgb.channel3.pcm_nibble(), agb.channel3.pcm_nibble(), "premise: the two CH3s diverged digitally");
+            let c = cgb.channel_outputs()[2];
+            let a = agb.channel_outputs()[2];
+            if c != 0.0 {
+                saw_nonzero = true;
+            }
+            assert_eq!(a, -c, "AGB's CH3 must be the exact inversion of CGB's (digital {})", cgb.channel3.pcm_nibble());
+        }
+        assert!(saw_nonzero, "premise: CH3 never left analog 0, so the inversion was untested");
+
+        // Disabled: NR30 bit 7 clear. On CGB that is a dead DAC at analog 0; on
+        // AGB it is digital 0 through the inverted slope -- the loud spike.
+        for (audio, abs) in [(&mut cgb, &mut cgb_abs), (&mut agb, &mut agb_abs)] {
+            audio.write(NR30, 0x00);
+            *abs += 64;
+            sync(audio, *abs);
+        }
+        assert_eq!(cgb.channel_outputs()[2], 0.0, "CGB's disabled CH3 sits at analog 0");
+        assert_eq!(
+            agb.channel_outputs()[2],
+            -1.0,
+            "AGB's disabled CH3 must spike to the NEGATIVE rail: digital 0 is \
+             analog +1 on the normal slope, and CH3's slope is inverted"
+        );
+    }
+
+    /// Item 3: with digital mixing there is no "not summed". SameBoy
+    /// `update_sample`: "On the AGB, because no analog mixing is done, the
+    /// behavior of NR51 is a bit different. A channel that is not connected to
+    /// a terminal is idenitcal to a connected channel playing PCM sample 0."
+    ///
+    /// CH3's unrouted level is digital 7, not digital 0 (SameBoy's
+    /// `silence = 7 * 2`), and is taken before the CH3 inversion.
+    #[test]
+    fn agb_treats_an_unrouted_channel_as_one_playing_digital_zero() {
+        // Every channel at the negative rail, nothing routed anywhere, full
+        // master volume. On an analog mixer that is silence by construction.
+        let ch = [-1.0f32; 4];
+        let (l, r) = Audio::mix_tap_sample((ch, 0x77, 0x00, true), false);
+        assert_eq!((l, r), (0.0, 0.0), "an analog mixer sums nothing when NR51 routes nothing");
+
+        let (l, r) = Audio::mix_tap_sample((ch, 0x77, 0x00, true), true);
+        // ch1, ch2, ch4 contribute digital 0 (+1.0); ch3 contributes digital 7.
+        // NR50 = 0x77 is master volume 7, i.e. a factor of (7+1)/8 == 1, so the
+        // only scaling left is the mixer's /4 four-channel normalize.
+        let want = (1.0f32 + 1.0 + (7.5 - 7.0) / 7.5 + 1.0) / 4.0;
+        assert_eq!(l, want, "AGB's unrouted left side must sum the digital-0 levels");
+        assert_eq!(r, want, "AGB's unrouted right side must sum the digital-0 levels");
+        assert!(l != 0.0, "premise: the unrouted AGB sum must be audible, not silence");
+
+        // Per-side, not per-channel: routing ONLY ch1 left must move the left
+        // side away from the right, and must replace ch1's unrouted level with
+        // its real one rather than adding to it.
+        let (l, r) = Audio::mix_tap_sample((ch, 0x77, 0x10, true), true);
+        let want_l = (-1.0f32 + 1.0 + (7.5 - 7.0) / 7.5 + 1.0) / 4.0;
+        assert_eq!(l, want_l, "a routed channel must REPLACE its unrouted level");
+        assert_eq!(r, want, "the right side must be untouched by a left-only route");
+    }
+
+    /// Item 5: the DAC-off fade is the discharge of a real per-channel coupling
+    /// capacitor, and AGB has no per-channel DACs to discharge. SameBoy gates
+    /// its equivalent on `<= GB_MODEL_CGB_E`.
+    ///
+    /// The observable is the step: on CGB the channel coasts down from where
+    /// its DAC left it, so the first post-off sample is still near the old
+    /// level; on AGB it must be exactly at the new level immediately.
+    #[test]
+    fn agb_does_not_fade_a_dead_dac() {
+        fn first_level_after_dac_off(model: analog::AnalogModel) -> f32 {
+            let (mut audio, mut abs) = powered_apu_on(model);
+            audio.write(NR21, 0x80);
+            audio.write(NR22, 0xF0);
+            audio.write(NR23, 0x00);
+            audio.write(NR24, 0x83);
+            // Run the channel THROUGH the fade so its node is charged to a real
+            // level, spinning until the square sits at the negative rail.
+            let mut charged = false;
+            for _ in 0..4000 {
+                abs += 8;
+                sync(&mut audio, abs);
+                let raw = audio.channel_outputs();
+                let dacs = audio.channel_dacs_on();
+                if audio.analog.fade(raw, dacs)[1] == -1.0 {
+                    charged = true;
+                    break;
+                }
+            }
+            assert!(charged, "premise: channel 2 never reached the negative rail");
+
+            audio.write(NR22, 0x00); // DAC off
+            abs += 8;
+            sync(&mut audio, abs);
+            let raw = audio.channel_outputs();
+            let dacs = audio.channel_dacs_on();
+            audio.analog.fade(raw, dacs)[1]
+        }
+
+        let cgb = first_level_after_dac_off(analog::AnalogModel::CgbMgb);
+        assert!(
+            cgb < -0.9,
+            "on CGB the dead DAC's node must still be coasting near the rail \
+             it was left at, not stepped ({cgb})"
+        );
+
+        let agb = first_level_after_dac_off(analog::AnalogModel::Agb);
+        assert_eq!(
+            agb,
+            1.0,
+            "on AGB there is no capacitor to discharge: the channel must step \
+             straight to digital 0's level with no fade"
         );
     }
 }

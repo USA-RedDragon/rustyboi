@@ -35,6 +35,27 @@ const CGB_CHARGE_PER_CYCLE: f32 = 0.998943;
 /// Which high-pass the machine wires to its output. Pan Docs only orders the
 /// three families ("more aggressive on GBA than on GBC, which itself is more
 /// aggressive than on DMG"); blargg publishes the constants for the first two.
+///
+/// What [`AnalogModel::Agb`] deliberately does NOT model, so the next reader
+/// does not mistake absence for oversight:
+///
+///   * **SOUNDBIAS.** Pan Docs: on GBA "sound is converted to an analog signal
+///     and an offset is added (see SOUNDBIAS in GBATEK)". That offset is a
+///     GBA-side register a CGB program cannot reach, and our output is already
+///     centred, so adding it would only shift a DC level the high-pass removes.
+///   * **SameBoy's `agb_bias_for_channel`.** It adds each channel's envelope
+///     `current_volume` to that channel's sample on AGB. It carries no comment,
+///     no citation, and no Pan Docs counterpart, and it is not derivable from
+///     "mixing is digital" the way the modelled items are. Unverified, so
+///     omitted — a bench item, not a defect.
+///   * **The NR43 intermediate-value glitch.** SameBoy: "AGB behavior is very
+///     glitchy and incosistent … This is a *very* rough approximation of the
+///     behavior." A rough approximation of chaotic silicon is worse than a
+///     clean omission; bench item.
+///   * **The high-pass constant.** Pan Docs orders GBA as more aggressive than
+///     GBC; pandocs issue #390 claims the GBA has no internal high-pass at all.
+///     Flatly contradictory and unresolved, so the derived constant below is
+///     left exactly as it was rather than guessed in either direction.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum AnalogModel {
     #[default]
@@ -44,6 +65,14 @@ pub(crate) enum AnalogModel {
 }
 
 impl AnalogModel {
+    /// Whether this machine mixes digitally rather than through per-channel
+    /// DACs. Pan Docs (Game Boy Advance audio): "Instead of mixing being done
+    /// by analog circuitry, it's instead done digitally … This also means that
+    /// the GBA APU has no DACs."
+    pub(super) fn is_agb(self) -> bool {
+        matches!(self, AnalogModel::Agb)
+    }
+
     fn charge_per_cycle(self) -> f32 {
         match self {
             AnalogModel::Dmg => DMG_CHARGE_PER_CYCLE,
@@ -64,6 +93,25 @@ impl AnalogModel {
         self.charge_per_cycle()
             .powf(DMG_CPU_HZ as f32 / HOST_SAMPLE_RATE)
     }
+}
+
+/// What a channel contributes to a stereo side that NR51 does NOT route it to,
+/// on AGB only, in channel order.
+///
+/// With analog mixing an unrouted channel is simply not summed. AGB sums
+/// digitally instead, so there is no "not summed" — an unrouted channel
+/// contributes the same fixed level a routed channel emitting digital 0 would.
+/// SameBoy `Core/apu.c`, `update_sample`: "On the AGB, because no analog mixing
+/// is done, the behavior of NR51 is a bit different. A channel that is not
+/// connected to a terminal is idenitcal to a connected channel playing PCM
+/// sample 0."
+///
+/// Its `int8_t silence = 0` is [`dac_analog`]`(0)` in our units (SameBoy's
+/// `(0xF - value * 2)` over its 15-unit rail is exactly `(7.5 - d) / 7.5`).
+/// CH3 is the exception and gets `silence = 7 * 2`, i.e. digital 7 — taken
+/// BEFORE the CH3 inversion, which SameBoy applies only on the routed path.
+pub(super) fn agb_unrouted_levels() -> [f32; 4] {
+    [dac_analog(0), dac_analog(0), dac_analog(7), dac_analog(0)]
 }
 
 /// Below this the fade / capacitor is snapped to exactly zero: it keeps a long
@@ -91,6 +139,11 @@ pub(super) struct AnalogStage {
     /// the high-pass (one RC family per machine).
     #[serde(skip, default = "dmg_charge_per_sample")]
     charge: f32,
+    /// Which family this stage is modelling. Derived from the machine's
+    /// serialized `hardware` identity by `set_model`, exactly like `charge`,
+    /// so it is skipped rather than stored.
+    #[serde(skip)]
+    model: AnalogModel,
     /// Per-channel analog level, which the DAC drives while it is on and which
     /// decays from wherever it was left once the DAC goes off.
     #[serde(default)]
@@ -112,6 +165,7 @@ impl Default for AnalogStage {
     fn default() -> Self {
         AnalogStage {
             charge: AnalogModel::Dmg.charge_per_sample(),
+            model: AnalogModel::Dmg,
             fade: [0.0; 4],
             cap_l: 0.0,
             cap_r: 0.0,
@@ -122,6 +176,11 @@ impl Default for AnalogStage {
 impl AnalogStage {
     pub(super) fn set_model(&mut self, model: AnalogModel) {
         self.charge = model.charge_per_sample();
+        self.model = model;
+    }
+
+    pub(super) fn model(&self) -> AnalogModel {
+        self.model
     }
 
     /// Apply the DAC-off fade. `raw` is each channel's post-DAC analog level
@@ -129,6 +188,14 @@ impl AnalogStage {
     /// a live DAC drives its node directly, a dead one coasts toward 0 instead
     /// of stepping there.
     pub(super) fn fade(&mut self, raw: [f32; 4], dac_on: [bool; 4]) -> [f32; 4] {
+        // There is nothing to fade on AGB: the fade is the discharge of a real
+        // per-channel DAC coupling capacitor, and AGB has no per-channel DACs
+        // to discharge. SameBoy gates its equivalent on `<= GB_MODEL_CGB_E` for
+        // the same reason. A dead "DAC" there steps straight to digital 0's
+        // level, which is what makes CH3's disable a spike rather than a slew.
+        if self.model.is_agb() {
+            return raw;
+        }
         for (i, level) in self.fade.iter_mut().enumerate() {
             if dac_on[i] {
                 *level = raw[i];

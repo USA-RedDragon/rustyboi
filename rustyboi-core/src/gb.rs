@@ -1134,6 +1134,13 @@ impl GB {
         self.mmio.drain_channel_tap()
     }
 
+    /// Whether this machine mixes digitally (AGB), which a holder of tap data
+    /// needs in order to reconstruct the stereo mix — NR51's unrouted case
+    /// differs. See `audio::Audio::mix_tap_sample`.
+    pub fn mixes_digitally(&self) -> bool {
+        self.mmio.mixes_digitally()
+    }
+
     // Audio management methods
     pub fn enable_audio(&mut self, mut output: Box<dyn audio::AudioOutput + Send>) -> Result<(), Box<dyn std::error::Error>> {
         if self.audio_output.is_some() {

@@ -153,7 +153,7 @@ threshold() {
         samesuite_sgb)      echo "2 -" ;;
         sgb)                echo "1 -" ;;
         blargg)             echo "15 4000" ;;
-        blargg_singles)     echo "41 2000" ;;
+        blargg_singles)     echo "51 2000" ;;
         scribbltests)       echo "10 -" ;;
         turtle_tests)       echo "4 -" ;;
         little_things_gb)   echo "4 -" ;;

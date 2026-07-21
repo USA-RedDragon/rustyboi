@@ -17,7 +17,7 @@ use crate::stream::{src_byte, src_take, src_varint, DecodeError, Source};
 //   rate    u32         sample rate (44100)
 //   fps_num u32         fps_den u32     (video frame rate, for frame<->sample)
 //   samples u32
-//   flags   u8          reserved 0
+//   flags   u8          bit0 = AGB digital mixing (NR51 semantics), rest 0
 //   <brotli stream>     7 planes: ch1..ch4 (f32 values), nr50, nr51, enabled
 // ```
 // Each plane: u16 palette_len, palette entries (f32le for channels, u8 for
@@ -37,12 +37,22 @@ pub type ChannelSample = ([f32; 4], u8, u8, bool);
 #[derive(Default)]
 pub struct AudioEncoder {
     samples: Vec<ChannelSample>,
+    /// Whether the recorded machine mixes digitally (AGB). Constant for a whole
+    /// recording, so it rides in the header flags rather than widening every
+    /// per-sample plane's palette.
+    agb: bool,
 }
 
 #[cfg(feature = "encode")]
 impl AudioEncoder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record that this machine mixes digitally; see
+    /// `rustyboi_core_lib::audio::Audio::mixes_digitally`.
+    pub fn set_agb(&mut self, agb: bool) {
+        self.agb = agb;
     }
 
     pub fn push(&mut self, samples: &[ChannelSample]) {
@@ -64,7 +74,7 @@ impl AudioEncoder {
         out.extend_from_slice(&fps_num.to_le_bytes());
         out.extend_from_slice(&fps_den.to_le_bytes());
         out.extend_from_slice(&(self.samples.len() as u32).to_le_bytes());
-        out.push(0); // flags
+        out.push(u8::from(self.agb)); // flags: bit0 = AGB digital mixing
         let mut stream = Vec::new();
         for ch in 0..4 {
             write_plane(&mut stream, self.samples.iter().map(|s| s.0[ch]), |v, o| {
@@ -189,6 +199,8 @@ pub struct AudioDecoder {
     nr50: Plane<u8>,
     nr51: Plane<u8>,
     enabled: Plane<u8>,
+    /// Header flag bit 0: the recorded machine mixed digitally (AGB).
+    agb: bool,
     pos: u64, // next sample index
 }
 
@@ -203,6 +215,7 @@ impl AudioDecoder {
         let fps_num = u32le(8);
         let fps_den = u32le(12);
         let samples = u32le(16);
+        let agb = hdr[20] & 1 != 0;
         if rate == 0 || fps_num == 0 || fps_den == 0 {
             return Err(DecodeError::Malformed);
         }
@@ -221,7 +234,7 @@ impl AudioDecoder {
         let nr50 = read_plane(&mut src, src_byte)?;
         let nr51 = read_plane(&mut src, src_byte)?;
         let enabled = read_plane(&mut src, src_byte)?;
-        Ok(Self { rate, fps_num, fps_den, samples, chans, nr50, nr51, enabled, pos: 0 })
+        Ok(Self { rate, fps_num, fps_den, samples, chans, nr50, nr51, enabled, agb, pos: 0 })
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -272,7 +285,7 @@ impl AudioDecoder {
             let nr50 = self.nr50.next()?;
             let nr51 = self.nr51.next()?;
             let en = self.enabled.next()? != 0;
-            let (l, r) = mix(chs, nr50, nr51, en);
+            let (l, r) = mix(chs, nr50, nr51, en, self.agb);
             out.push(l);
             out.push(r);
         }
@@ -304,18 +317,30 @@ impl AudioDecoder {
 ///
 /// The practical effect on playback is the absence of a DC-removal stage, which
 /// costs a static offset rather than any of the signal.
-fn mix(chs: [f32; 4], nr50: u8, nr51: u8, enabled: bool) -> (f32, f32) {
+fn mix(chs: [f32; 4], nr50: u8, nr51: u8, enabled: bool, agb: bool) -> (f32, f32) {
     if !enabled {
         return (0.0, 0.0);
     }
     let mut left = 0.0f32;
     let mut right = 0.0f32;
+    // Mirrors `analog::agb_unrouted_levels` in the core: on AGB, mixing is
+    // digital, so a channel NR51 does not route still contributes the level a
+    // routed channel emitting digital 0 would (CH3's is digital 7, taken before
+    // that channel's AGB output inversion).
+    // Written as the core's `dac_analog` formula rather than reduced literals
+    // so the two sides are bit-identical by construction, not by coincidence.
+    let dac = |d: f32| (7.5f32 - d) / 7.5;
+    let unrouted = [dac(0.0), dac(0.0), dac(7.0), dac(0.0)];
     for (i, &ch) in chs.iter().enumerate() {
         if nr51 & (1 << (i + 4)) != 0 {
             left += ch;
+        } else if agb {
+            left += unrouted[i];
         }
         if nr51 & (1 << i) != 0 {
             right += ch;
+        } else if agb {
+            right += unrouted[i];
         }
     }
     left *= ((nr50 >> 4) & 7) as f32 + 1.0;
@@ -365,7 +390,7 @@ mod tests {
             assert!(n > 0, "stalled at frame {frame}");
             for (k, pair) in out.chunks_exact(2).enumerate() {
                 let (chs, nr50, nr51, en) = samples[got + k];
-                let (l, r) = mix(chs, nr50, nr51, en);
+                let (l, r) = mix(chs, nr50, nr51, en, false);
                 assert_eq!((pair[0], pair[1]), (l, r), "sample {} mismatch", got + k);
             }
             got += n;

@@ -2483,6 +2483,10 @@ impl Mmio {
         self.audio.drain_channel_tap()
     }
 
+    pub fn mixes_digitally(&self) -> bool {
+        self.audio.mixes_digitally()
+    }
+
     pub(crate) fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
         // Catch the lazy APU up to the current cc first so the mixer state the
         // down-sampler reads is the instruction-end state (the same state the
