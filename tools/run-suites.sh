@@ -339,12 +339,16 @@ PY
 # AntonioND/gbc-hw-tests: the repo commits both the prebuilt .gbc test ROMs and
 # the real-hardware SRAM captures (real_gb / real_gbp / real_gbc / real_gba_sp
 # .sav, one per device class) they are graded against. Shallow single-commit
-# checkout at the pinned ref; copy only the ROMs + .sav oracles (~17 MB),
-# preserving the repo's category/test dir layout under $ROMS/gbc-hw-tests/.
+# checkout at the pinned ref; copy only the ROMs + .sav oracles + the rgblink
+# .sym symbol tables (~17 MB), preserving the repo's category/test dir layout
+# under $ROMS/gbc-hw-tests/. The 180 .sym files are what turn RB_SRAM_TRACE's
+# writing-PC attribution into a symbol name; the runner picks one up whenever it
+# sits beside the ROM, and silently degrades to bare PCs when it does not.
 sync_gbchwtests_roms() {
     local hw="$ROMS/gbc-hw-tests"
     [ -f "$hw/cpu/halt_bug_test/halt_bug_test.gbc" ] \
-        && [ -f "$hw/timers/div_reset_65k/real_gbc.sav" ] && return 0
+        && [ -f "$hw/timers/div_reset_65k/real_gbc.sav" ] \
+        && [ -f "$hw/cpu/halt_bug_test/halt_bug_test.sym" ] && return 0
     local tmp
     tmp="$(mktemp -d)"
     git -C "$tmp" init -q
@@ -358,7 +362,7 @@ sync_gbchwtests_roms() {
         cp -p "$f" "$hw/$rel"
         n=$((n + 1))
     done < <(find "$tmp" -path "$tmp/.git" -prune -o \
-        \( -name '*.gbc' -o -name 'real_*.sav' \) -print0)
+        \( -name '*.gbc' -o -name 'real_*.sav' -o -name '*.sym' \) -print0)
     rm -rf "$tmp"
     log "Sourced $n gbc-hw-tests files into $hw"
 }

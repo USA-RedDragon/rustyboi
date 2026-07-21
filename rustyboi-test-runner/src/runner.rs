@@ -3,6 +3,7 @@ use crate::expectation::{
     Oracle, TestCase,
 };
 use crate::frame;
+use crate::sramtrace::SramTrace;
 use rustyboi_core_lib::audio::AudioOutput;
 use rustyboi_core_lib::cartridge::Cartridge;
 use rustyboi_core_lib::input::ButtonState;
@@ -543,12 +544,22 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         // require held buttons (gbc-hw-tests joy_interrupt_manual_delay's
         // results.txt: "Keep any button pressed when initing the ROM").
         let mut input = InputScript::new(&case.input);
+        // Diagnostic (RB_SRAM_TRACE): attribute each SRAM byte to the store that
+        // wrote it. `None` unless the env var selects this case, and the loop
+        // below is then byte-for-byte the original one.
+        let mut sram_trace = SramTrace::maybe_new(&gb, &case.rom_path);
         while cycles_run < cycle_budget {
             input.poll(&mut gb, cycles_run);
+            if let Some(trace) = sram_trace.as_mut() {
+                trace.before_step(&gb);
+            }
             let (_breakpoint_hit, cycles) = gb.step_instruction(false);
             cycles_run += cycles as u64;
+            if let Some(trace) = sram_trace.as_mut() {
+                trace.after_step(&gb, cycles_run);
+            }
         }
-        return evaluate_dump_oracle(&gb, &case.oracle);
+        return evaluate_dump_oracle(&gb, &case.oracle, sram_trace.as_ref());
     }
 
     for frame_index in 0..options.frames {
@@ -615,7 +626,7 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         }
         Oracle::SramDump { .. } | Oracle::RegionDump { .. } => {
             // Handled before the frame loop via the cycle-driven dump path.
-            evaluate_dump_oracle(&gb, &case.oracle)
+            evaluate_dump_oracle(&gb, &case.oracle, None)
         }
         // c-sp suite oracles are dispatched (and returned) before the frame loop.
         Oracle::CspPng { .. }
@@ -634,7 +645,11 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
 }
 
 /// Read back the dumped memory region and compare it to the reference file.
-fn evaluate_dump_oracle(gb: &GB, oracle: &Oracle) -> Result<(), String> {
+fn evaluate_dump_oracle(
+    gb: &GB,
+    oracle: &Oracle,
+    sram_trace: Option<&SramTrace>,
+) -> Result<(), String> {
     match oracle {
         Oracle::SramDump { path, skip } => {
             let expected = fs::read(path)
@@ -643,7 +658,19 @@ fn evaluate_dump_oracle(gb: &GB, oracle: &Oracle) -> Result<(), String> {
                 .cartridge()
                 .ok_or_else(|| "no cartridge present when reading SRAM dump".to_string())?;
             let actual = cartridge.save_ram();
-            compare_dump(&format!("SRAM dump {}", path.display()), &expected, actual, skip)
+            // The trace's chronological log and probe-structure map describe the
+            // whole graded region, pass or fail: the structure is exactly what
+            // you need to interpret a capture you have not yet diagnosed.
+            if let Some(trace) = sram_trace {
+                trace.report(expected.len());
+            }
+            compare_dump(
+                &format!("SRAM dump {}", path.display()),
+                &expected,
+                actual,
+                skip,
+                sram_trace,
+            )
         }
         Oracle::RegionDump { path, region } => {
             let expected = fs::read(path).map_err(|error| {
@@ -663,6 +690,7 @@ fn evaluate_dump_oracle(gb: &GB, oracle: &Oracle) -> Result<(), String> {
                 &expected,
                 &actual,
                 &[],
+                None,
             )
         }
         _ => Err("evaluate_dump_oracle called with non-dump oracle".to_string()),
@@ -673,12 +701,30 @@ fn evaluate_dump_oracle(gb: &GB, oracle: &Oracle) -> Result<(), String> {
 /// differing offset with expected/actual bytes, or a length mismatch. Offsets
 /// within any `skip` range are not graded (nondeterministic power-on regions;
 /// see `Oracle::SramDump`).
+///
+/// Two diagnostics widen this, both off by default and both keyed on the same
+/// `{offset:#06X}` rendering so their output joins by offset:
+///   * `RB_SRAM_VERBOSE=1` — list every mismatching cell, not just the first.
+///   * `RB_SRAM_TRACE=<rom-substring>|1` — additionally attribute each cell to
+///     the instruction that wrote it (see [`crate::sramtrace`]).
 fn compare_dump(
     label: &str,
     expected: &[u8],
     actual: &[u8],
     skip: &[std::ops::Range<usize>],
+    sram_trace: Option<&SramTrace>,
 ) -> Result<(), String> {
+    // Diagnostic (RB_SRAM_TRACE): for every mismatching cell, name the store
+    // that produced the byte. Emitted on the same offset rendering as
+    // RB_SRAM_VERBOSE so `SRAM_BLAME` lines join onto the diff list by offset.
+    if let Some(trace) = sram_trace {
+        for (offset, (&want, &got)) in expected.iter().zip(actual.iter()).enumerate() {
+            if skip.iter().any(|range| range.contains(&offset)) || want == got {
+                continue;
+            }
+            eprintln!("{}", trace.blame_line(offset, want, got));
+        }
+    }
     if actual.len() < expected.len() {
         return Err(format!(
             "{label}: captured region too small ({} bytes available, {} expected)",
@@ -1539,20 +1585,20 @@ mod tests {
 
     #[test]
     fn compare_dump_accepts_exact_and_longer_actual() {
-        assert!(compare_dump("t", &[1, 2, 3], &[1, 2, 3], &[]).is_ok());
+        assert!(compare_dump("t", &[1, 2, 3], &[1, 2, 3], &[], None).is_ok());
         // Extra trailing actual bytes past the expected length are ignored.
-        assert!(compare_dump("t", &[1, 2, 3], &[1, 2, 3, 9, 9], &[]).is_ok());
+        assert!(compare_dump("t", &[1, 2, 3], &[1, 2, 3, 9, 9], &[], None).is_ok());
     }
 
     #[test]
     fn compare_dump_rejects_too_small_actual() {
-        let err = compare_dump("region", &[1, 2, 3, 4], &[1, 2], &[]).unwrap_err();
+        let err = compare_dump("region", &[1, 2, 3, 4], &[1, 2], &[], None).unwrap_err();
         assert!(err.contains("too small"), "{err}");
     }
 
     #[test]
     fn compare_dump_reports_first_mismatch_offset() {
-        let err = compare_dump("region", &[0, 1, 2, 3], &[0, 9, 2, 3], &[]).unwrap_err();
+        let err = compare_dump("region", &[0, 1, 2, 3], &[0, 9, 2, 3], &[], None).unwrap_err();
         assert!(err.contains("offset 0x0001"), "{err}");
         assert!(err.contains("expected 0x01") && err.contains("got 0x09"), "{err}");
     }
@@ -1561,9 +1607,9 @@ mod tests {
     fn compare_dump_skip_ranges_exclude_offsets() {
         let skip = std::slice::from_ref(&(1usize..2));
         // The only mismatch is at offset 1, which the skip range covers.
-        assert!(compare_dump("region", &[0, 1, 2, 3], &[0, 9, 2, 3], skip).is_ok());
+        assert!(compare_dump("region", &[0, 1, 2, 3], &[0, 9, 2, 3], skip, None).is_ok());
         // A mismatch outside the skip range still fails.
-        assert!(compare_dump("region", &[0, 1, 2, 3], &[0, 9, 8, 3], skip).is_err());
+        assert!(compare_dump("region", &[0, 1, 2, 3], &[0, 9, 8, 3], skip, None).is_err());
     }
 
     // --- pure string helpers --------------------------------------------
