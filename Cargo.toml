@@ -40,7 +40,7 @@ rustyboi-replay = { path = "rustyboi-replay", default-features = false }
 rustyboi-session = { path = "rustyboi-session" }
 
 bincode = "=1.3.3"
-clap = { version = "=4.6.3", features = ["derive"] }
+clap = { version = "=4.6.4", features = ["derive"] }
 egui = "=0.35.0"
 pollster = "=1.0.1"
 rfd = "=0.17.2"
