@@ -729,17 +729,34 @@ impl GB {
         // (bios/cgb_boot.bin) in-emulator hands off at DIV_CTR 0x1E9D for a
         // CGB cart vs 0x2675 for a DMG cart (--validate-bios), reproducing
         // both anchors with the same ~3 cc residual.
+        // The DMG-compat path is additionally CART-CONTENT dependent, by one
+        // M-cycle. Its palette lookup tests the old-licensee byte ($014B) for
+        // $33 ("see the new licensee code at $0144") before hashing the title,
+        // and the following conditional branch costs 12 cc taken vs 8 cc not:
+        // a cart with $014B != $33 boots 4 cc LONGER, handing off with the
+        // divider 4 further along. The CGB-cart path never runs the compat
+        // setup, so its anchor is content-independent.
+        //   - $014B == $33 -> the mooneye boot_div-{cgbABCDE,cgb0,A} carts, which
+        //     pin the anchors below; unchanged by this branch.
+        //   - $014B != $33 -> gbc-hw-tests timers/sys_clocks_init_dmg_mode, whose
+        //     real CGB/AGB captures land the timer ISR one `inc b` earlier than
+        //     the $33 anchor does (b = 0x2E/0x2D, not 0x2F/0x2E).
+        // DMG/MGB/SGB have no compat path and are content-independent here
+        // (the SGB arm below varies for an unrelated reason: it bit-bangs the
+        // header to the SNES, so its DURATION scales with header popcount).
         let cgb_cart = self.should_enable_cgb_features();
+        let compat_slow = !cgb_cart && self.mmio.read(0x014B) != 0x33;
+        let compat = |base: u16| base + if compat_slow { 4 } else { 0 };
         let boot_counter: u16 = match self.hardware {
             Hardware::CGB | Hardware::CGBB | Hardware::CGBE => {
-                if cgb_cart { 0x1EA0 } else { 0x2678 }
+                if cgb_cart { 0x1EA0 } else { compat(0x2678) }
             }
             // boot_div-cgb0 fingerprint (29 2a 2a 2b 2c 2e), a DMG cart, so
             // this pins the CGB0 compat path only. CGB0's boot ROM differs from
             // CGB-A..E's, so its CGB-cart value cannot be inferred from the
             // 0x7D8 delta; CGB0 is only used for the mooneye boot rows (all DMG
             // carts). Verified: passes mooneye boot_div-cgb0.
-            Hardware::CGB0 => 0x2884,
+            Hardware::CGB0 => compat(0x2884),
             // boot_div-A fingerprint (27 28 28 29 2a 2c), a DMG cart: AGB
             // compat path == CGB + 4 master-cc. The AGB boot ROM is the CGB
             // boot ROM with a trivial tail difference (B=1 hand-off), so the +4
@@ -748,7 +765,7 @@ impl GB {
             // Verified: passes mooneye boot_div-A. AGB is opt-in, outside the
             // default suites.
             Hardware::AGB => {
-                if cgb_cart { 0x1EA4 } else { 0x267C }
+                if cgb_cart { 0x1EA4 } else { compat(0x267C) }
             }
             Hardware::DMG | Hardware::MGB => 0xABCC,
             // SGB boot_div fingerprint (d9 da da db dc de). The SGB CPU uses the
@@ -3758,6 +3775,73 @@ mod reset_identity_tests {
                  (len {} vs {}, first differing byte {first_diff:?})",
                 after.len(),
                 fresh.len()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod dmg_compat_boot_duration_tests {
+    //! The CGB/AGB DMG-compat boot path is CART-CONTENT dependent by one
+    //! M-cycle: its palette lookup tests the old-licensee byte ($014B) for $33
+    //! before hashing the title, and the branch that follows costs 12 cc taken
+    //! vs 8 cc not. A cart with $014B != $33 therefore boots 4 cc longer and
+    //! hands off with the divider 4 further along. The CGB-cart path never runs
+    //! the compat setup and must stay content-independent.
+    use super::*;
+
+    /// Blank 32KB cart carrying a chosen CGB flag ($0143) and old licensee
+    /// ($014B).
+    fn seeded_counter(hardware: Hardware, cgb_flag: u8, old_licensee: u8) -> u16 {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x143] = cgb_flag;
+        rom[0x14B] = old_licensee;
+        let mut gb = GB::new(hardware);
+        gb.insert(cartridge::Cartridge::from_bytes(&rom).unwrap());
+        gb.skip_bios();
+        gb.mmio.timer_internal_counter()
+    }
+
+    /// DMG-flagged cart on CGB/AGB: $014B != $33 boots exactly 4 cc longer.
+    /// The $33 value is the one every mooneye boot_div cart carries, so that
+    /// side is the anchor those fingerprints pin; gbc-hw-tests carts use $00.
+    #[test]
+    fn compat_boot_is_four_cc_longer_off_the_33_licensee() {
+        for hardware in [Hardware::CGB, Hardware::CGBB, Hardware::CGBE, Hardware::CGB0, Hardware::AGB]
+        {
+            let anchored = seeded_counter(hardware, 0x00, 0x33);
+            let slow = seeded_counter(hardware, 0x00, 0x00);
+            assert_eq!(
+                slow.wrapping_sub(anchored),
+                4,
+                "{hardware:?}: a DMG cart with $014B != $33 must hand off 4 cc later"
+            );
+        }
+    }
+
+    /// A CGB-flagged cart skips the compat setup entirely, so $014B cannot move
+    /// its hand-off. This is what protects the CGB-cart anchor (hwtest
+    /// start_inc_1/_2, BullyGB, the boot-phase sound refs).
+    #[test]
+    fn cgb_cart_boot_is_content_independent() {
+        for hardware in [Hardware::CGB, Hardware::CGBE, Hardware::AGB] {
+            assert_eq!(
+                seeded_counter(hardware, 0xC0, 0x33),
+                seeded_counter(hardware, 0xC0, 0x00),
+                "{hardware:?}: the CGB-cart path must not depend on $014B"
+            );
+        }
+    }
+
+    /// DMG/MGB have no compat path at all: their hand-off is content-independent
+    /// for either licensee byte.
+    #[test]
+    fn dmg_boot_is_content_independent() {
+        for hardware in [Hardware::DMG, Hardware::MGB] {
+            assert_eq!(
+                seeded_counter(hardware, 0x00, 0x33),
+                seeded_counter(hardware, 0x00, 0x00),
+                "{hardware:?}: DMG-family boot must not depend on $014B"
             );
         }
     }
