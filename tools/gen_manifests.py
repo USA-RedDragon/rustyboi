@@ -1690,6 +1690,25 @@ RUSTYBOI_MODELS: dict[str, tuple[str, list[str]]] = {
     "sgbcart": ("dmg", []),
 }
 
+# DMG-compatibility cart (deliberately not CGB-flagged) run on CGB-family
+# silicon, with the header licensee bytes as the independent variable. The CGB
+# boot ROM's compat colourisation path exists only for non-CGB carts and
+# branches on $014B / $0144-$0145 to decide whether to run its title-hash
+# palette lookup, so the header and the hardware genuinely travel together — the
+# same reason `sgbcart` exists. Each revision gets all four licensee builds; the
+# `rev=` pin is explicit even where it matches the mode default, because these
+# rows are per-revision boot-duration oracles and must never drift onto whatever
+# silicon the mode happens to default to. See test-roms/include/
+# boot_licensee_div.inc for the derivation.
+for _hw, (_mode, _rev) in {
+    "cgb0": ("cgb", "cgb0"),
+    "cgb": ("cgb", "cgb"),
+    "cgbe": ("cgb", "cgbe"),
+    "agb": ("agb", "agb"),
+}.items():
+    for _lic in ("l00", "l33", "l01", "l33n01"):
+        RUSTYBOI_MODELS[f"{_hw}compat_{_lic}"] = (_mode, [f"rev={_rev}"])
+
 
 def gen_rustyboi(roms: Path, out: Path) -> None:
     """First-party rustyboi test ROMs under test-roms/. Built ROMs are
