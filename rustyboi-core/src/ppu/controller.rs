@@ -7176,6 +7176,39 @@ impl Ppu {
     #[cold]
     #[inline(never)]
     fn enter_lcd_disabled(&mut self, mmio: &mut mmio::Mmio) {
+        // AGB lets an all-but-committed mode-1 edge through an LCD disable; CGB
+        // does not. vbl_mode1_lcdoff_{dmg,gbc}_mode sweeps the LCD-off write across
+        // the end of LY=143 (line_cycle 436+4i) and reads IF one M-cycle later: the
+        // AGB capture's E0->E3 step lands one probe earlier than CGB's, at the probe
+        // whose disable sits inside the last M-cycle before the m1 event (line_cycle
+        // 454). The STAT half of the same capture — the mode-1 *entry* — is
+        // byte-identical across CGB and AGB, so AGB's LCD phase is NOT shifted; only
+        // this edge survives. The bound is one M-cycle rather than the 2 dots the
+        // DMG-compat build alone would suggest because the two builds probe the same
+        // hardware boundary on grids one dot apart (compat lands 2 dots short of the
+        // event, CGB-native 3); `<= 4` is the bound that partitions both, and the
+        // preceding probe is a full M-cycle further out on either grid.
+        //
+        // Modelled here, on the disable, rather than by firing the m1 event early:
+        // moving the event itself also moves every ordinary post-enable VBlank raise,
+        // which re-times the HALT wake and costs dma/hdma_halt on AGB. Confining it to
+        // the disable leaves free-running AGB byte-identical.
+        let ds = mmio.is_double_speed_mode();
+        if mmio.is_agb()
+            && !ds
+            && self.internal_ly_val >= 143
+            && self.sched_m1irq.saturating_sub(self.abs_cc) <= 4
+        {
+            if self.mstat_irq.do_m1_event(self.stat_reg_committed) {
+                mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_M1);
+                mmio.request_interrupt(registers::InterruptFlag::Lcd);
+            }
+            mmio.request_interrupt(registers::InterruptFlag::VBlank);
+            self.m1_vblank_fired = true;
+            self.sched_m1irq = self
+                .sched_m1irq
+                .wrapping_add(stat_irq::LCD_CYCLES_PER_FRAME << ds as u32);
+        }
         mmio.write_ly_from_ppu(0);
         self.reset_lcd_pipeline();
         Self::set_lcd_status_mode(mmio, 0);
