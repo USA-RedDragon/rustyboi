@@ -10871,23 +10871,14 @@ impl Ppu {
         // reads (is_cgb_de, single speed) get the +1 hold. DS keeps `> 2` (the
         // stat-mode-ds / speed-switch DS probes are BCE-common and co-tuned to it).
         let tail_hold = (!lc_master.ds && (mmio.is_agb() || mmio.is_cgb_de())) as i64;
-        // DMG line-tail coincidence DROP window: on DMG silicon the OLD-LY
-        // compare stops matching one M-cycle EARLIER than the hardware model —
-        // the FF41 flag reads 0 from raw time-to-next-LY <= 8 (cmp t2n <= 6)
-        // when the line is about to wrap to a non-matching LY, while the
-        // RISE side (new-LY anticipation, raw <= 2) is unchanged. Proven by
-        // AntonioND vbl_irq_delay_timer real_gb: with LY=LYC=143 the ISR
-        // sweep reads C4 (flag set) at line cycles 447 but C0 (flag CLEAR,
-        // still mode 0, LY still 143) at 451; real CGB holds the flag
-        // through 451 (our existing model). Old-branch only (cmp.ly is the
-        // un-anticipated LY); LY 153 keeps its own early-0 path untouched.
-        if !mmio.is_cgb()
-            && cmp.ly == lc_master.ly
-            && lc_master.ly == 143
-            && cmp.time_to_next_ly <= 6
-        {
-            return Some(false);
-        }
+        // No DMG-specific line-tail drop window: the plain `> 2` compare below
+        // already reproduces the AntonioND vbl_irq_delay_timer real_gb sweep
+        // (LY=LYC=143: C4 at line cycle 447, C0 at 451). An earlier DMG branch
+        // here dropped the flag from cmp t2n <= 6, one probe too early — the
+        // ISR sweep lands on cmp t2n = 2 mod 4, so its last flag-set probe sits
+        // exactly at t2n = 6 and that branch cleared it (C0 for a wanted C4, the
+        // single failing cell in each of vbl_irq_delay_timer / mode1_disablestat
+        // / mode1_disablevbl / vbl_mode1_lcdoff real_gb).
         Some(lyc_reg == cmp.ly && cmp.time_to_next_ly > 2 - tail_hold)
     }
 
