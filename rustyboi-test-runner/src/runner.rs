@@ -695,6 +695,25 @@ fn compare_dump(
         ));
     }
 
+    // Diagnostic (RB_SRAM_VERBOSE=1): report EVERY mismatching cell instead of
+    // bailing at the first. The gbc-hw-tests captures are per-probe timing
+    // tables; the full cell list is what a timing derivation needs (same
+    // spirit as --ss-dump).
+    if std::env::var_os("RB_SRAM_VERBOSE").is_some() {
+        let mut diffs = Vec::new();
+        for (offset, (&want, &got)) in expected.iter().zip(actual.iter()).enumerate() {
+            if skip.iter().any(|range| range.contains(&offset)) {
+                continue;
+            }
+            if want != got {
+                diffs.push(format!("{offset:#06X}:want={want:#04X},got={got:#04X}"));
+            }
+        }
+        if !diffs.is_empty() {
+            return Err(format!("{label}: {} diffs: {}", diffs.len(), diffs.join(" ")));
+        }
+        return Ok(());
+    }
     for (offset, (&want, &got)) in expected.iter().zip(actual.iter()).enumerate() {
         if skip.iter().any(|range| range.contains(&offset)) {
             continue;

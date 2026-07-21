@@ -1021,6 +1021,12 @@ pub struct Mmio {
     lcd_raise_kind: u8,
     #[serde(skip, default)]
     staged_lcd_kind: u8,
+    // Set for a CGB-console M-cycle-grid halt wake (the quantized DMG-cart
+    // path): the woken stream's mid-scanline palette writes commit one dot
+    // earlier relative to the renderer column clock than the read anchor
+    // (daid ppu_scanline_bgp real-CGB capture). Cleared on the next HALT.
+    #[serde(skip, default)]
+    halt_wake_grid_cgb: bool,
 
     // (mooneye intr_2) master_cc at which the mode-2 STAT
     // IRQ event last raised IF (the m2 event time). A
@@ -1198,6 +1204,7 @@ impl Mmio {
             if_raise_cc: if_raise_cc_never(),
             lcd_raise_kind: 0,
             staged_lcd_kind: 0,
+            halt_wake_grid_cgb: false,
             last_m2_irq_fire_cc: None,
             last_m2_irq_ly: 0,
             cgb_m0_halt_ly_advance: None,
@@ -2203,6 +2210,15 @@ impl Mmio {
         self.staged_lcd_kind = k;
     }
 
+    pub(crate) fn set_halt_wake_grid_cgb(&mut self, v: bool) {
+        self.halt_wake_grid_cgb = v;
+    }
+
+    #[inline]
+    pub(crate) fn halt_wake_grid_cgb(&self) -> bool {
+        self.halt_wake_grid_cgb
+    }
+
     /// Initialize the timer's internal 16-bit counter at boot. See
     /// `Timer::set_internal_counter`.
     pub(crate) fn set_timer_internal_counter(&mut self, value: u16) {
@@ -3200,6 +3216,7 @@ impl Mmio {
         // A fresh HALT re-arms the wakeup-skew guard (the previous HALT-woken
         // stream has ended).
         self.halt.wakeup_skew = false;
+        self.halt_wake_grid_cgb = false;
         self.m2_halt_stall_charged_cgb = false;
         self.halt.wake_m0m2 = false;
         self.ssds_haltskew_ly_advance = false;

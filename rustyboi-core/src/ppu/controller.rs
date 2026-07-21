@@ -6245,6 +6245,14 @@ impl Ppu {
     // ISR write stream takes it (its boundaries would otherwise be a uniform 4
     // columns early); a busy-waiting stream (skew=false) keeps the flat latency.
     fn cgb_halt_wake_write_bias(mmio: &mmio::Mmio) -> i32 {
+        // A grid-woken CGB stream (quantized DMG-cart path) resumes at the
+        // hardware boundary, but its palette writes commit one dot earlier
+        // relative to the renderer column clock than the read anchor — the
+        // legacy model's read(+5cc)-vs-write(+4col) asymmetry, kept as a -1
+        // column write-phase constant (daid ppu_scanline_bgp real-CGB capture).
+        if mmio.halt_wake_grid_cgb() {
+            return -1;
+        }
         // An LYC/m1-woken stream that charged the +4 halt exit as a REAL stall
         // (sm83.rs) already writes at the hardware cc — re-adding the M-cycle
         // here would double it. The m2-woken stall keeps the co-tuned bias.
