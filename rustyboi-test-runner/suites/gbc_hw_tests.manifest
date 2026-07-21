@@ -19,21 +19,29 @@
 # conclusion the mooneye_wilbertpol ly_lyc/line-153 rows reached; gambatte's
 # explicitly-cgb04c oracles keep the CGB-C model, which is left untouched.
 # The GBP column is not graded (DMG silicon, covered by real_gb.sav). The AGB
-# column IS graded, one row per dir: real_gba_sp.sav on Hardware::AGB via a
-# `rev=agb` token (the row stays mode `cgb` so the default mode set selects
-# it; `rev=` overrides the machine). real_gba_sp.sav is the COMPLETE AGB
-# column -- every dir shipping real_gba.sav ships the SP capture too -- so one
-# row per dir covers the corpus without grading a single emulated machine
-# against two different physical units. 85/150 AGB rows pass: the AGB column
-# is a REAL blind spot, not a floor artifact. Every one of the 65 failures is
-# shared with the CGB column -- same unmodelled behaviour, not AGB-specific.
-# Grading this column found exactly one AGB-ONLY divergence, since FIXED:
-# timers/timer_reset_test failed on AGB while CGB passed a BYTE-IDENTICAL
-# capture, caused by an unverified AGB TAC-enable quirk (see Timer::set_tac).
-# Where real_gba.sav disagrees with real_gba_sp.sav (dma/hdma_valid_sources,
-# timers/tac_set_disabled, timers/tac_set_everything) the two AGB-family units
-# disagree with EACH OTHER; hdma_valid_sources is the one row we match on the
-# GBA unit but not the SP unit. Bench material, not an emulator verdict.
+# column IS graded, one row per dir, on Hardware::AGB via a `rev=agb` token
+# (the row stays mode `cgb` so the default mode set selects it; `rev=`
+# overrides the machine). The capture is real_gba.sav where the dir ships one
+# (31 dirs) and real_gba_sp.sav otherwise: the SP column is the COMPLETE one,
+# which is why it is the fallback, but availability was never authority, so
+# where both exist the plain GBA -- the AGB-family reference part -- is the
+# closer comparison. Which capture a dir uses depends only on which it ships,
+# never on which one rustyboi matches. The AGB column is a REAL blind spot,
+# not a floor artifact, and nearly every failure is shared with the CGB
+# column -- same unmodelled behaviour, not AGB-specific. Grading it found
+# exactly one AGB-ONLY divergence, since FIXED: timers/timer_reset_test failed
+# on AGB while CGB passed a BYTE-IDENTICAL capture, caused by an unverified
+# AGB TAC-enable quirk (see Timer::set_tac).
+#
+# Only three dirs disagree between the two AGB units at all: hdma_valid_sources
+# (1 byte of 148), tac_set_disabled (1145) and tac_set_everything (EXCLUDEd as
+# nondeterministic). On hdma_valid_sources the SP is the lone outlier -- offset
+# 0x21 reads 0xFF on the SP while the GBA unit, the CGB unit and rustyboi all
+# read 0x3E -- so grading it against the SP asserted a value two independent
+# physical units contradict. tac_set_disabled fails against BOTH units (at
+# 0x0E80 vs the GBA, 0x0EE0 vs the SP), so it is a genuine unmodelled
+# behaviour, not a unit-selection artifact. The GBA/SP split is bench material
+# about those units, not an emulator verdict.
 #
 # DO NOT model the AGB timers/tac_set_when_inc_{16,64,256,1024} rows. All four
 # fail identically on one cell class (TAC=$07 = enable + freq-3 written from
@@ -63,15 +71,15 @@
 # not_pressed (input-free) capture. Regenerate: tools/gen_manifests.py.
 gbc-hw-tests/cpu/cpu_registers_initial_dmg#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/cpu_registers_initial_dmg.gbc|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/cpu/cpu_registers_initial_dmg|dmg|sram|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/cpu_registers_initial_dmg.gbc|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/real_gb.sav|cart=lazy_sram_cs
-gbc-hw-tests/cpu/cpu_registers_initial_dmg#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/cpu_registers_initial_dmg.gbc|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/cpu/cpu_registers_initial_dmg#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/cpu_registers_initial_dmg.gbc|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/cpu/cpu_registers_initial_gbc#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_gbc/cpu_registers_initial_gbc.gbc|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_gbc/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/cpu/cpu_registers_initial_gbc#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_gbc/cpu_registers_initial_gbc.gbc|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_gbc/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/cpu/cpu_registers_initial_gbc#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_gbc/cpu_registers_initial_gbc.gbc|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_gbc/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/cpu/halt_bug_test#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/halt_bug_test/halt_bug_test.gbc|gb-test-roms/gbc-hw-tests/cpu/halt_bug_test/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/cpu/halt_bug_test#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/halt_bug_test/halt_bug_test.gbc|gb-test-roms/gbc-hw-tests/cpu/halt_bug_test/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/cpu/halt_bug_timing#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/halt_bug_timing/halt_bug_timing.gbc|gb-test-roms/gbc-hw-tests/cpu/halt_bug_timing/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/cpu/halt_bug_timing#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/halt_bug_timing/halt_bug_timing.gbc|gb-test-roms/gbc-hw-tests/cpu/halt_bug_timing/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/cpu/halt_if#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/halt_if/halt_if.gbc|gb-test-roms/gbc-hw-tests/cpu/halt_if/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/cpu/halt_if#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/halt_if/halt_if.gbc|gb-test-roms/gbc-hw-tests/cpu/halt_if/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/cpu/halt_if#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/halt_if/halt_if.gbc|gb-test-roms/gbc-hw-tests/cpu/halt_if/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/cpu/halt_strange_things#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/halt_strange_things/halt_strange_things.gbc|gb-test-roms/gbc-hw-tests/cpu/halt_strange_things/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/cpu/halt_strange_things#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/halt_strange_things/halt_strange_things.gbc|gb-test-roms/gbc-hw-tests/cpu/halt_strange_things/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/cpu/speed_change_cancel#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/speed_change_cancel/speed_change_cancel.gbc|gb-test-roms/gbc-hw-tests/cpu/speed_change_cancel/real_gbc_not_pressed.sav|cart=lazy_sram_cs|rev=cgbe
@@ -80,24 +88,24 @@ gbc-hw-tests/cpu/speed_change_timing_coarse#agb|cgb|sram|gb-test-roms/gbc-hw-tes
 gbc-hw-tests/cpu/speed_change_timing_fine#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/speed_change_timing_fine/speed_change_timing_fine.gbc|gb-test-roms/gbc-hw-tests/cpu/speed_change_timing_fine/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/cpu/speed_change_timing_fine#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/speed_change_timing_fine/speed_change_timing_fine.gbc|gb-test-roms/gbc-hw-tests/cpu/speed_change_timing_fine/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/dma_copy_during_halt_speed#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_copy_during_halt_speed/dma_copy_during_halt_speed.gbc|gb-test-roms/gbc-hw-tests/dma/dma_copy_during_halt_speed/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/dma/dma_copy_during_halt_speed#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_copy_during_halt_speed/dma_copy_during_halt_speed.gbc|gb-test-roms/gbc-hw-tests/dma/dma_copy_during_halt_speed/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/dma/dma_copy_during_halt_speed#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_copy_during_halt_speed/dma_copy_during_halt_speed.gbc|gb-test-roms/gbc-hw-tests/dma/dma_copy_during_halt_speed/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/dma_halt_stop_speedchange#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_halt_stop_speedchange/dma_halt_stop_speedchange.gbc|gb-test-roms/gbc-hw-tests/dma/dma_halt_stop_speedchange/real_gbc.sav|cart=lazy_sram_cs|input=0:a|rev=cgbe
-gbc-hw-tests/dma/dma_halt_stop_speedchange#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_halt_stop_speedchange/dma_halt_stop_speedchange.gbc|gb-test-roms/gbc-hw-tests/dma/dma_halt_stop_speedchange/real_gba_sp.sav|cart=lazy_sram_cs|input=0:a|rev=agb
+gbc-hw-tests/dma/dma_halt_stop_speedchange#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_halt_stop_speedchange/dma_halt_stop_speedchange.gbc|gb-test-roms/gbc-hw-tests/dma/dma_halt_stop_speedchange/real_gba.sav|cart=lazy_sram_cs|input=0:a|rev=agb
 gbc-hw-tests/dma/dma_restart#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_restart/dma_restart.gbc|gb-test-roms/gbc-hw-tests/dma/dma_restart/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/dma/dma_restart#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_restart/dma_restart.gbc|gb-test-roms/gbc-hw-tests/dma/dma_restart/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/dma/dma_restart#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_restart/dma_restart.gbc|gb-test-roms/gbc-hw-tests/dma/dma_restart/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/dma_timing_1#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_timing_1/dma_timing.gbc|gb-test-roms/gbc-hw-tests/dma/dma_timing_1/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/dma/dma_timing_1#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_timing_1/dma_timing.gbc|gb-test-roms/gbc-hw-tests/dma/dma_timing_1/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/dma/dma_timing_1#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_timing_1/dma_timing.gbc|gb-test-roms/gbc-hw-tests/dma/dma_timing_1/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/dma_timing_2#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_timing_2/dma_timing.gbc|gb-test-roms/gbc-hw-tests/dma/dma_timing_2/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/dma/dma_timing_2#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_timing_2/dma_timing.gbc|gb-test-roms/gbc-hw-tests/dma/dma_timing_2/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/dma/dma_timing_2#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_timing_2/dma_timing.gbc|gb-test-roms/gbc-hw-tests/dma/dma_timing_2/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/dma_timing_dblspeed#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_timing_dblspeed/dma_timing_dblspeed.gbc|gb-test-roms/gbc-hw-tests/dma/dma_timing_dblspeed/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/dma/dma_timing_dblspeed#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_timing_dblspeed/dma_timing_dblspeed.gbc|gb-test-roms/gbc-hw-tests/dma/dma_timing_dblspeed/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/dma/dma_timing_dblspeed#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_timing_dblspeed/dma_timing_dblspeed.gbc|gb-test-roms/gbc-hw-tests/dma/dma_timing_dblspeed/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/dma_timing_lcd_on#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_timing_lcd_on/dma_timing_lcd_on.gbc|gb-test-roms/gbc-hw-tests/dma/dma_timing_lcd_on/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/dma/dma_timing_lcd_on#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_timing_lcd_on/dma_timing_lcd_on.gbc|gb-test-roms/gbc-hw-tests/dma/dma_timing_lcd_on/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/dma/dma_timing_lcd_on#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_timing_lcd_on/dma_timing_lcd_on.gbc|gb-test-roms/gbc-hw-tests/dma/dma_timing_lcd_on/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/dma_valid_sources_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_dmg_mode/dma_valid_sources_dmg.gbc|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_dmg_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/dma/dma_valid_sources_dmg_mode|dmg|sram|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_dmg_mode/dma_valid_sources_dmg.gbc|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_dmg_mode/real_gb.sav|cart=lazy_sram_cs
-gbc-hw-tests/dma/dma_valid_sources_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_dmg_mode/dma_valid_sources_dmg.gbc|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_dmg_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/dma/dma_valid_sources_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_dmg_mode/dma_valid_sources_dmg.gbc|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_dmg_mode/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/dma_valid_sources_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_gbc_mode/dma_valid_sources_gbc.gbc|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_gbc_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/dma/dma_valid_sources_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_gbc_mode/dma_valid_sources_gbc.gbc|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_gbc_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/dma/dma_valid_sources_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_gbc_mode/dma_valid_sources_gbc.gbc|gb-test-roms/gbc-hw-tests/dma/dma_valid_sources_gbc_mode/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/gdma_irq#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/gdma_irq/gdma_irq.gbc|gb-test-roms/gbc-hw-tests/dma/gdma_irq/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/dma/gdma_irq#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/gdma_irq/gdma_irq.gbc|gb-test-roms/gbc-hw-tests/dma/gdma_irq/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/gdma_timing_coarse#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/gdma_timing_coarse/gdma_timing_coarse.gbc|gb-test-roms/gbc-hw-tests/dma/gdma_timing_coarse/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
@@ -117,9 +125,9 @@ gbc-hw-tests/dma/hdma_start_3#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_st
 gbc-hw-tests/dma/hdma_timing_fine#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_timing_fine/hdma_timing_fine.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_timing_fine/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/dma/hdma_timing_fine#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_timing_fine/hdma_timing_fine.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_timing_fine/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/hdma_valid_dest_swap_bank#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_valid_dest_swap_bank/hdma_valid_dest_swap_bank.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_valid_dest_swap_bank/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/dma/hdma_valid_dest_swap_bank#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_valid_dest_swap_bank/hdma_valid_dest_swap_bank.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_valid_dest_swap_bank/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/dma/hdma_valid_dest_swap_bank#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_valid_dest_swap_bank/hdma_valid_dest_swap_bank.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_valid_dest_swap_bank/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/hdma_valid_sources#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_valid_sources/hdma_valid_sources.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_valid_sources/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/dma/hdma_valid_sources#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_valid_sources/hdma_valid_sources.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_valid_sources/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/dma/hdma_valid_sources#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_valid_sources/hdma_valid_sources.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_valid_sources/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/interrupts/halt_exit_timings_ime_disabled_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/interrupts/halt_exit_timings_ime_disabled_dmg_mode/halt_exit_timings_ime_disabled.gbc|gb-test-roms/gbc-hw-tests/interrupts/halt_exit_timings_ime_disabled_dmg_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/interrupts/halt_exit_timings_ime_disabled_dmg_mode|dmg|sram|gb-test-roms/gbc-hw-tests/interrupts/halt_exit_timings_ime_disabled_dmg_mode/halt_exit_timings_ime_disabled.gbc|gb-test-roms/gbc-hw-tests/interrupts/halt_exit_timings_ime_disabled_dmg_mode/real_gb.sav|cart=lazy_sram_cs
 gbc-hw-tests/interrupts/halt_exit_timings_ime_disabled_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/interrupts/halt_exit_timings_ime_disabled_dmg_mode/halt_exit_timings_ime_disabled.gbc|gb-test-roms/gbc-hw-tests/interrupts/halt_exit_timings_ime_disabled_dmg_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
@@ -172,7 +180,7 @@ gbc-hw-tests/interrupts/vbl_irq_delay_timer_gbc_mode#agb|cgb|sram|gb-test-roms/g
 gbc-hw-tests/lcd/last_ly_clocks#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/last_ly_clocks/last_ly_clocks.gbc|gb-test-roms/gbc-hw-tests/lcd/last_ly_clocks/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/lcd/last_ly_clocks#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/last_ly_clocks/last_ly_clocks.gbc|gb-test-roms/gbc-hw-tests/lcd/last_ly_clocks/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/lcd/last_ly_ly_change#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/last_ly_ly_change/last_ly_ly_change.gbc|gb-test-roms/gbc-hw-tests/lcd/last_ly_ly_change/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/lcd/last_ly_ly_change#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/last_ly_ly_change/last_ly_ly_change.gbc|gb-test-roms/gbc-hw-tests/lcd/last_ly_ly_change/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/lcd/last_ly_ly_change#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/last_ly_ly_change/last_ly_ly_change.gbc|gb-test-roms/gbc-hw-tests/lcd/last_ly_ly_change/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/alt_if_timings_lyc_1_143_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/alt_if_timings_lyc_1_143_dmg_mode/lcd_frame_timings_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/alt_if_timings_lyc_1_143_dmg_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/alt_if_timings_lyc_1_143_dmg_mode|dmg|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/alt_if_timings_lyc_1_143_dmg_mode/lcd_frame_timings_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/alt_if_timings_lyc_1_143_dmg_mode/real_gb.sav|cart=lazy_sram_cs
 gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/alt_if_timings_lyc_1_143_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/alt_if_timings_lyc_1_143_dmg_mode/lcd_frame_timings_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/alt_if_timings_lyc_1_143_dmg_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
@@ -202,7 +210,7 @@ gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_dmg_mode#agb|c
 gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_dmg_mode|dmg|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_dmg_mode/lcd_frame_timings_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_dmg_mode/real_gb.sav|cart=lazy_sram_cs
 gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_dmg_mode/lcd_frame_timings_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_dmg_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_gbc_mode/lcd_frame_timings_gbc_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_gbc_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_gbc_mode/lcd_frame_timings_gbc_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_gbc_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_gbc_mode/lcd_frame_timings_gbc_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_0_gbc_mode/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_152_153_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_152_153_dmg_mode/lcd_frame_timings_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_152_153_dmg_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_152_153_dmg_mode|dmg|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_152_153_dmg_mode/lcd_frame_timings_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_152_153_dmg_mode/real_gb.sav|cart=lazy_sram_cs
 gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_152_153_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_152_153_dmg_mode/lcd_frame_timings_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/ly_equals_lyc/ly_timings_lyc_152_153_dmg_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
@@ -260,9 +268,9 @@ gbc-hw-tests/lcd/lcd_frame_timings/mode1/timings_mode1int_gbc_mode#agb|cgb|sram|
 gbc-hw-tests/lcd/lcd_frame_timings/mode1/timings_mode1int_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/timings_mode1int_gbc_mode/lcd_frame_timings_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/timings_mode1int_gbc_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_dmg_mode/mode1_disableint_dmg.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_dmg_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_dmg_mode|dmg|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_dmg_mode/mode1_disableint_dmg.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_dmg_mode/real_gb.sav|cart=lazy_sram_cs
-gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_dmg_mode/mode1_disableint_dmg.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_dmg_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_dmg_mode/mode1_disableint_dmg.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_dmg_mode/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_gbc_mode/mode1_disableint_gbc.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_gbc_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_gbc_mode/mode1_disableint_gbc.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_gbc_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_gbc_mode/mode1_disableint_gbc.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode1/vbl_mode1_lcdoff_gbc_mode/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/lcd/lcd_frame_timings/mode2/timings_mode2int_ly0_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode2/timings_mode2int_ly0_dmg_mode/lcd_frame_timings_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode2/timings_mode2int_ly0_dmg_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/lcd/lcd_frame_timings/mode2/timings_mode2int_ly0_dmg_mode|dmg|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode2/timings_mode2int_ly0_dmg_mode/lcd_frame_timings_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode2/timings_mode2int_ly0_dmg_mode/real_gb.sav|cart=lazy_sram_cs
 gbc-hw-tests/lcd/lcd_frame_timings/mode2/timings_mode2int_ly0_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode2/timings_mode2int_ly0_dmg_mode/lcd_frame_timings_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/lcd_frame_timings/mode2/timings_mode2int_ly0_dmg_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
@@ -285,12 +293,12 @@ gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_dmg_mode#agb|cgb|sram|gb-test-roms
 gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_dmg_mode|dmg|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_dmg_mode/mode2_read_oam_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_dmg_mode/real_gb.sav|cart=lazy_sram_cs
 gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_dmg_mode/mode2_read_oam_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_dmg_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_gbc_mode/mode2_read_oam.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_gbc_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_gbc_mode/mode2_read_oam.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_gbc_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_gbc_mode/mode2_read_oam.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_dis_gbc_mode/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_dmg_mode/mode2_read_oam_dmg_mode_spr_en.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_dmg_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_dmg_mode|dmg|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_dmg_mode/mode2_read_oam_dmg_mode_spr_en.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_dmg_mode/real_gb.sav|cart=lazy_sram_cs
 gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_dmg_mode/mode2_read_oam_dmg_mode_spr_en.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_dmg_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_gbc_mode/mode2_read_oam_spr_en.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_gbc_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_gbc_mode/mode2_read_oam_spr_en.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_gbc_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_gbc_mode/mode2_read_oam_spr_en.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_read_oam_spr_en_gbc_mode/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/lcd/mode2/mode2_stat_timing_spr_dis_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_stat_timing_spr_dis_dmg_mode/mode2_timing_spr_dis.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_stat_timing_spr_dis_dmg_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/lcd/mode2/mode2_stat_timing_spr_dis_dmg_mode|dmg|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_stat_timing_spr_dis_dmg_mode/mode2_timing_spr_dis.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_stat_timing_spr_dis_dmg_mode/real_gb.sav|cart=lazy_sram_cs
 gbc-hw-tests/lcd/mode2/mode2_stat_timing_spr_dis_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_stat_timing_spr_dis_dmg_mode/mode2_timing_spr_dis.gbc|gb-test-roms/gbc-hw-tests/lcd/mode2/mode2_stat_timing_spr_dis_dmg_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
@@ -314,22 +322,22 @@ gbc-hw-tests/lcd/mode2/mode2_stat_timing_spr_en_gbc_mode_8x16#agb|cgb|sram|gb-te
 gbc-hw-tests/lcd/mode3/mode3_stat_timing_spr_en_gbc_mode_8x16#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode3/mode3_stat_timing_spr_en_gbc_mode_8x16/mode3_timing_spr_en.gbc|gb-test-roms/gbc-hw-tests/lcd/mode3/mode3_stat_timing_spr_en_gbc_mode_8x16/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/lcd/mode3/mode3_stat_timing_spr_en_gbc_mode_8x16#agb|cgb|sram|gb-test-roms/gbc-hw-tests/lcd/mode3/mode3_stat_timing_spr_en_gbc_mode_8x16/mode3_timing_spr_en.gbc|gb-test-roms/gbc-hw-tests/lcd/mode3/mode3_stat_timing_spr_en_gbc_mode_8x16/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/memory/echo_ram_read#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/echo_ram_read/echo_ram_read.gbc|gb-test-roms/gbc-hw-tests/memory/echo_ram_read/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/memory/echo_ram_read#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/echo_ram_read/echo_ram_read.gbc|gb-test-roms/gbc-hw-tests/memory/echo_ram_read/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/memory/echo_ram_read#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/echo_ram_read/echo_ram_read.gbc|gb-test-roms/gbc-hw-tests/memory/echo_ram_read/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/memory/echo_ram_write#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/echo_ram_write/echo_ram_write.gbc|gb-test-roms/gbc-hw-tests/memory/echo_ram_write/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/memory/echo_ram_write#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/echo_ram_write/echo_ram_write.gbc|gb-test-roms/gbc-hw-tests/memory/echo_ram_write/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/memory/echo_ram_write#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/echo_ram_write/echo_ram_write.gbc|gb-test-roms/gbc-hw-tests/memory/echo_ram_write/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/memory/misc_rw_registers_gb_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/misc_rw_registers_gb_mode/misc_rw_registers_gb_mode.gbc|gb-test-roms/gbc-hw-tests/memory/misc_rw_registers_gb_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/memory/misc_rw_registers_gb_mode|dmg|sram|gb-test-roms/gbc-hw-tests/memory/misc_rw_registers_gb_mode/misc_rw_registers_gb_mode.gbc|gb-test-roms/gbc-hw-tests/memory/misc_rw_registers_gb_mode/real_gb.sav|cart=lazy_sram_cs
 gbc-hw-tests/memory/misc_rw_registers_gb_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/misc_rw_registers_gb_mode/misc_rw_registers_gb_mode.gbc|gb-test-roms/gbc-hw-tests/memory/misc_rw_registers_gb_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/memory/misc_rw_registers_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/misc_rw_registers_gbc_mode/misc_rw_registers_gbc_mode.gbc|gb-test-roms/gbc-hw-tests/memory/misc_rw_registers_gbc_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/memory/misc_rw_registers_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/misc_rw_registers_gbc_mode/misc_rw_registers_gbc_mode.gbc|gb-test-roms/gbc-hw-tests/memory/misc_rw_registers_gbc_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/memory/oam_echo_ram_lcd_on#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_lcd_on/oam_echo_ram_lcd_on.gbc|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_lcd_on/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/memory/oam_echo_ram_lcd_on#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_lcd_on/oam_echo_ram_lcd_on.gbc|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_lcd_on/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/memory/oam_echo_ram_lcd_on#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_lcd_on/oam_echo_ram_lcd_on.gbc|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_lcd_on/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/memory/oam_echo_ram_read#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read/oam_echo_ram_read.gbc|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/memory/oam_echo_ram_read#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read/oam_echo_ram_read.gbc|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/memory/oam_echo_ram_read#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read/oam_echo_ram_read.gbc|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/memory/oam_echo_ram_read_2#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read_2/oam_echo_ram_read_2.gbc|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read_2/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/memory/oam_echo_ram_read_2#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read_2/oam_echo_ram_read_2.gbc|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read_2/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/memory/oam_echo_ram_read_2#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read_2/oam_echo_ram_read_2.gbc|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read_2/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/memory/oam_echo_ram_read_gbc_in_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read_gbc_in_dmg_mode/oam_echo_ram_read_gbc_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read_gbc_in_dmg_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/memory/oam_echo_ram_read_gbc_in_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read_gbc_in_dmg_mode/oam_echo_ram_read_gbc_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read_gbc_in_dmg_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/memory/oam_echo_ram_read_gbc_in_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read_gbc_in_dmg_mode/oam_echo_ram_read_gbc_dmg_mode.gbc|gb-test-roms/gbc-hw-tests/memory/oam_echo_ram_read_gbc_in_dmg_mode/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/memory/timer_read_write_registers#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/timer_read_write_registers/timer_rw_regs.gbc|gb-test-roms/gbc-hw-tests/memory/timer_read_write_registers/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/memory/timer_read_write_registers#agb|cgb|sram|gb-test-roms/gbc-hw-tests/memory/timer_read_write_registers/timer_rw_regs.gbc|gb-test-roms/gbc-hw-tests/memory/timer_read_write_registers/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/serial/sc_change_freq_gbc#agb|cgb|sram|gb-test-roms/gbc-hw-tests/serial/sc_change_freq_gbc/sc_change_freq_gbc.gbc|rustyboi-test-runner/suites/refs/gbc-hw-tests/serial/sc_change_freq_gbc.gbc.sav|cart=lazy_sram_cs|rev=cgbe
@@ -362,13 +370,13 @@ gbc-hw-tests/timers/div_resets_timer_overflow#agb|cgb|sram|gb-test-roms/gbc-hw-t
 gbc-hw-tests/timers/div_resets_timer_overflow#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/div_resets_timer_overflow/div_resets_timer_overflow.gbc|gb-test-roms/gbc-hw-tests/timers/div_resets_timer_overflow/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/timers/sys_clocks_init_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_dmg_mode/sys_clocks_init.gbc|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_dmg_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/timers/sys_clocks_init_dmg_mode|dmg|sram|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_dmg_mode/sys_clocks_init.gbc|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_dmg_mode/real_gb.sav|cart=lazy_sram_cs
-gbc-hw-tests/timers/sys_clocks_init_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_dmg_mode/sys_clocks_init.gbc|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_dmg_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/timers/sys_clocks_init_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_dmg_mode/sys_clocks_init.gbc|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_dmg_mode/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/timers/sys_clocks_init_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_gbc_mode/sys_clocks_init_gbc_mode.gbc|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_gbc_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/timers/sys_clocks_init_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_gbc_mode/sys_clocks_init_gbc_mode.gbc|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_gbc_mode/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/timers/sys_clocks_init_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_gbc_mode/sys_clocks_init_gbc_mode.gbc|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_gbc_mode/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/timers/tac_set_disabled#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_disabled/tac_set_disable.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_disabled/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/timers/tac_set_disabled#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_disabled/tac_set_disable.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_disabled/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/timers/tac_set_disabled#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_disabled/tac_set_disable.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_disabled/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/timers/tac_set_enabled#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_enabled/tac_set_enabled.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_enabled/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/timers/tac_set_enabled#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_enabled/tac_set_enabled.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_enabled/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/timers/tac_set_enabled#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_enabled/tac_set_enabled.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_enabled/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/timers/tac_set_timer_disabled#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_timer_disabled/tac_set_timer_disabled.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_timer_disabled/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/timers/tac_set_timer_disabled_2#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_timer_disabled_2/tac_set_timer_disabled_2.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_timer_disabled_2/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/timers/tac_set_timer_disabled_2#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_timer_disabled_2/tac_set_timer_disabled_2.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_timer_disabled_2/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb

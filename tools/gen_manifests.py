@@ -1308,15 +1308,34 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
                 if ref is not None:
                     emit(test_id, "dmg", rom, ref)
 
-        # AGB column: real_gba_sp.sav, run on Hardware::AGB via `rev=agb` (the
-        # row stays mode `cgb` so it is selected by the default mode set; the
-        # runner's `rev=` token overrides the machine). real_gba_sp.sav is the
-        # COMPLETE AGB column -- every dir that ships real_gba.sav ships the SP
-        # capture too -- so one row per dir covers the corpus without grading a
-        # single emulated machine against two different physical units.
-        agb_sav = d / "real_gba_sp.sav"
-        if agb_sav.is_file():
-            ref = graded_ref("real_gba_sp.sav", "gbasp")
+        # AGB column: run on Hardware::AGB via `rev=agb` (the row stays mode
+        # `cgb` so it is selected by the default mode set; the runner's `rev=`
+        # token overrides the machine). One row per dir, so a single emulated
+        # machine is never graded against two different physical units.
+        #
+        # Prefer real_gba.sav -- the plain GBA, the AGB-family reference part --
+        # and fall back to real_gba_sp.sav, which is used because it is the
+        # COMPLETE column (every dir ships it; real_gba.sav covers only 31).
+        # The SP was never the more authoritative capture, only the more
+        # available one, so where both exist the plain GBA is the closer
+        # comparison for Hardware::AGB. This is decided by which captures a dir
+        # ships, never by which one we happen to match.
+        #
+        # Only three dirs disagree between the two units at all:
+        # dma/hdma_valid_sources (1 byte of 148), timers/tac_set_disabled (1145)
+        # and timers/tac_set_everything (EXCLUDEd as nondeterministic). On
+        # hdma_valid_sources the SP is the lone outlier -- offset 0x21 reads
+        # 0xFF there while the GBA unit, the CGB unit and rustyboi all read
+        # 0x3E -- so the old policy graded us against a value two independent
+        # physical units contradict. The GBA/SP split is real bench material
+        # about those units, not an emulator verdict.
+        agb_sav = next(
+            (n for n in ("real_gba.sav", "real_gba_sp.sav")
+             if (d / n).is_file()),
+            None,
+        )
+        if agb_sav:
+            ref = graded_ref(agb_sav, "gba" if agb_sav == "real_gba.sav" else "gbasp")
             if ref is not None:
                 emit(test_id, "cgb", rom, ref, rev="|rev=agb")
 
@@ -1345,21 +1364,29 @@ _GBCHW_HEADER = [
     "conclusion the mooneye_wilbertpol ly_lyc/line-153 rows reached; gambatte's",
     "explicitly-cgb04c oracles keep the CGB-C model, which is left untouched.",
     "The GBP column is not graded (DMG silicon, covered by real_gb.sav). The AGB",
-    "column IS graded, one row per dir: real_gba_sp.sav on Hardware::AGB via a",
-    "`rev=agb` token (the row stays mode `cgb` so the default mode set selects",
-    "it; `rev=` overrides the machine). real_gba_sp.sav is the COMPLETE AGB",
-    "column -- every dir shipping real_gba.sav ships the SP capture too -- so one",
-    "row per dir covers the corpus without grading a single emulated machine",
-    "against two different physical units. 85/150 AGB rows pass: the AGB column",
-    "is a REAL blind spot, not a floor artifact. Every one of the 65 failures is",
-    "shared with the CGB column -- same unmodelled behaviour, not AGB-specific.",
-    "Grading this column found exactly one AGB-ONLY divergence, since FIXED:",
-    "timers/timer_reset_test failed on AGB while CGB passed a BYTE-IDENTICAL",
-    "capture, caused by an unverified AGB TAC-enable quirk (see Timer::set_tac).",
-    "Where real_gba.sav disagrees with real_gba_sp.sav (dma/hdma_valid_sources,",
-    "timers/tac_set_disabled, timers/tac_set_everything) the two AGB-family units",
-    "disagree with EACH OTHER; hdma_valid_sources is the one row we match on the",
-    "GBA unit but not the SP unit. Bench material, not an emulator verdict.",
+    "column IS graded, one row per dir, on Hardware::AGB via a `rev=agb` token",
+    "(the row stays mode `cgb` so the default mode set selects it; `rev=`",
+    "overrides the machine). The capture is real_gba.sav where the dir ships one",
+    "(31 dirs) and real_gba_sp.sav otherwise: the SP column is the COMPLETE one,",
+    "which is why it is the fallback, but availability was never authority, so",
+    "where both exist the plain GBA -- the AGB-family reference part -- is the",
+    "closer comparison. Which capture a dir uses depends only on which it ships,",
+    "never on which one rustyboi matches. The AGB column is a REAL blind spot,",
+    "not a floor artifact, and nearly every failure is shared with the CGB",
+    "column -- same unmodelled behaviour, not AGB-specific. Grading it found",
+    "exactly one AGB-ONLY divergence, since FIXED: timers/timer_reset_test failed",
+    "on AGB while CGB passed a BYTE-IDENTICAL capture, caused by an unverified",
+    "AGB TAC-enable quirk (see Timer::set_tac).",
+    "",
+    "Only three dirs disagree between the two AGB units at all: hdma_valid_sources",
+    "(1 byte of 148), tac_set_disabled (1145) and tac_set_everything (EXCLUDEd as",
+    "nondeterministic). On hdma_valid_sources the SP is the lone outlier -- offset",
+    "0x21 reads 0xFF on the SP while the GBA unit, the CGB unit and rustyboi all",
+    "read 0x3E -- so grading it against the SP asserted a value two independent",
+    "physical units contradict. tac_set_disabled fails against BOTH units (at",
+    "0x0E80 vs the GBA, 0x0EE0 vs the SP), so it is a genuine unmodelled",
+    "behaviour, not a unit-selection artifact. The GBA/SP split is bench material",
+    "about those units, not an emulator verdict.",
     "",
     "DO NOT model the AGB timers/tac_set_when_inc_{16,64,256,1024} rows. All four",
     "fail identically on one cell class (TAC=$07 = enable + freq-3 written from",
