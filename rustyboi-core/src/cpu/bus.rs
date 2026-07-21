@@ -649,7 +649,14 @@ impl<'a> Bus<'a> {
     /// falls back to the FF41 mode bits.
     fn ppu_blocks(&self, addr: u16, is_read: bool, access_cc: u64) -> bool {
         let is_vram = (0x8000..=0x9FFF).contains(&addr);
-        let is_oam = (0xFE00..=0xFE9F).contains(&addr);
+        // The OAM-high cells $FEA0-$FEFF sit behind the same OAM bus gate as the
+        // 160 sprite bytes on CGB silicon, so mode 2/3 locks them too (reads
+        // 0xFF, writes dropped) -- gbc-hw-tests oam_echo_ram_lcd_on reads the
+        // whole $FE00-$FEFF span across the mode window and expects 0xFF from
+        // $FEA0 up. DMG does not gate them (its decode answers from a separate
+        // path), so this stays CGB-family only.
+        let is_oam = (0xFE00..=0xFE9F).contains(&addr)
+            || ((0xFEA0..=0xFEFF).contains(&addr) && self.mmio.is_cgb());
         let is_cgb_pal = (addr == 0xFF69 || addr == 0xFF6B) && self.mmio.is_cgb_features_enabled();
         if !(is_vram || is_oam || is_cgb_pal) {
             return false;
