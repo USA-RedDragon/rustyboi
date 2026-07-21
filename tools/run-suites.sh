@@ -26,7 +26,7 @@
 # see the manifest header and rustyboi-test-runner/suites/gambatte.manifest).
 #
 # Env knobs:
-#   RB_MODE     hardware modes            (default: dmg,cgb)
+#   RB_MODE     hardware modes            (default: per-suite, see suite_mode)
 #   RB_JOBS     parallel case workers     (default: nproc-derived)
 #   RB_ROMS     ROM dir                   (default: gb-test-roms)
 #   RB_BIN      runner binary             (default: target/release/rustyboi-test-runner)
@@ -78,7 +78,8 @@ GBCHW_URL="https://github.com/AntonioND/gbc-hw-tests.git"
 
 # --- config ------------------------------------------------------------------
 ROMS="${RB_ROMS:-gb-test-roms}"
-MODE="${RB_MODE:-dmg,cgb}"
+# Empty = per-suite auto (suite_mode). An explicit RB_MODE is honoured verbatim.
+MODE="${RB_MODE:-}"
 SUITES_DIR="rustyboi-test-runner/suites"
 # RB_TARGET cross-compiles to a Rust target triple (built + run under its
 # artifact dir); empty = the native host build. On a foreign arch the built
@@ -194,6 +195,31 @@ PY="$(command -v python3 || command -v python || true)"
 # a prerequisite here, for zip extraction).
 json_field() {
     "$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$1" "$2"
+}
+
+# suite_mode <manifest>  -> the --mode set to run this suite with.
+#
+# An explicit RB_MODE wins verbatim. Otherwise: dmg,cgb (the historical
+# default) plus `agb` IFF the manifest actually declares literal agb rows.
+# Without this, agb-mode rows parse fine, look covered, and never execute --
+# `rustyboi.manifest`'s 4 licensee_boot_div.agbcompat_* rows were dark.
+#
+# Scoped per suite rather than a global `dmg,cgb,agb` on purpose: in
+# `cases_for_rom`, enabling agb ALSO clones every CGB case into an AGB twin
+# graded against the same CGB references. That path fires for `gambatte`-graded
+# rows (mode `auto`), so a global agb would silently add thousands of twin
+# cases to the gambatte suite and move its fail ceiling. Keying off the literal
+# mode column keeps agb confined to the suites that actually ask for it.
+#
+# (A pure "union of modes present" default cannot work: gambatte's 3524 rows
+# all carry mode `auto`, so their real modes never appear in the column.)
+suite_mode() {
+    if [ -n "$MODE" ]; then printf '%s' "$MODE"; return; fi
+    if awk -F'|' '/^[^#]/ && $2=="agb" {found=1; exit} END {exit !found}' "$1"; then
+        printf 'dmg,cgb,agb'
+    else
+        printf 'dmg,cgb'
+    fi
 }
 
 # --- setup: fetch ROMs (idempotent) ------------------------------------------
@@ -500,9 +526,10 @@ run_suite() {
     # would print a confident "FAIL ... REGRESSION" for a suite that never ran.
     [ -z "$(unmeasurable_suites "$suite")" ] || return 2
 
-    local floor frames
+    local floor frames smode
     floor="$(printf '%s' "$row" | cut -d' ' -f1)"
     frames="$(printf '%s' "$row" | cut -d' ' -f2)"
+    smode="$(suite_mode "$manifest")"
 
     local out
     out="$(mktemp)"
@@ -515,15 +542,15 @@ run_suite() {
         # in-process threads. Coverage-instrumented builds share one counter
         # array per process, so threads false-share it catastrophically;
         # separate processes get private counters (merged via %p profraws).
-        log "Running suite '$suite' (mode=$MODE shards=$RB_SHARDS jobs=1 ${frames#-} frames)"
+        log "Running suite '$suite' (mode=$smode shards=$RB_SHARDS jobs=1 ${frames#-} frames)"
         local k
         for k in $(seq 1 "$RB_SHARDS"); do
             if [ "$frames" != "-" ]; then
-                run_bin --manifest "$manifest" --mode "$MODE" --jobs 1 \
+                run_bin --manifest "$manifest" --mode "$smode" --jobs 1 \
                     --shard "$k/$RB_SHARDS" --frames "$frames" \
                     --json "$out.$k" >/dev/null 2>&1 &
             else
-                run_bin --manifest "$manifest" --mode "$MODE" --jobs 1 \
+                run_bin --manifest "$manifest" --mode "$smode" --jobs 1 \
                     --shard "$k/$RB_SHARDS" --json "$out.$k" >/dev/null 2>&1 &
             fi
         done
@@ -540,12 +567,12 @@ json.dump(tot, open(out, "w"))
 PY
         rm -f "$out".*
     elif [ "$frames" != "-" ]; then
-        log "Running suite '$suite' (mode=$MODE jobs=$JOBS ${frames#-} frames)"
-        run_bin --manifest "$manifest" --mode "$MODE" --jobs "$JOBS" \
+        log "Running suite '$suite' (mode=$smode jobs=$JOBS ${frames#-} frames)"
+        run_bin --manifest "$manifest" --mode "$smode" --jobs "$JOBS" \
             --frames "$frames" --json "$out" || true
     else
-        log "Running suite '$suite' (mode=$MODE jobs=$JOBS ${frames#-} frames)"
-        run_bin --manifest "$manifest" --mode "$MODE" --jobs "$JOBS" \
+        log "Running suite '$suite' (mode=$smode jobs=$JOBS ${frames#-} frames)"
+        run_bin --manifest "$manifest" --mode "$smode" --jobs "$JOBS" \
             --json "$out" || true   # runner exits 1 on any fail; we gate on counts
     fi
 
@@ -683,16 +710,19 @@ generate_report() {
     fi
     printf '| Suite | Passing | Total |\n'
     printf '| :--- | ---: | ---: |\n'
-    local suite row frames out passed total tp=0 tt=0
+    local suite row frames out passed total smode tp=0 tt=0
     for suite in $ORDER; do
         row="$(threshold "$suite")"
         frames="$(printf '%s' "$row" | cut -d' ' -f2)"
+        # Same per-suite mode set the gate uses, so the table and the floors
+        # are measured over identical case sets.
+        smode="$(suite_mode "$SUITES_DIR/$suite.manifest")"
         out="$(mktemp)"
         if [ "$frames" != "-" ]; then
-            run_bin --manifest "$SUITES_DIR/$suite.manifest" --mode "$MODE" \
+            run_bin --manifest "$SUITES_DIR/$suite.manifest" --mode "$smode" \
                 --jobs "$JOBS" --frames "$frames" --json "$out" >/dev/null 2>&1 || true
         else
-            run_bin --manifest "$SUITES_DIR/$suite.manifest" --mode "$MODE" \
+            run_bin --manifest "$SUITES_DIR/$suite.manifest" --mode "$smode" \
                 --jobs "$JOBS" --json "$out" >/dev/null 2>&1 || true
         fi
         passed="$(json_field "$out" passed)"
