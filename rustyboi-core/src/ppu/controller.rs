@@ -10452,10 +10452,19 @@ impl Ppu {
         Some(mode2_readable || mode0_reached)
     }
 
+    /// CPU-CGB-D/E (and AGB) silicon, the post-CGB-C side of the revision split
+    /// the gbc_hw_tests manifest header documents (SameBoy's `model <=
+    /// GB_MODEL_CGB_C` gate). gambatte's oracles are explicitly cgb04c
+    /// (CPU-CGB-C) and stay on the C side.
+    fn late_rev(mmio: &mmio::Mmio) -> bool {
+        mmio.is_cgb_de() || mmio.is_agb()
+    }
+
     /// STAT-resolve mode-3->0 read-boundary offset (`access_cc + off < mode-0 time` => mode 3).
     /// SS: rustyboi's `m0_time_master` carries the LY time `+1` so it sits 1cc high vs
     /// The hardware STAT resolve read -> off=3 (`!lytime_no_plus1`); on a post-DS->SS line the
-    /// `+1` is dropped -> off=2. DS samples the half-dot grid -> off=2.
+    /// `+1` is dropped -> off=2. DS: off=2 on CPU-CGB-C, +4 (=6cc=3 dots, the SS
+    /// value re-expressed in the DS dot) on CPU-CGB-D/E and AGB -- see the body.
     ///
     /// On a post-DS->SS line that took the mode-3 STAT-phase carry
     /// (`render_carry_skew_cc != 0`), the STAT/mode-0 time clock was advanced `carry` dots
@@ -10464,8 +10473,18 @@ impl Ppu {
     /// un-carried read grid, so subtract the carry from the offset (target carry=1 ->
     /// off 2->1 -> gap-3 mode-3 read; carry=0 want-mode-0 siblings keep off=2). The
     /// carry is 0 except on a post-mode-3-switch line, so this is inert elsewhere.
-    fn stat_read_off(&self, ds: bool) -> i64 {
+    fn stat_read_off(&self, ds: bool, late_rev: bool) -> i64 {
         let base = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
+        // Double speed on CPU-CGB-D/E and AGB: the mode-3 -> mode-0 read boundary
+        // sits 3 DOTS below the mode-0 time, the same 3 dots the single-speed
+        // branch above uses -- at DS a dot is 2cc, so that is 6cc, not the 2cc a
+        // literal reading of the SS constant gives. See the run-length derivation
+        // in the commit message: on the gbc-hw-tests DS STAT sweeps our mode-3 ran
+        // a whole probe long on the stagger phases where `L mod 8` crosses.
+        // CPU-CGB-C silicon (gambatte cgb04c) does NOT take this: applying it
+        // there moves the boundary past the `_1`/`_2` bracket of 136 DS m3stat
+        // rows.
+        let base = base + if ds && late_rev { 4 } else { 0 };
         if self.lytime_no_plus1 {
             base - self.render_carry_skew_cc
         } else {
@@ -10484,7 +10503,7 @@ impl Ppu {
     /// (now hardware-exact) persisted boundary at single speed and adds correct
     /// sub-dot resolution at double speed, where the CPU samples FF41 at an odd
     /// master cc that the per-dot renderer would otherwise round.
-    pub(crate) fn get_stat_mode3to0_at_cc(&self, access_cc: u64, ds: bool) -> Option<u8> {
+    pub(crate) fn get_stat_mode3to0_at_cc(&self, access_cc: u64, ds: bool, late_rev: bool) -> Option<u8> {
         if self.disabled || self.internal_ly_val >= 144 {
             return None;
         }
@@ -10501,7 +10520,7 @@ impl Ppu {
         // speed (and only when not in a post-DS->SS-switch line, where `lytime_no_plus1`
         // already drops it) it sits 1cc high for the STAT-resolve read specifically, so the
         // read boundary uses `+3` instead of `+2`.
-        let read_off = self.stat_read_off(ds);
+        let read_off = self.stat_read_off(ds, late_rev);
         if (access_cc as i64) + read_off < m0t {
             Some(3)
         } else {
@@ -10767,7 +10786,7 @@ impl Ppu {
             if self.state != State::OAMSearch
                 && let Some(m0t) = self.m0_time_master
             {
-                let read_off: i64 = self.stat_read_off(ds);
+                let read_off: i64 = self.stat_read_off(ds, Self::late_rev(mmio));
                 if (access_cc as i64) + read_off < m0t as i64 {
                     return Some(3);
                 }
@@ -10799,7 +10818,7 @@ impl Ppu {
                     if (access_cc + 1) < self.display_enable_inactive_until {
                         return Some(0);
                     }
-                    let read_off: i64 = self.stat_read_off(ds);
+                    let read_off: i64 = self.stat_read_off(ds, Self::late_rev(mmio));
                     if (access_cc as i64) + read_off < m0t as i64 {
                         return Some(3);
                     }
@@ -10856,7 +10875,7 @@ impl Ppu {
             // enable; on steady lines it ended long ago. Gate the line-start-local
             // inactive suppression to the first line (using the global field there
             // would end the window one render dot late — see the comment above).
-            let read_off: i64 = self.stat_read_off(ds);
+            let read_off: i64 = self.stat_read_off(ds, Self::late_rev(mmio));
             if self.first_line_after_enable {
                 // `line_start` here (the raw the LY counter-derived line origin) sits one
                 // master-cc ABOVE the hardware enable cc anchor (it resets the LY counter to
@@ -10944,7 +10963,7 @@ impl Ppu {
         // the FF44 read path carries (see `uncharged_halt_exit`). FF41 and FF44 are
         // read by the SAME resumed instruction stream, so they share its phase.
         let access_cc = access_cc + Self::uncharged_halt_exit(mmio) as u64;
-        self.get_stat_mode3to0_at_cc(access_cc, ds)
+        self.get_stat_mode3to0_at_cc(access_cc, ds, Self::late_rev(mmio))
             .or_else(|| self.get_stat_mode_at_cc(mmio, access_cc))
     }
 
