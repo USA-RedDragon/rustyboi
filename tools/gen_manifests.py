@@ -1227,6 +1227,24 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
         "dma/dma_halt_stop_speedchange",
     }
 
+    # 2. Tests whose ROM needs more than the suite-wide budget to finish
+    #    writing. The `sram` path runs a FLAT cycle budget with no done-marker,
+    #    halt or quiescence detection (runner.rs), so a short budget silently
+    #    truncates a ROM mid-write and grades the partial buffer. These six
+    #    stop 379 bytes short at the suite default and are byte-exact once they
+    #    finish (ndiff 0/1028); measured saturating -- 3000 and 12000 frames
+    #    give identical output. Carried per-test rather than by raising the
+    #    suite budget, which would multiply the emulation time of all ~340 rows
+    #    to fix 12.
+    NEEDS_LONG_BUDGET = {
+        "lcd/mode2/mode2_oam_timing_spr_dis_gbc_mode",
+        "lcd/mode2/mode2_oam_timing_spr_en_gbc_mode",
+        "lcd/mode2/mode2_stat_timing_spr_dis_gbc_mode",
+        "lcd/mode2/mode2_stat_timing_spr_dis_gbc_mode_8x16",
+        "lcd/mode2/mode2_stat_timing_spr_en_gbc_mode",
+        "lcd/mode2/mode2_stat_timing_spr_en_gbc_mode_8x16",
+    }
+
     refs_root = out / "refs" / "gbc-hw-tests"
 
     def sav_len(d_key: str, data: bytes) -> int:
@@ -1239,6 +1257,8 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
         # read that SRAM on CGB (dma_valid_sources_* rows E0-FF), so the
         # board fixture is pinned suite-wide, like the `rev=` hardware pins.
         extra = "|input=0:a" if test_id in NEEDS_KEYPRESS else ""
+        if test_id in NEEDS_LONG_BUDGET:
+            extra += "|frames=3000"
         lines.append(
             f"gbc-hw-tests/{test_id}{rev and '#agb'}|{mode}|sram|{rom}|"
             f"{rel_to_cwd(ref)}|cart=lazy_sram_cs{extra}{rev}"
