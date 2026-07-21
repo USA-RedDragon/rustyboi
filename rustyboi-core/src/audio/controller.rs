@@ -107,8 +107,12 @@ pub struct Audio {
     #[serde(skip)]
     pcm_read_cc: Option<u32>,
     // Counts DIV-APU events (the 0x1000-cc master-clock boundaries = DIV bit
-    // 12/13 falling edges, including the forced edge of a DIV write). The 64 Hz
-    // envelope frame runs when (div_divider & 7) == 7.
+    // 12/13 falling edges, including the forced edge of a DIV write).
+    // `(div_divider & 7) == 7` clocks the 64 Hz envelope *countdown*; because
+    // the counter is post-incremented, that edge is the canonical frame
+    // sequencer's step 6, NOT step 7. The volume change it schedules lands one
+    // DIV-APU event later, at canonical step 7 — so an envelope period of 1
+    // first steps the volume at DIV-APU tick 8, not tick 7.
     // Pan Docs: Audio details — https://gbdev.io/pandocs/Audio_details.html
     #[serde(default)]
     div_divider: u16,
