@@ -17,7 +17,9 @@
 //! ONE canonical row per ROM (auto-detected hardware, no audio drain), produced
 //! by a code path byte-identical to a media-free run, so extra hardware/audio
 //! never perturb the regression hashes. On the SGB models the media pass also
-//! writes a 256x224 border still (`screens/<sha>_sgb_border.webp`): the game's
+//! writes the screen-free border artwork, content-addressed into
+//! `screens/borders/<hash>.webp` with a `map.json` keying it by ROM (so the many
+//! games sharing artwork share one file): the game's
 //! own border when it uploads one, otherwise the system border LZ-decoded at
 //! runtime from the user's SGB firmware (`sgb1.sfc`/`sgb2.sfc`, resolved out of
 //! `--bios-dir` beside the boot ROMs; absent = no default border, logged once).
@@ -87,7 +89,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rustyboi_test_runner_lib::cli::reject_unknown_flags;
-use rustyboi_test_runner_lib::imaging::{encode_rgb_webp, frame_rgb, html_escape};
+use rustyboi_test_runner_lib::imaging::{encode_rgb_webp, encode_rgba_webp, frame_rgb, html_escape};
 use rustyboi_test_runner_lib::masher::masher;
 use rustyboi_test_runner_lib::runner::bios_filename;
 
@@ -229,6 +231,12 @@ struct RunCfg {
     // so one ROM panicking must not poison this shared map and abort every
     // remaining ROM. A content-hash map cannot be left torn by a panic.
     audio_map: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+    /// Where content-addressed SGB border layers land (`screens/borders/`).
+    /// Rides with `screens_dir`; games sharing artwork dedup to one file.
+    borders_dir: Option<PathBuf>,
+    /// `rom_sha` -> the border layers' content hashes, for the gallery.
+    // Poison-recovering at its use sites, same reasoning as `audio_map`.
+    border_map: std::sync::Mutex<std::collections::BTreeMap<String, BorderAssets>>,
     /// How many leading frames each `.rbr` recording captures (a short gallery
     /// loop, not the full run). Ignored unless `recordings_dir` is set.
     rec_frames: usize,
@@ -538,6 +546,15 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
         }
         None => None,
     };
+    // Content-addressed SGB border layers, beside the posters they frame.
+    let borders_dir = match &screens_dir {
+        Some(s) => {
+            let d = s.join("borders");
+            std::fs::create_dir_all(&d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
+            Some(d)
+        }
+        None => None,
+    };
     let cfg = RunCfg {
         frames,
         warmup,
@@ -549,6 +566,8 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
         chan_dir,
         audio_dir,
         audio_map: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+        borders_dir,
+        border_map: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         rec_frames,
         sgb_firmware: load_sgb_firmwares(bios_dir.as_deref(), &hardware),
         hardware,
@@ -686,6 +705,17 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
             let json = serde_json::to_string(&*map).map_err(|e| format!("audio map: {e}"))?;
             std::fs::write(adir.join("map.json"), json)
                 .map_err(|e| format!("write audio map: {e}"))?;
+        }
+    }
+
+    // Gallery's rom -> border-layer-hash map; the layers themselves are
+    // content-addressed, so borders shared across games are one file each.
+    if let Some(bdir) = &cfg.borders_dir {
+        let map = cfg.border_map.lock().unwrap_or_else(|e| e.into_inner());
+        if !map.is_empty() {
+            let json = serde_json::to_string(&*map).map_err(|e| format!("border map: {e}"))?;
+            std::fs::write(bdir.join("map.json"), json)
+                .map_err(|e| format!("write border map: {e}"))?;
         }
     }
 
@@ -918,12 +948,11 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
                             row.rom_sha, m.hash_all, out_hash_of(&row).unwrap_or_default()
                         );
                     }
-                    // SGB border still (display-only, SGB-only, additional to
-                    // the 160x144 poster): a 256x224 bordered frame, written
-                    // whenever a border exists — the game's own, else the SGB
-                    // firmware's system border.
-                    if let Some(rgb) = m.border.as_ref() {
-                        write_border_png(dir, &row.rom_sha, rgb);
+                    // SGB border layers (display-only, SGB-only, additional to
+                    // the 160x144 poster), written whenever a border exists —
+                    // the game's own, else the SGB firmware's system border.
+                    if let Some(layers) = m.border.as_ref() {
+                        write_border(cfg, &row.rom_sha, layers);
                     }
                     if std::env::var_os("RB_SWEEP_MEDIA_LOG").is_some() {
                         let vdur = m.frames as f64 * FPS_DEN as f64 / FPS_NUM as f64;
@@ -1046,13 +1075,14 @@ struct MediaOut {
     /// FNV fold over the run — compared to the manifest row for the canonical
     /// model to prove audio drain never perturbs the frame hashes.
     hash_all: u64,
-    /// SGB-only: the 256x224 RGB888 border frame (GB screen composited at
-    /// (48,40)) captured at the end of the run. `Some` whenever A border is
-    /// available — the game's own upload if it sent one, else the SGB
-    /// firmware's system border (when `cfg.sgb_firmware` supplied a dump).
+    /// SGB-only: the border artwork with the GB screen cut out of it, as the
+    /// two RGBA layers the gallery stacks around the live 160x144 hero (see
+    /// `ppu::SgbBorderLayers`). Captured at the end of the run, `Some` whenever
+    /// A border is available — the game's own upload if it sent one, else the
+    /// SGB firmware's system border (when `cfg.sgb_firmware` supplied a dump).
     /// `None` only on non-SGB hardware, or on SGB with neither source.
     /// Display-only; never touches the manifest.
-    border: Option<Vec<u8>>,
+    border: Option<ppu::SgbBorderLayers>,
     frames: usize,
     audio_samples: usize,
     video_written: bool,
@@ -1178,15 +1208,53 @@ fn write_poster_png(dir: &Path, sha: &str, tag: &str, poster: Option<&Vec<u8>>) 
     }
 }
 
-/// Write the SGB 256x224 border still, keyed `<sha>_sgb_border.webp`. Display-only
-/// and SGB-only; the gallery composites the 160x144 video into its center window.
-/// Errors are logged, not fatal.
-fn write_border_png(dir: &Path, sha: &str, rgb: &[u8]) {
-    let file = dir.join(format!("{sha}_sgb_border.webp"));
-    let (w, h) = (ppu::SGB_FRAME_WIDTH as u32, ppu::SGB_FRAME_HEIGHT as u32);
-    if let Err(e) = std::fs::write(&file, encode_rgb_webp(w, h, rgb)) {
-        eprintln!("border {}: {e}", file.display());
+/// A ROM's SGB border assets by content hash, both living in `screens/borders/`.
+/// Recorded per `rom_sha` in `RunCfg::border_map` and consumed by the gallery.
+#[derive(Serialize, Deserialize, Clone)]
+struct BorderAssets {
+    /// The 256x224 ring (screen window transparent) that sits behind the hero.
+    ring: String,
+    /// The 160x144 layer that draws OVER the hero, present only for the few
+    /// borders whose artwork intrudes into the screen window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    overlay: Option<String>,
+}
+
+/// Write one content-addressed border layer to `borders/<hash>.webp` and return
+/// its hash. Identical artwork — the common case across a library — collapses to
+/// a single file, which is the whole point of hashing the pixels instead of
+/// keying by ROM. tmp+rename keeps concurrent writers of the same hash
+/// race-safe. Errors are logged, not fatal.
+fn write_border_layer(dir: &Path, sha: &str, w: u32, h: u32, rgba: &[u8]) -> String {
+    let blob = encode_rgba_webp(w, h, rgba);
+    let hash: String = sha256(&blob)[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let file = dir.join(format!("{hash}.webp"));
+    if !file.exists() {
+        let tmp = dir.join(format!(".{hash}.{sha}.tmp"));
+        match std::fs::write(&tmp, &blob) {
+            Ok(()) => {
+                let _ = std::fs::rename(&tmp, &file);
+            }
+            Err(e) => eprintln!("border {}: {e}", tmp.display()),
+        }
     }
+    hash
+}
+
+/// Write a ROM's SGB border layers and record them under its `rom_sha`.
+/// Display-only and SGB-only; the gallery stacks the live 160x144 hero between
+/// the ring and the overlay.
+fn write_border(cfg: &RunCfg, sha: &str, layers: &ppu::SgbBorderLayers) {
+    let Some(dir) = &cfg.borders_dir else { return };
+    let (w, h) = (ppu::SGB_FRAME_WIDTH as u32, ppu::SGB_FRAME_HEIGHT as u32);
+    let assets = BorderAssets {
+        ring: write_border_layer(dir, sha, w, h, &layers.ring[..]),
+        overlay: layers
+            .overlay
+            .as_ref()
+            .map(|o| write_border_layer(dir, sha, 160, 144, &o[..])),
+    };
+    cfg.border_map.lock().unwrap_or_else(|e| e.into_inner()).insert(sha.to_string(), assets);
 }
 
 /// Emulate `hardware` purely to produce media: a poster, and — when
@@ -1367,18 +1435,15 @@ fn capture_media(
         }
     }
 
-    // SGB border still: after the run the border (uploaded once, static) is
-    // established, so grab the full 256x224 composited frame. This resolves to
+    // SGB border layers: after the run the border (uploaded once, static) is
+    // established, so grab the screen-free artwork. This resolves to
     // the game's own border when it sent one, else the firmware's system border
     // seeded above — the same precedence as hardware. `None` on non-SGB
     // hardware, or on SGB when the game sent nothing and no firmware dump was
     // provisioned; the caller then writes no border still and that card renders
     // as a normal 160x144 card. This is a pure non-consuming read: it never
     // perturbs the 160x144 frame path.
-    let border = (hardware == Hardware::SGB)
-        .then(|| gb.sgb_composited_frame())
-        .flatten()
-        .map(|f| f.to_vec());
+    let border = (hardware == Hardware::SGB).then(|| gb.sgb_border_layers()).flatten();
 
     // Flush the PCM sidecar before muxing.
     if let Some(w) = pcm {
@@ -2211,9 +2276,6 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
     let mut poster_tags: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
         std::collections::BTreeMap::new();
     let mut tabs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    // SGB border stills (`<sha>_sgb_border.webp`, 256x224): not a hardware tab —
-    // tracked separately so the SGB tab can frame the 160x144 video inside it.
-    let mut border_shas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Ok(rd) = std::fs::read_dir(&screens_dir) {
         for e in rd.flatten() {
             let fname = e.file_name().to_string_lossy().into_owned();
@@ -2226,14 +2288,19 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
             if tag.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
                 continue;
             }
-            if tag == "sgb_border" {
-                border_shas.insert(sha.to_string());
-                continue; // display detail of the sgb tab, not its own tab
-            }
             poster_tags.entry(sha.to_string()).or_default().insert(tag.to_string());
             tabs.insert(tag.to_string());
         }
     }
+    // SGB border layers: not a hardware tab, and not discoverable by scanning —
+    // the files are content-addressed (`borders/<hash>.webp`, shared by every
+    // game with the same artwork), so `run` writes the rom -> hash map beside
+    // them. Read it to learn which SGB cards get framed.
+    let border_map: std::collections::HashMap<String, BorderAssets> =
+        std::fs::read_to_string(screens_dir.join("borders").join("map.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
     // Preferred tab order (default matrix first), then any others alphabetically.
     let order = ["dmg", "cgb", "sgb", "agb"];
     let mut tab_list: Vec<String> = order.iter().filter(|t| tabs.contains(**t)).map(|t| t.to_string()).collect();
@@ -2443,16 +2510,26 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
                         .push_str(&format!(" data-audio=\"./audio/{}.rba\"", html_escape(hash)));
                 }
                 let has_motion = has_rbr || has_video;
-                let sgb_border = tag == "sgb" && border_shas.contains(&r.rom_sha);
-                let border_src = format!("./screens/{}_sgb_border.webp", r.rom_sha);
-                let hero = if sgb_border && has_motion {
+                let border = (tag == "sgb").then(|| border_map.get(&r.rom_sha)).flatten();
+                let hero = if let Some(b) = border {
+                    // Three stacked layers, matching hardware: the ring behind,
+                    // the live screen in the window, and — only for the few
+                    // borders whose artwork intrudes into the window — an
+                    // overlay drawn OVER the screen. The screen layer is the
+                    // same img with or without motion; `motion_attr` is empty
+                    // when there is none.
+                    let overlay = b.overlay.as_ref().map_or(String::new(), |h| {
+                        format!(
+                            "<img class=\"sgb-overlay\" loading=\"lazy\" src=\"./screens/borders/{}.webp\" alt=\"\">",
+                            html_escape(h)
+                        )
+                    });
                     format!(
                         "<div class=\"sgb-frame\">\
-                         <img class=\"sgb-border\" loading=\"lazy\" src=\"{border_src}\" alt=\"\">\
-                         <img class=\"hero sgb-screen\" loading=\"lazy\" src=\"{poster}\" {motion_attr} alt=\"\"></div>",
+                         <img class=\"sgb-border\" loading=\"lazy\" src=\"./screens/borders/{}.webp\" alt=\"\">\
+                         <img class=\"hero sgb-screen\" loading=\"lazy\" src=\"{poster}\" {motion_attr} alt=\"\">{overlay}</div>",
+                        html_escape(&b.ring)
                     )
-                } else if sgb_border {
-                    format!("<img class=\"hero\" loading=\"lazy\" src=\"{border_src}\" alt=\"\">")
                 } else if has_motion {
                     format!("<img class=\"hero\" loading=\"lazy\" src=\"{poster}\" {motion_attr} alt=\"\">")
                 } else {

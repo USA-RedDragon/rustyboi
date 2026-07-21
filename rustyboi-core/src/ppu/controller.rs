@@ -40,6 +40,75 @@ pub(crate) fn rgb555_to_rgb888(color: u16) -> (u8, u8, u8) {
     (((r * 255) / 31) as u8, ((g * 255) / 31) as u8, ((b * 255) / 31) as u8)
 }
 
+/// The GB screen's window within the 256x224 SGB frame: 160x144 at (48, 40).
+pub const SGB_WINDOW_X: std::ops::Range<usize> = 48..208;
+pub const SGB_WINDOW_Y: std::ops::Range<usize> = 40..184;
+
+/// The SGB border artwork with the GB screen cut out of it, as two RGBA8
+/// layers — what a caller that draws its own live screen composites around.
+/// Both are screen-independent, so identical artwork produces identical bytes.
+///
+/// Stacking order, matching hardware (border pixels with a non-zero 4bpp index
+/// draw OVER the GB picture): `ring` behind, the caller's screen, then
+/// `overlay` in front.
+pub struct SgbBorderLayers {
+    /// 256x224: the backdrop and every border pixel OUTSIDE the screen window,
+    /// with the whole window left at alpha 0.
+    pub ring: Box<[u8; SGB_FRAME_SIZE * 4]>,
+    /// 160x144 in window-local coordinates (the (48, 40) origin subtracted):
+    /// the border pixels that intrude INTO the screen window, alpha 0
+    /// elsewhere. `None` when the border does not intrude at all, which is the
+    /// common case — then there is no overlay layer to draw.
+    pub overlay: Option<Box<[u8; 160 * 144 * 4]>>,
+}
+
+/// Rasterize the SGB border's 32x28 tilemap, handing every non-transparent
+/// pixel to `put(px, py, rgb555)`. Shared by `Ppu::sgb_composited_frame` and
+/// `Ppu::sgb_border_frame`, which differ only in what lies underneath.
+///
+/// Map entries with bits 8-9 set reference tiles beyond the 256 that exist and
+/// are not drawn (the hardware `tile & 0x300` skip). 4bpp pixel bits come from
+/// byte pairs (plane 0/1) at row*2 and (plane 2/3) at row*2+16; bit 7 = leftmost
+/// pixel when not X-flipped. Color 0 is transparent and is not passed to `put`.
+///
+/// The tilemap's palette field is 3 bits (SNES BG palettes 0-7), but a PCT_TRN
+/// can only deliver palettes 4-7, so for a game-supplied border `pals` holds
+/// exactly those four and the field's low 2 bits index them (4->0 .. 7->3). The
+/// firmware's own border is not so constrained — SGB1's map selects palettes 0
+/// and 4, SGB2's 0, 4 and 5 — so `Sgb::seed_default_border` hands over all eight
+/// palettes and the full 3-bit field applies. The slice length distinguishes the
+/// two.
+fn draw_sgb_border_tiles(tiles: &[u8], map: &[u8], pals: &[u16], mut put: impl FnMut(usize, usize, u16)) {
+    let pal_mask = if pals.len() >= 128 { 7 } else { 3 };
+    for tile_y in 0..28usize {
+        for tile_x in 0..32usize {
+            let e = (tile_y * 32 + tile_x) * 2;
+            let entry = u16::from_le_bytes([map[e], map[e + 1]]);
+            if entry & 0x300 != 0 {
+                continue;
+            }
+            let tile = (entry & 0xFF) as usize;
+            let pal = ((entry >> 10) & pal_mask) as usize;
+            let xf: usize = if entry & 0x4000 != 0 { 0 } else { 7 };
+            let yf: usize = if entry & 0x8000 != 0 { 7 } else { 0 };
+            for y in 0..8usize {
+                let base = tile * 32 + (y ^ yf) * 2;
+                for x in 0..8usize {
+                    let bit = 1u8 << (x ^ xf);
+                    let color = usize::from(tiles[base] & bit != 0)
+                        | usize::from(tiles[base + 1] & bit != 0) << 1
+                        | usize::from(tiles[base + 16] & bit != 0) << 2
+                        | usize::from(tiles[base + 17] & bit != 0) << 3;
+                    if color == 0 {
+                        continue;
+                    }
+                    put(tile_x * 8 + x, tile_y * 8 + y, pals[pal * 16 + color]);
+                }
+            }
+        }
+    }
+}
+
 /// Lossless serde codec for the fixed-size framebuffers. Savestates (rewind
 /// ring, quicksaves) carry all four framebuffers; the rewind ring captures one
 /// every frame on battery-powered mobile devices, so this must be a single
@@ -9563,51 +9632,67 @@ impl Ppu {
             }
         }
 
-        // 3. Border tiles. Map entries with bits 8-9 set reference tiles
-        // beyond the 256 that exist and are not drawn (the hardware `tile & 0x300`
-        // skip). 4bpp pixel bits come from byte pairs (plane 0/1) at row*2
-        // and (plane 2/3) at row*2+16; bit 7 = leftmost pixel when not
-        // X-flipped.
-        //
-        // The tilemap's palette field is 3 bits (SNES BG palettes 0-7), but a
-        // PCT_TRN can only deliver palettes 4-7, so for a game-supplied border
-        // `pals` holds exactly those four and the field's low 2 bits index
-        // them (4->0 .. 7->3). The firmware's own border is not so
-        // constrained — SGB1's map selects palettes 0 and 4, SGB2's 0, 4 and 5
-        // — so `Sgb::seed_default_border` hands over all eight palettes and
-        // the full 3-bit field applies. The slice length distinguishes the two.
-        let pal_mask = if pals.len() >= 128 { 7 } else { 3 };
-        for tile_y in 0..28usize {
-            for tile_x in 0..32usize {
-                let e = (tile_y * 32 + tile_x) * 2;
-                let entry = u16::from_le_bytes([map[e], map[e + 1]]);
-                if entry & 0x300 != 0 {
+        // 3. Border tiles, drawn over both the window and the backdrop.
+        draw_sgb_border_tiles(tiles, map, pals, |px, py, rgb555| put(&mut out, px, py, rgb555));
+
+        Some(out.into_boxed_slice().try_into().expect("SGB frame size"))
+    }
+
+    /// The SGB border artwork split into the two layers a caller that draws
+    /// its own live GB screen needs — see `SgbBorderLayers`. Screen-free by
+    /// construction, so the bytes depend only on the cart's (or firmware's)
+    /// CHR_TRN/PCT_TRN upload: identical artwork yields identical images.
+    ///
+    /// Takes no `uncolorized` shades — those only ever fed the GB-screen step
+    /// that this omits. Same None conditions as `sgb_composited_frame`, and
+    /// likewise a non-consuming off-screen read. The tilemap is walked once.
+    pub fn sgb_border_layers(&self, mmio: &mmio::Mmio) -> Option<SgbBorderLayers> {
+        let sgb = mmio.sgb()?;
+        let (tiles, map, pals) = sgb.border()?;
+
+        let put = |out: &mut [u8], i: usize, rgb555: u16| {
+            let (r, g, b) = rgb555_to_rgb888(rgb555);
+            out[i] = r;
+            out[i + 1] = g;
+            out[i + 2] = b;
+            out[i + 3] = 0xFF;
+        };
+
+        // 1. Backdrop, outside the center window only: inside it the GB screen
+        // would be, and the ring leaves that to the caller (zeroed = alpha 0,
+        // which the buffer already is).
+        let mut ring = vec![0u8; SGB_FRAME_SIZE * 4];
+        let backdrop = sgb.backdrop();
+        for py in 0..SGB_FRAME_HEIGHT {
+            for px in 0..SGB_FRAME_WIDTH {
+                if SGB_WINDOW_X.contains(&px) && SGB_WINDOW_Y.contains(&py) {
                     continue;
                 }
-                let tile = (entry & 0xFF) as usize;
-                let pal = ((entry >> 10) & pal_mask) as usize;
-                let xf: usize = if entry & 0x4000 != 0 { 0 } else { 7 };
-                let yf: usize = if entry & 0x8000 != 0 { 7 } else { 0 };
-                for y in 0..8usize {
-                    let base = tile * 32 + (y ^ yf) * 2;
-                    for x in 0..8usize {
-                        let bit = 1u8 << (x ^ xf);
-                        let color = usize::from(tiles[base] & bit != 0)
-                            | usize::from(tiles[base + 1] & bit != 0) << 1
-                            | usize::from(tiles[base + 16] & bit != 0) << 2
-                            | usize::from(tiles[base + 17] & bit != 0) << 3;
-                        if color == 0 {
-                            // Transparent: GB picture inside the window,
-                            // backdrop outside — both already painted.
-                            continue;
-                        }
-                        put(&mut out, tile_x * 8 + x, tile_y * 8 + y, pals[pal * 16 + color]);
-                    }
-                }
+                put(&mut ring, (py * SGB_FRAME_WIDTH + px) * 4, backdrop);
             }
         }
 
-        Some(out.into_boxed_slice().try_into().expect("SGB frame size"))
+        // 2. Border tiles, identical to the composited path, but routed by
+        // where each pixel lands: outside the window into the ring, inside it
+        // into the window-local overlay (which on hardware draws OVER the GB
+        // picture). A pixel goes to exactly one layer.
+        let mut overlay = vec![0u8; 160 * 144 * 4];
+        let mut any_overlay = false;
+        draw_sgb_border_tiles(tiles, map, pals, |px, py, rgb555| {
+            if SGB_WINDOW_X.contains(&px) && SGB_WINDOW_Y.contains(&py) {
+                any_overlay = true;
+                let (lx, ly) = (px - SGB_WINDOW_X.start, py - SGB_WINDOW_Y.start);
+                put(&mut overlay, (ly * 160 + lx) * 4, rgb555);
+            } else {
+                put(&mut ring, (py * SGB_FRAME_WIDTH + px) * 4, rgb555);
+            }
+        });
+
+        Some(SgbBorderLayers {
+            ring: ring.into_boxed_slice().try_into().expect("SGB frame size"),
+            overlay: any_overlay
+                .then(|| overlay.into_boxed_slice().try_into().expect("SGB window size")),
+        })
     }
 
     // Debug methods

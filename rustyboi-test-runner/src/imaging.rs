@@ -66,6 +66,21 @@ pub fn encode_rgb_webp(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
     }
 }
 
+/// RGBA8 -> lossless WebP, the alpha-carrying sibling of `encode_rgb_webp`.
+/// Used for the gallery's SGB border layers, whose transparent regions are what
+/// let one image sit over another. Falls back to a (necessarily opaque) PNG if
+/// encoding ever fails — see `encode_rgb_png`.
+pub fn encode_rgba_webp(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    match image_webp::WebPEncoder::new(&mut out).encode(rgba, width, height, image_webp::ColorType::Rgba8) {
+        Ok(()) => out,
+        Err(_) => {
+            let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+            encode_rgb_png(width, height, &rgb)
+        }
+    }
+}
+
 pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

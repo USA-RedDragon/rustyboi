@@ -6532,4 +6532,53 @@ mod sgb_border_palette_tests {
         let (four, _) = seeded(4, 128);
         assert_ne!(top_left(&zero), top_left(&four));
     }
+
+    /// A border whose ONLY opaque tile sits at map cell (`tx`, `ty`), drawing
+    /// its one pixel at (`tx`*8, `ty`*8). Tile 0 is left blank so every other
+    /// map cell (all zeroes) contributes nothing.
+    fn one_tile_at(tx: usize, ty: usize) -> (Mmio, Vec<u16>) {
+        let mut tiles = vec![0u8; 0x2000];
+        tiles[32] = 0x80; // tile 1, row 0, plane 0, leftmost pixel
+        tiles[48] = 0x80; // tile 1, row 0, plane 2  => colour 0b0101 = 5
+        let mut map = vec![0u8; 0x800];
+        let e = (ty * 32 + tx) * 2;
+        map[e..e + 2].copy_from_slice(&(1u16 | (4u16 << 10)).to_le_bytes());
+        let pals: Vec<u16> = (0..128u16).map(|i| 0x0421 + i * 3).collect();
+
+        let mut mmio = Mmio::new();
+        mmio.enable_sgb();
+        mmio.input.sgb_mut().unwrap().seed_default_border(&tiles, &map, &pals);
+        (mmio, pals)
+    }
+
+    /// A border tile placed INSIDE the screen window belongs to the overlay
+    /// layer, never the ring: on hardware it draws over the GB picture, so a
+    /// caller that supplies its own screen must be able to put it in front.
+    #[test]
+    fn border_pixels_inside_the_window_go_to_the_overlay() {
+        // Tile (10, 10) => pixel (80, 80), comfortably inside the 160x144
+        // window at (48, 40).
+        let (mmio, pals) = one_tile_at(10, 10);
+        let layers = crate::ppu::Ppu::new().sgb_border_layers(&mmio).expect("layers");
+        let overlay = layers.overlay.as_ref().expect("in-window tile makes an overlay");
+
+        let j = ((80 - 40) * 160 + (80 - 48)) * 4;
+        assert_eq!(&overlay[j..j + 3], &rgb(pals[4 * 16 + 5]), "overlay pixel colour");
+        assert_eq!(overlay[j + 3], 0xFF, "overlay pixel opaque");
+
+        // ...and the ring's window is untouched by it.
+        let i = (80 * crate::ppu::SGB_FRAME_WIDTH + 80) * 4;
+        assert_eq!(layers.ring[i + 3], 0, "ring must stay transparent in the window");
+    }
+
+    /// The common case: artwork that stays in the frame allocates no overlay at
+    /// all, so the gallery skips that asset entirely.
+    #[test]
+    fn a_border_that_stays_outside_the_window_has_no_overlay() {
+        let (mmio, pals) = one_tile_at(0, 0);
+        let layers = crate::ppu::Ppu::new().sgb_border_layers(&mmio).expect("layers");
+        assert!(layers.overlay.is_none(), "no in-window pixel, no overlay");
+        assert_eq!(&layers.ring[..3], &rgb(pals[4 * 16 + 5]), "ring keeps the pixel");
+        assert_eq!(layers.ring[3], 0xFF);
+    }
 }

@@ -1497,6 +1497,13 @@ impl GB {
         self.ppu.sgb_composited_frame(&self.mmio, uncolorized)
     }
 
+    /// The SGB border artwork as screen-free RGBA8 layers to composite around
+    /// a live GB screen — see `ppu::SgbBorderLayers`. Same None conditions and
+    /// the same off-screen, non-consuming contract as `sgb_composited_frame`.
+    pub fn sgb_border_layers(&self) -> Option<ppu::SgbBorderLayers> {
+        self.ppu.sgb_border_layers(&self.mmio)
+    }
+
     pub fn set_cgb_color_conversion(&mut self, conversion: ppu::ColorCorrection) {
         self.ppu.set_cgb_color_conversion(conversion);
     }
@@ -3569,6 +3576,53 @@ mod sgb_default_border_tests {
             // ...and the frontends' composite is now available.
             let frame = gb.sgb_composited_frame().expect("composited frame");
             assert_eq!(frame.len(), ppu::SGB_FRAME_SIZE * 3);
+        }
+    }
+
+    /// The screen-free layers must re-compose into exactly the baked composite:
+    /// for every pixel, `overlay` if it has one, else the GB screen inside the
+    /// window, else `ring`. This is what lets a caller drop its own live screen
+    /// between the two layers and still match hardware, where opaque border
+    /// pixels draw OVER the GB picture.
+    #[test]
+    fn border_layers_recompose_into_the_composite() {
+        for (rom, hw) in firmwares() {
+            let mut gb = machine(hw);
+            gb.load_sgb_firmware_bytes(&rom).expect("firmware");
+
+            let want = gb.sgb_composited_frame().expect("composited frame");
+            let layers = gb.sgb_border_layers().expect("border layers");
+            assert_eq!(layers.ring.len(), ppu::SGB_FRAME_SIZE * 4);
+
+            for py in 0..ppu::SGB_FRAME_HEIGHT {
+                for px in 0..ppu::SGB_FRAME_WIDTH {
+                    let i = py * ppu::SGB_FRAME_WIDTH + px;
+                    let ring = &layers.ring[i * 4..i * 4 + 4];
+                    let in_window = ppu::controller::SGB_WINDOW_X.contains(&px)
+                        && ppu::controller::SGB_WINDOW_Y.contains(&py);
+                    let over = layers.overlay.as_ref().and_then(|o| {
+                        let (lx, ly) = (
+                            px.wrapping_sub(ppu::controller::SGB_WINDOW_X.start),
+                            py.wrapping_sub(ppu::controller::SGB_WINDOW_Y.start),
+                        );
+                        let j = (ly * 160 + lx) * 4;
+                        (in_window && o[j + 3] != 0).then(|| &o[j..j + 4])
+                    });
+                    if in_window {
+                        // The ring never covers the window: that is the hole a
+                        // caller fills with the live screen.
+                        assert_eq!(ring[3], 0, "{hw:?} ring opaque at ({px},{py})");
+                    } else {
+                        assert_eq!(ring[3], 0xFF, "{hw:?} ring hole at ({px},{py})");
+                        assert!(over.is_none(), "{hw:?} overlay outside window");
+                    }
+                    // Outside the window the ring IS the composite; inside, an
+                    // overlay pixel must match what the composite baked there.
+                    if let Some(o) = over.or((!in_window).then_some(ring)) {
+                        assert_eq!(&want[i * 3..i * 3 + 3], &o[..3], "{hw:?} at ({px},{py})");
+                    }
+                }
+            }
         }
     }
 

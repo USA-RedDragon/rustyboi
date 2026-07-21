@@ -276,6 +276,20 @@ a {
   z-index: 1;
 }
 
+/* Border pixels that intrude into the screen window. On real hardware these
+   draw OVER the GB picture, so this sits above .hero.sgb-screen; same box. */
+.sgb-overlay {
+  position: absolute;
+  left: 18.75%;
+  top: 17.857%;
+  width: 62.5%;
+  height: 64.286%;
+  object-fit: fill;
+  image-rendering: pixelated;
+  pointer-events: none;
+  z-index: 2;
+}
+
 /* ---- card text + status ---- */
 .name {
   margin-top: 8px;
