@@ -10263,14 +10263,20 @@ impl Ppu {
         // already locked — except on the vblank lines (ly 143..152, whose successor
         // is mode 1, not mode 2). Hardware gates on `line cycles(cc) + K >= 456`:
         // read : line cycles(cc) + 4 - ds (OAM readable threshold)
-        // write: line cycles(cc) + 3 + cgb (OAM writable threshold)
+        // write: line cycles(cc) + 3 + 2*cgb (OAM writable threshold)
         // The CPU read and write land on different sub-M-cycle phases, so the
         // `line cycles(cc)` each resolves at maps differently onto the renderer state:
         // WRITE commits on the renderer dot boundary, so `line cycles(cc)` is the
         // post-tick `line_cycle`, minus the LY counter `+1` phase that the
         // stop-bridge (lcdoffset / `lytime_no_plus1`) lines drop:
         // `line_cycle - lytime_no_plus1`. (Verified across the prewrite plain/
-        // lcdoffset, SS/DS pairs: block boundary == line cycles 452.)
+        // lcdoffset, SS/DS pairs: DMG blocks from line cycles 453.) On CGB the
+        // write pre-lock starts two line-cycles earlier, at 451: gbc-hw-tests
+        // oam_echo_ram_lcd_on sweeps the whole line in 24cc steps and its
+        // lc=451 step is already blocked on hardware while we let the write
+        // land. The age prewrite family does NOT bracket this dot (it is 56/56
+        // at both 451 and 452), so the two are not in conflict -- but mooneye
+        // lcdon_write_timing-GS does pin the DMG side, hence the `2*cgb`.
         // READ samples mid-M-cycle, off the renderer dot grid; only the LY time
         // master clock captures that phase, so use the hardware's own
         // `line cycles(cc) = 456 - ((the LY time - cc) >> ds)` with the LY time =
@@ -10289,7 +10295,7 @@ impl Ppu {
             let k = if is_read {
                 4 - if cgb_de { 0 } else { ds }
             } else {
-                3 + is_cgb as i64
+                3 + 2 * is_cgb as i64
             };
             if oam_line_cycle + k >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
                 let ly = self.internal_ly_val as i64;
