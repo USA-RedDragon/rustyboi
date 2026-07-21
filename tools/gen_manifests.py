@@ -1306,8 +1306,14 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
         extra = "|input=0:a" if test_id in NEEDS_KEYPRESS else ""
         if test_id in NEEDS_LONG_BUDGET:
             extra += "|frames=3000"
+        # `#agb` disambiguates the AGB column from the CGB row for the same
+        # test: both run in mode `cgb` and differ only by the `rev=` pin. Key it
+        # on the AGB pin itself, not on "some rev token is present" -- the CGB
+        # column carries `rev=cgbe` and any future silicon pin will carry its
+        # own, and none of those are AGB.
+        agb_tag = "#agb" if "rev=agb" in rev else ""
         lines.append(
-            f"gbc-hw-tests/{test_id}{rev and '#agb'}|{mode}|sram|{rom}|"
+            f"gbc-hw-tests/{test_id}{agb_tag}|{mode}|sram|{rom}|"
             f"{rel_to_cwd(ref)}|cart=lazy_sram_cs{extra}{rev}"
         )
 
