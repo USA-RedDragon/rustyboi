@@ -5674,14 +5674,23 @@ impl memory::Addressable for Mmio {
                         // Bit 1 reads 1 ("no signal") unless read is enabled
                         // (bits 6-7 both set, Pan Docs) AND the port sees light
                         // (a connected peer's emitter is lit), which pulls it to
-                        // 0. With no IR partner `receiving` is always false, so
-                        // this stays `raw | 0x02` — byte-identical to before.
+                        // 0. With no IR partner `receiving` is always false.
+                        //
+                        // Pan Docs enumerates only read-enable field values 0 and
+                        // 3 and is silent on 1 and 2. AntonioND misc_rw_registers
+                        // pins the undocumented pair: on CGB, field value 2
+                        // (bits 7-6 = 10) reads bit 1 as 0 while 0, 1 and 3 read
+                        // it as 1 (real_gbc.sav block 11: 0x80 -> 0xBC). The GBA
+                        // has no IR port at all and reads bit 1 as 1 for every
+                        // field value (real_gba_sp.sav: 0x80 -> 0xBE), so the
+                        // undocumented pull-down is CGB silicon only.
                         0xFF56 if self.cgb_features_enabled => {
                             let raw = self.io_registers.read(0xFF56);
                             let read_enabled = (raw & 0xC0) == 0xC0;
                             let signal =
                                 read_enabled && self.ir_device.receiving((raw & 0x01) != 0);
-                            (raw & !0x02) | if signal { 0x00 } else { 0x02 }
+                            let field_2_pulldown = !self.is_agb() && (raw & 0xC0) == 0x80;
+                            (raw & !0x02) | if signal || field_2_pulldown { 0x00 } else { 0x02 }
                         }
                         // OPRI (0xFF6C): only bit 0 implemented; bits 1-7 read 1.
                         0xFF6C if self.cgb_features_enabled => {
