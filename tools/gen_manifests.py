@@ -1430,26 +1430,76 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
     # script and differ only by `rev=`, and a revision pin cannot move a human's
     # reflex by 35 lines. Grade the other seven cells; exclude these three.
     #
-    # NOT excluded: offset 9, which also differs (0x78 CGB / 0xFF SP). It sits
-    # after the LY=4 resync, so press timing reaches it only as sub-scanline
-    # phase residue, and a genuine CGB-vs-AGB difference in the ~4-T-cycle LY=153
-    # window is an equally live explanation. Excluding it would be excluding a
-    # cell because it differs, which is the thing this list must not do. Both
-    # rows are expected to keep failing there, now reported against offset 9
-    # instead of against a truncated run.
+    # ALSO excluded: offset 9 (0x78 CGB / 0xFF SP). This reverses an earlier
+    # reading of this same block, which kept 9 graded on the argument that the
+    # `LD B,$04; CALL $0373` resync re-anchors frame phase, so a press could
+    # only reach 9 as sub-scanline residue too small to explain the spread.
+    # That argument rests on a false premise, and the ROM disproves it:
+    #
+    #   a) $0373 does NOT re-anchor sub-scanline phase. It is a poll loop --
+    #      `LD A,[$FF00+C] / CP B / JR NZ` = 2+1+3 = 6 M-cycles per sample.
+    #      A scanline is 114 M-cycles single-speed (228 double), a frame 17556
+    #      (35112). 6 divides ALL of them exactly (19, 38, 2926, 5852). A poll
+    #      whose period exactly divides the scanline is phase-TRANSPARENT: it
+    #      re-anchors the line NUMBER and passes the sub-scanline phase through
+    #      verbatim. Press residue reaches offset 9 undiminished.
+    #   b) Offset 9's own wait target is `offset8 + 5` = 153, and LY reads 153
+    #      for only ~4 T-cycles per frame against a 12-T (double-speed) sample
+    #      grid. So offset 9 is a COMPARATOR on the phase (a) transmits, not a
+    #      linear function of it. Its output is a step: catch the window and 0
+    #      HBlanks elapse (rHDMA5 stays 0x12, which is what we emit), miss it
+    #      and >=19 do (transfer completes, 0xFF -- the SP column). A 1-T-cycle
+    #      residue difference produces the full swing, so "the 0x78/0xFF spread
+    #      is too large to be press-derived" measures nothing; no spread is.
+    #   c) The decisive check needs no mechanism at all. Offsets 6,7,8 are
+    #      byte-identical across the two captures (0x13/0x12/0x94), so both
+    #      units enter that final wait with identical rHDMA5, identical LY and
+    #      identical target B. No architectural state is left to differ on --
+    #      only phase. Yet offset 9 differs. The sole nondeterministic input in
+    #      the ROM is the block-2 press, whose divergence is measured directly
+    #      at offset 4 (105 vs 70). Offset 9 is therefore press-derived, and
+    #      the rationale is the same one that justifies 3-5.
+    #
+    # Corroboration that 0x78 is not even a measurement: block 2 leaves a
+    # PROVISIONAL magic at offsets 6..9 (`LD [HL],$12/$34/$56/$78` with HL then
+    # restored), so a run that never reaches the offset-9 store leaves 0x78
+    # sitting there -- exactly the CGB byte. Per (a) a missed poll is permanent
+    # (the phase never drifts), so a miss hangs $0373 forever. The CGB unit hung
+    # and never wrote offset 9; its trailing 12 34 56 78 is residue from an
+    # earlier run, the unerased-flashcart hazard PREFIX_ONLY already documents.
+    # Grading a cell against a byte the ROM never stored asserts nothing.
+    #
+    # Ranges are half-open, so this is {3,4,5} + {9}; 6,7,8 stay graded (they
+    # are identical across units and we match them).
     PRESS_TIMING_SKIP = {
-        "dma/hdma_halt": "0x3-0x6",
+        "dma/hdma_halt": "0x3-0x6,0x9-0xA",
     }
 
     # 2. Tests whose ROM needs more than the suite-wide budget to finish
     #    writing. The `sram` path runs a FLAT cycle budget with no done-marker,
     #    halt or quiescence detection (runner.rs), so a short budget silently
-    #    truncates a ROM mid-write and grades the partial buffer. These six
-    #    stop 379 bytes short at the suite default and are byte-exact once they
-    #    finish (ndiff 0/1028); measured saturating -- 3000 and 12000 frames
-    #    give identical output. Carried per-test rather than by raising the
-    #    suite budget, which would multiply the emulation time of all ~340 rows
-    #    to fix 12.
+    #    truncates a ROM mid-write and grades the partial buffer. The six mode2
+    #    entries stop 379 bytes short at the suite default and are byte-exact
+    #    once they finish (ndiff 0/1028); measured saturating -- 3000 and 12000
+    #    frames give identical output. Carried per-test rather than by raising
+    #    the suite budget, which would multiply the emulation time of all ~340
+    #    rows to fix a handful (measured: 24s -> 80s for zero extra coverage).
+    #
+    #    mode3_stat_timing_spr_en_gbc_mode_8x16 is the same failure mode, found
+    #    by sweeping every failing row at 800 vs 4000 frames: it is the ONLY
+    #    other truncated one in the suite -- 647 diffs at the 800-frame default
+    #    of which 636 are unwritten 0xFF, collapsing to 11 once the ROM runs to
+    #    completion. Every other failing row is bit-identical at 800 and 4000,
+    #    including the three that DO diff on 0xFF cells (tac_set_disabled 144,
+    #    dma_timing_lcd_on 23, tac_set_enabled 15) -- those 0xFFs are genuine
+    #    wrong values, not truncation, so their counts were never inflated.
+    #    Saturation measured on the cell list, not just the count: 2500 is the
+    #    first budget that saturates and 2500/3000/4000/12000 give byte-identical
+    #    output. 3000 is used for the margin and to reuse the mode2 constant.
+    #    The 11 survivors are all want=0xC4 got=0xC7 -- a real mode-3 length
+    #    defect in the core. These rows still FAIL after this change, and that
+    #    is the point: the failure is now diagnostic instead of a truncation
+    #    artifact that hid an 11-cell core bug behind 636 unwritten bytes.
     NEEDS_LONG_BUDGET = {
         "lcd/mode2/mode2_oam_timing_spr_dis_gbc_mode",
         "lcd/mode2/mode2_oam_timing_spr_en_gbc_mode",
@@ -1457,6 +1507,7 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
         "lcd/mode2/mode2_stat_timing_spr_dis_gbc_mode_8x16",
         "lcd/mode2/mode2_stat_timing_spr_en_gbc_mode",
         "lcd/mode2/mode2_stat_timing_spr_en_gbc_mode_8x16",
+        "lcd/mode3/mode3_stat_timing_spr_en_gbc_mode_8x16",
     }
 
     refs_root = out / "refs" / "gbc-hw-tests"
