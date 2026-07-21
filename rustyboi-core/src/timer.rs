@@ -545,6 +545,28 @@ impl Timer {
     /// two AGB units contradict each other on everything except D16->E256.
     /// Fitting those would be fitting one die's metastability.
     ///
+    /// AGB D64 -> E1024 is a PROVEN floor, not an unexplored pair. It is the sole
+    /// reason timers/tac_set_disabled#agb fails, at exactly 3 of its 14336 cells
+    /// (0x638E, 0x6796, 0x6B94 -- all TIMA reads, all double-speed, all this one
+    /// pair). Do not re-open it on the observation that the two AGB units agree
+    /// there: real_gba glitches on ALL 224 guard-passing cells of the family, so
+    /// agreement with it inside the band is vacuous, and the units still disagree
+    /// on 221 of the family's 448 cells. real_gba_sp itself is self-contradictory:
+    ///   - Its single-speed pass glitches 0/224; its double-speed pass glitches
+    ///     3/224. The probe grid is speed-invariant -- real_gbc's and real_gba's
+    ///     single- and double-speed patterns for a given pair are byte-identical
+    ///     -- so the two passes probe the same (seed, SYS) points and disagree.
+    ///   - TAC bit 3 is a don't-care, so the ROM writes each new TAC twice per
+    ///     probe (b=4 and b=12). All 3 cells glitch at b=12 and NOT at b=4: the
+    ///     same logical write, same seed, same SYS phase, same run, same die,
+    ///     opposite results.
+    ///
+    /// The 3 cells are 3 distinct seeds x 3 distinct SYS phases, so any rule of
+    /// the form (seed predicate AND SYS predicate) spans the full 3x3 product and
+    /// fires on at least 9. The cheapest mechanism-shaped rules cost 22 to 221
+    /// newly-broken cells to fix 3; only an enumerated pair table hits exactly 3.
+    /// That is the 989e45d0 mistake, so nothing is modelled here.
+    ///
     /// This is NOT the AGB quirk removed in 989e45d0. That one fired on old-TAC-
     /// ENABLED writes and broke timers/timer_reset_test; this path is unreachable
     /// unless the old TAC is disabled, so that row stays fixed.

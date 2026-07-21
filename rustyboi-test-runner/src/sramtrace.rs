@@ -257,7 +257,17 @@ impl SramTrace {
         self.reg_shadow = registers;
     }
 
-    /// The instruction that last wrote a graded offset.
+    /// The instruction that last CHANGED a graded offset.
+    ///
+    /// Not "last wrote": [`Self::after_step`] recovers writes by diffing SRAM
+    /// against a shadow copy, so a store that writes a byte's existing value is
+    /// invisible and leaves the older attribution standing. On a capture whose
+    /// probe results collide with the ROM's own fill byte this reads as "the
+    /// test loop never got here" when the loop did run and simply stored the
+    /// fill value -- it has already produced one misdiagnosis on
+    /// timers/tac_set_disabled, where three cells blamed on `memset` were really
+    /// ordinary probe results that happened to equal the 0x00 fill. Corroborate
+    /// a suspicious blame against the ROM's write order before believing it.
     pub(crate) fn blame(&self, offset: usize) -> Option<&SramWrite> {
         self.last_write.get(&offset)
     }
@@ -269,8 +279,9 @@ impl SramTrace {
         }
     }
 
-    /// One `SRAM_BLAME` line: offset -> writing PC, joinable straight onto a
-    /// `RB_SRAM_VERBOSE` offset.
+    /// One `SRAM_BLAME` line: offset -> the PC that last CHANGED it, joinable
+    /// straight onto a `RB_SRAM_VERBOSE` offset. See [`Self::blame`] for why
+    /// same-value stores do not appear here.
     pub(crate) fn blame_line(&self, offset: usize, want: u8, got: u8) -> String {
         match self.blame(offset) {
             Some(write) => format!(
@@ -283,7 +294,7 @@ impl SramTrace {
                 self.symbol_field(write.pc),
             ),
             None => format!(
-                "SRAM_BLAME off={offset:#06X} want={want:#04X} got={got:#04X} pc=? (never written during the run)"
+                "SRAM_BLAME off={offset:#06X} want={want:#04X} got={got:#04X} pc=? (never changed during the run; a store of the byte's existing value leaves no record)"
             ),
         }
     }
