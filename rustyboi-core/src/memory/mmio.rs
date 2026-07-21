@@ -18,6 +18,45 @@ fn default_oam_high() -> [u8; 0x60] {
     [0; 0x60]
 }
 
+/// Decode a `0xFEA0-0xFEFF` address (low byte) to its `oam_high` cell.
+///
+/// This region is not a flat 96-byte RAM: fewer cells are physically present
+/// than addresses, so addresses alias, and WHICH ones alias is CPU-revision
+/// specific. The two known decodes disagree about the *same* cell, so this is a
+/// genuine silicon fork rather than an oracle conflict:
+///
+/// - CPU-CGB-D/E (`cgb_de`): 32 plain cells at 0xFEA0-0xFEBF, then 16 cells at
+///   0xFEC0-0xFEFF selected by the low nibble (mirrored x4) — 48 cells total.
+///   AntonioND gbc-hw-tests `oam_echo_ram_read`/`_2` encode the probe as four
+///   blocks of run-length 1/4/16/64 over a 4-value alphabet, so the captures
+///   reconstruct the exact source index every read resolved to; `real_gbc.sav`
+///   and `real_gbc_2.sav` (two units) agree byte for byte, and the DMG-compat
+///   ROM (`..._gbc_in_dmg_mode`) resolves identically, confirming the decode is
+///   a property of the silicon and not of the CGB feature set.
+/// - Our default `CGB` (cgb04c / CPU-CGB-C): index masked with 0xE7, i.e. three
+///   groups of 8 each mirrored x4. cgb-acid-hell's revision probe (write
+///   0x55->0xFEA0, 0x44->0xFEB8, read back 0xFEA0) needs 0xFEA0 and 0xFEB8 to
+///   SHARE a cell to select its reference tile table; the D/E captures prove on
+///   that silicon they do not. Keeping the fold on `CGB` and the capture decode
+///   on `CGBE` lets both oracles hold at once.
+///
+/// DMG indexes directly into a shadow that is never written, so it reads 0x00
+/// (AntonioND `real_gb.sav`/`real_gbp.sav`). AGB has no cells here at all and
+/// never reaches this function.
+fn oam_high_index(lo: u8, cgb: bool, cgb_de: bool) -> usize {
+    if cgb_de {
+        if lo < 0xC0 {
+            lo as usize - 0xA0
+        } else {
+            0x20 + (lo & 0x0F) as usize
+        }
+    } else if cgb {
+        (lo & 0xE7) as usize - 0xA0
+    } else {
+        lo as usize - 0xA0
+    }
+}
+
 fn default_pending_oam_zero() -> std::cell::Cell<i16> {
     std::cell::Cell::new(-1)
 }
@@ -5514,25 +5553,23 @@ impl memory::Addressable for Mmio {
                     }
                 }
                 // 0xFEA0-0xFEFF. While an OAM-DMA transfer owns the bus the read
-                // returns 0xFF (the same DMA gate). Otherwise
-                // it returns the `oam_high` shadow: CGB hardware (incl. DMG-compat)
-                // mirrors into the OAM index space masked with 0xE7 (the
-                // OAM-shadow tail); DMG indexes directly and the shadow is
-                // initialised to 0x00. NOTE the &0xE7 decode is CPU-CGB-C-specific
-                // (our modeled default): cgb-acid-hell's revision probe (write
-                // 55->FEA0, 44->FEB8, read FEA0; picks per-revision tile tables)
-                // renders our reference only via the folded 0x44 branch, while
-                // AntonioND gbc-hw-tests oam_echo_ram_read/_2 real_gbc.sav prove a
-                // DIFFERENT unit with 32 plain cells at A0-BF (no B8->A0 fold) +
-                // 16 nibble-decoded cells at C0-FF - mutually exclusive same-cell
-                // observables, i.e. a real per-revision decoder difference.
+                // returns 0xFF (the same DMA gate). Otherwise it returns the
+                // `oam_high` shadow through the revision-specific cell decode
+                // (see `oam_high_index`), except on AGB, which has no storage
+                // here at all: it is a pure address decode returning the low
+                // byte's high nibble doubled (0xFEAx->0xAA .. 0xFEFx->0xFF), and
+                // writes have no effect. AntonioND gbc-hw-tests
+                // oam_echo_ram_read/_2/_gbc_in_dmg_mode real_gba.sav and
+                // real_gba_sp.sav read back that decode identically in all four
+                // probe blocks, i.e. the written pattern never lands.
                 UNUSED_START..=UNUSED_END => {
+                    let lo = (addr & 0xFF) as u8;
                     if self.dma_transfer_in_progress() {
                         EMPTY_BYTE
-                    } else if self.is_cgb() {
-                        self.oam_high[((addr & 0xFF) & 0xE7) as usize - 0xA0]
+                    } else if self.is_agb() {
+                        (lo >> 4) * 0x11
                     } else {
-                        self.oam_high[(addr & 0xFF) as usize - 0xA0]
+                        self.oam_high[oam_high_index(lo, self.is_cgb(), self.is_cgb_de())]
                     }
                 }
                 IO_REGISTERS_START..=IO_REGISTERS_END => {
@@ -5824,15 +5861,17 @@ impl memory::Addressable for Mmio {
                     }
                 }
                 // CGB OAM mirror (0xFEA0-0xFEFF). Writable only when the OAM bus
-                // is free (no in-progress OAM DMA); otherwise dropped; &0xE7 index
-                // fold per CPU-CGB-C (see the UNUSED read path note). Gated on CGB
-                // *hardware* (is_cgb), not cgb_features: AntonioND
+                // is free (no in-progress OAM DMA); otherwise dropped. The cell
+                // decode is CPU-revision specific (see `oam_high_index`). Gated
+                // on CGB *hardware* (is_cgb), not cgb_features: AntonioND
                 // oam_echo_ram_read_gbc_in_dmg_mode real_gbc.sav proves CPU writes
                 // land in DMG-compat mode on CGB silicon (pattern reads back, vs
-                // stale boot residue if dropped). DMG ignores writes entirely.
+                // stale boot residue if dropped). DMG ignores writes entirely, and
+                // AGB has no cells here so its writes are dropped too.
                 UNUSED_START..=UNUSED_END => {
-                    if self.is_cgb() && !self.dma_transfer_in_progress() {
-                        self.oam_high[((addr & 0xFF) & 0xE7) as usize - 0xA0] = value;
+                    if self.is_cgb() && !self.is_agb() && !self.dma_transfer_in_progress() {
+                        let lo = (addr & 0xFF) as u8;
+                        self.oam_high[oam_high_index(lo, true, self.is_cgb_de())] = value;
                     }
                 }
                 IO_REGISTERS_START..=IO_REGISTERS_END => {
