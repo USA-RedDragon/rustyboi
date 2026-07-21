@@ -10777,6 +10777,32 @@ impl Ppu {
         }
     }
 
+    /// The un-charged CGB-native VBLANK halt-exit residue, in master cc.
+    ///
+    /// The CGB-native halt exit re-phases the CPU clock to the waking IRQ edge
+    /// (`halt_grid_quantized`), but only the VBLANK wake class leaves that exit
+    /// M-cycle uncharged: sm83.rs gives a CGB-native VBLANK wake the DMG setup
+    /// window, while an LCD wake charges the extra CGB exit M-cycle as a REAL
+    /// stall and the timer's raise cc already IS the wake boundary. So a
+    /// VBLANK-woken CGB-native stream resumes one master cc off the hardware
+    /// phase and every later PPU-register read samples one cc early — including
+    /// reads thousands of instructions past the wake, since nothing re-anchors
+    /// the stream until the next HALT or LCD enable.
+    ///
+    /// Both wake models carry it: `halt_wake_grid_cgb` marks the quantized
+    /// (M-cycle-grid) exit and `halt_wakeup_skew` the legacy event-snapped one
+    /// (these streams cross into double speed and switch models mid-run).
+    ///
+    /// DMG and CGB-compat are excluded because they provably resume on the
+    /// pre-halt grid rather than re-phasing (same reference as
+    /// `halt_grid_quantized`).
+    #[inline]
+    pub(crate) fn uncharged_halt_exit(mmio: &mmio::Mmio) -> i64 {
+        ((mmio.halt_wake_grid_cgb() || mmio.halt_wakeup_skew())
+            && mmio.is_cgb_features_enabled()
+            && mmio.halt_wake_vblank()) as i64
+    }
+
     /// The SINGLE closed-form STAT-resolve mode resolver.
     /// Computes the FF41 mode bits PURELY from the line geometry at the exact
     /// access cc, with NO reliance on the per-dot renderer's poked FF41 register.
@@ -10807,6 +10833,10 @@ impl Ppu {
         // after enable / window-invalidated mid-mode-3) it returns None and the
         // caller defers to the renderer register for exactly those lines.
         let ds = mmio.is_double_speed_mode();
+        // Un-charged CGB-native VBLANK halt-exit residue: the same one master cc
+        // the FF44 read path carries (see `uncharged_halt_exit`). FF41 and FF44 are
+        // read by the SAME resumed instruction stream, so they share its phase.
+        let access_cc = access_cc + Self::uncharged_halt_exit(mmio) as u64;
         self.get_stat_mode3to0_at_cc(access_cc, ds)
             .or_else(|| self.get_stat_mode_at_cc(mmio, access_cc))
     }
@@ -10825,6 +10855,9 @@ impl Ppu {
         }
         // Reanchor the LY counter.time to master cc (`p_now + lc.time`), matching
         // `get_stat_mode_at_cc`: rustyboi's LY counter.time is in abs_cc units.
+        // Same residue as the mode bits above: FF41's mode bits and its LYC=LY
+        // coincidence bit are two fields of ONE read and must resolve at one cc.
+        let access_cc = access_cc + Self::uncharged_halt_exit(mmio) as u64;
         let lc = self.ly_counter_obs(mmio); // read-path phase
         // CGB first-frame-after-enable LYC-window +1: in the frame produced right
         // after LCDC.7 0->1 on CGB hardware, the LY counter is re-anchored such that
@@ -10960,10 +10993,7 @@ impl Ppu {
         // pre-halt grid rather than re-phasing (same reference as
         // `halt_grid_quantized`); including them regresses the whole dmg_mode
         // half of the AntonioND ly_equals_lyc family.
-        let uncharged_halt_exit = (mmio.halt_wake_grid_cgb() || mmio.halt_wakeup_skew())
-            && mmio.is_cgb_features_enabled()
-            && mmio.halt_wake_vblank();
-        let to_next = time - cc - uncharged_halt_exit as i64; // time-to-next-LY
+        let to_next = time - cc - Self::uncharged_halt_exit(mmio); // time-to-next-LY
         if ly_reg == last_line {
             // Line 153: FF44 reads 0 early. At single speed the LY register read
             // (`time - cc <= cpl - isAgb`) returns 0 for the WHOLE of line 153
