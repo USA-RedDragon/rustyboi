@@ -11120,9 +11120,28 @@ impl Ppu {
         // the comparator one line behind (lyc_0 ly=153/lyc=0 on the wrap branch;
         // lyc_152_153, lyc_1_143 and lyc_2_144 mid-frame).
         let ds_anticipate = 2 * (lc.ds && (mmio.is_agb() || mmio.is_cgb_de())) as i64;
+        // Wrap-line (LY=153) LY=0 anticipation: ONE DOT earlier than the shared
+        // `get_lyc_cmp_ly` models. That helper places the 153->0 compare switch
+        // `line_time - (6 + 6*ds)` in, i.e. 6 dots past the line-153 start; the
+        // gbc-hw-tests lcd_frame_timings mode-2 LY0 captures put the FF41 READ's
+        // switch at 5 dots. One dot, identically in both speeds (`1 + ds` master
+        // cc), is the unique value that makes those captures byte-exact: the
+        // 855-probe SS and DS sweeps bracket it from opposite sides, and 2+ dots
+        // regresses cells the 6-dot model already got right.
+        //
+        // Scoped to this read resolve rather than fixed in `get_lyc_cmp_ly`, for
+        // the same reason `tail_hold` and `ds_anticipate` are: the STAT-IRQ
+        // trigger paths share that helper and are co-tuned to the plain offsets.
+        // Moving it there is not equivalent and is not a superset -- it shifts
+        // when STAT IRQs fire, which perturbs these ROMs' own control flow enough
+        // to mask the read-path correction (a global 6->5 leaves these captures
+        // bit-identical while costing rows elsewhere).
+        let wrap_anticipate =
+            (lc.ly == stat_irq::LCD_LINES_PER_FRAME - 1) as i64 * (1 + lc.ds as i64);
         let lc_master = stat_irq::LyCounter {
             ly: lc.ly,
-            time: (self.p_now as i64 + lc.time as i64 + ss_plus1 - ds_anticipate).max(0) as u64,
+            time: (self.p_now as i64 + lc.time as i64 + ss_plus1 - ds_anticipate - wrap_anticipate)
+                .max(0) as u64,
             ds: lc.ds,
         };
         let cmp = stat_irq::get_lyc_cmp_ly(&lc_master, access_cc);
@@ -11160,7 +11179,10 @@ impl Ppu {
         // LY==LYC probe at time-to-next-LY 3 and wants $C4, and an uncompensated
         // threshold returns $C0 — a REGRESSION, in the opposite direction to the
         // cells this term fixes.
-        Some(lyc_reg == cmp.ly && cmp.time_to_next_ly > 2 - tail_hold - ds_anticipate)
+        Some(
+            lyc_reg == cmp.ly
+                && cmp.time_to_next_ly > 2 - tail_hold - ds_anticipate - wrap_anticipate,
+        )
     }
 
 
