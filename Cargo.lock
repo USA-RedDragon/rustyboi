@@ -3086,6 +3086,7 @@ dependencies = [
  "bincode",
  "clap",
  "libm",
+ "rustyboi-mix",
  "serde",
  "serde_bytes",
  "web-time",
@@ -3138,6 +3139,10 @@ name = "rustyboi-libretro-sys"
 version = "0.1.0"
 
 [[package]]
+name = "rustyboi-mix"
+version = "0.1.0"
+
+[[package]]
 name = "rustyboi-platform"
 version = "0.1.0"
 dependencies = [
@@ -3176,6 +3181,7 @@ version = "0.1.0"
 dependencies = [
  "brotli",
  "brotli-decompressor",
+ "rustyboi-mix",
 ]
 
 [[package]]

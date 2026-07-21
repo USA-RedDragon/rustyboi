@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "rustyboi-core",
+    "rustyboi-mix",
     "rustyboi-session",
     "rustyboi-debugger",
     "rustyboi-egui",
@@ -14,7 +15,13 @@ members = [
     "rustyboi-replay",
     "rustyboi-replay-web",
 ]
-default-members = ["rustyboi-core", "rustyboi-debugger", "rustyboi-egui", "rustyboi-platform"]
+default-members = [
+    "rustyboi-core",
+    "rustyboi-mix",
+    "rustyboi-debugger",
+    "rustyboi-egui",
+    "rustyboi-platform",
+]
 
 # Single source of truth for every dependency used by 2+ workspace members.
 # Members reference these with `dep = { workspace = true }` and add only the
@@ -23,6 +30,10 @@ default-members = ["rustyboi-core", "rustyboi-debugger", "rustyboi-egui", "rusty
 [workspace.dependencies]
 rustyboi-core = { path = "rustyboi-core" }
 rustyboi-frontend = { path = "rustyboi-frontend" }
+# The shared APU mixer. Zero dependencies by design: rustyboi-replay pulls it
+# into the compat gallery's wasm player, which is why replay cannot just depend
+# on the core.
+rustyboi-mix = { path = "rustyboi-mix" }
 # `encode` (the brotli compressor half) is this crate's own default feature;
 # rustyboi-replay-web opts out of it, so the shared base must not force it on.
 rustyboi-replay = { path = "rustyboi-replay", default-features = false }

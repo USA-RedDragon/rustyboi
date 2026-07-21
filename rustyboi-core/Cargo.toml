@@ -12,6 +12,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 clap = { workspace = true }
+rustyboi-mix = { workspace = true }
 serde = { workspace = true }
 serde_bytes = "=0.11.19"
 libm = "=0.2.16"

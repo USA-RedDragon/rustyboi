@@ -1,10 +1,15 @@
-//! The APU's analog stage: the per-channel DACs, the DAC-off fade, and the
-//! output high-pass filter — everything between the digital generators and the
-//! host's speaker.
+//! The APU's analog stage: the DAC-off fade and the output high-pass filter —
+//! the continuous, stateful half of what sits between the digital generators
+//! and the host's speaker.
 //!
-//! Pan Docs (Audio details): each generator emits a digital `$0..$F` that its
-//! DAC "linearly translate[s] to the analog range -1 to 1 … the slope is
-//! negative: 'digital 0' maps to 'analog 1'". A *deactivated channel* still
+//! The discrete half — the DAC transfer function itself and the stereo mixer —
+//! lives in [`rustyboi_mix`], because the `.rba` replay decoder has to
+//! reproduce it bit-for-bit from a recorded tap and cannot depend on this
+//! crate. Everything in this file is deliberately downstream of that boundary:
+//! a tap value is always one of the 16 DAC levels or `0.0`, whereas a fade ramp
+//! and a filter state are not representable in the recording's palette at all.
+//!
+//! Pan Docs (Audio details): a *deactivated channel* still
 //! feeds its still-enabled DAC a digital 0, so it sits at analog +1 rather than
 //! at silence; a *disabled DAC* instead "fades to an analog value of 0, which
 //! corresponds to 'digital 7.5'", and "the nature of this fade is not entirely
@@ -21,11 +26,9 @@ use crate::audio::controller::HOST_SAMPLE_RATE;
 use crate::gb::DMG_CPU_HZ;
 use serde::{Deserialize, Serialize};
 
-/// Digital `0..=15` to the DAC's analog output. Negative slope: digital 0 is
-/// analog +1, digital 15 is analog -1, and the (unreachable) digital 7.5 is 0.
-pub(super) fn dac_analog(digital: u8) -> f32 {
-    (7.5 - digital as f32) / 7.5
-}
+/// The DAC transfer function, re-exported at its historical path so the
+/// generators keep calling `analog::dac_analog`. Defined in [`rustyboi_mix`].
+pub(super) use rustyboi_mix::dac_analog;
 
 /// Per-cycle charge factor on DMG-family silicon (blargg: DMG-03/05/06).
 const DMG_CHARGE_PER_CYCLE: f32 = 0.999958;
@@ -93,25 +96,6 @@ impl AnalogModel {
         self.charge_per_cycle()
             .powf(DMG_CPU_HZ as f32 / HOST_SAMPLE_RATE)
     }
-}
-
-/// What a channel contributes to a stereo side that NR51 does NOT route it to,
-/// on AGB only, in channel order.
-///
-/// With analog mixing an unrouted channel is simply not summed. AGB sums
-/// digitally instead, so there is no "not summed" — an unrouted channel
-/// contributes the same fixed level a routed channel emitting digital 0 would.
-/// SameBoy `Core/apu.c`, `update_sample`: "On the AGB, because no analog mixing
-/// is done, the behavior of NR51 is a bit different. A channel that is not
-/// connected to a terminal is idenitcal to a connected channel playing PCM
-/// sample 0."
-///
-/// Its `int8_t silence = 0` is [`dac_analog`]`(0)` in our units (SameBoy's
-/// `(0xF - value * 2)` over its 15-unit rail is exactly `(7.5 - d) / 7.5`).
-/// CH3 is the exception and gets `silence = 7 * 2`, i.e. digital 7 — taken
-/// BEFORE the CH3 inversion, which SameBoy applies only on the routed path.
-pub(super) fn agb_unrouted_levels() -> [f32; 4] {
-    [dac_analog(0), dac_analog(0), dac_analog(7), dac_analog(0)]
 }
 
 /// Below this the fade / capacitor is snapped to exactly zero: it keeps a long
@@ -234,16 +218,8 @@ impl AnalogStage {
 mod tests {
     use super::*;
 
-    /// The DAC's negative slope, at both rails and around the midpoint.
-    #[test]
-    fn dac_maps_digital_zero_to_analog_one_on_a_negative_slope() {
-        assert_eq!(dac_analog(0), 1.0);
-        assert_eq!(dac_analog(15), -1.0);
-        assert!(dac_analog(7) > 0.0 && dac_analog(8) < 0.0, "7.5 is the zero crossing");
-        for d in 1..=15u8 {
-            assert!(dac_analog(d) < dac_analog(d - 1), "slope is negative at {d}");
-        }
-    }
+    // The DAC's own transfer function is tested in `rustyboi-mix`, which owns
+    // it; what remains here is the stage built on top of it.
 
     /// blargg's worked example: "if you were applying high_pass() at 44100 Hz,
     /// you'd use a charge factor of 0.996".

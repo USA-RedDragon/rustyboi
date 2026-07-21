@@ -1022,54 +1022,9 @@ impl Audio {
         ]
     }
 
-    /// The mixer proper: NR51 routing, NR50 master volume, and the 4-channel
-    /// normalize. Pure — it is the whole of what a tap sample reconstructs to.
-    ///
-    /// `rustyboi_replay::mix` is a bit-for-bit clone of this function and the
-    /// f32 operation order is load-bearing (the compat gallery rebuilds audio
-    /// through it); the two must change together.
-    fn mix_stereo(ch: [f32; 4], nr50: u8, nr51: u8, enabled: bool, agb: bool) -> (f32, f32) {
-        if !enabled {
-            return (0.0, 0.0);
-        }
-
-        let mut left_mix = 0.0;
-        let mut right_mix = 0.0;
-
-        // On AGB every channel contributes to both sides unconditionally; NR51
-        // selects between the channel's own level and a fixed unrouted level
-        // rather than between summing and not summing (see
-        // `analog::agb_unrouted_levels`). The `else` arm is what makes this
-        // differ from an analog mixer, where the unrouted contribution is
-        // structurally zero.
-        let unrouted = analog::agb_unrouted_levels();
-
-        for (i, &out) in ch.iter().enumerate() {
-            if nr51 & (1 << (i + 4)) != 0 {
-                left_mix += out;
-            } else if agb {
-                left_mix += unrouted[i];
-            }
-        }
-        for (i, &out) in ch.iter().enumerate() {
-            if nr51 & (1 << i) != 0 {
-                right_mix += out;
-            } else if agb {
-                right_mix += unrouted[i];
-            }
-        }
-
-        // Apply master volume
-        left_mix *= (((nr50 >> 4) & 0x07) as f32 + 1.0) / 8.0;
-        right_mix *= ((nr50 & 0x07) as f32 + 1.0) / 8.0;
-
-        // Divide by 4 to normalize since we're summing 4 channels
-        (left_mix / 4.0, right_mix / 4.0)
-    }
-
-    /// Reconstruct the stereo mix of one tapped sample. This is the canonical
-    /// definition the `.rba` decoder reproduces; exposed so a consumer holding
-    /// tap data can check its own reconstruction against the core's.
+    /// Reconstruct the stereo mix of one tapped sample, through the same
+    /// [`rustyboi_mix::mix_stereo`] the `.rba` decoder calls — one definition,
+    /// so the two cannot disagree. Exposed for consumers holding tap data.
     ///
     /// The result is PRE-analog-stage: it carries neither the DAC-off fade nor
     /// the output high-pass, both of which are continuous, stateful, and
@@ -1081,7 +1036,7 @@ impl Audio {
     /// that never changes.
     pub fn mix_tap_sample(sample: ChannelSample, agb: bool) -> (f32, f32) {
         let (ch, nr50, nr51, enabled) = sample;
-        Self::mix_stereo(ch, nr50, nr51, enabled, agb)
+        rustyboi_mix::mix_stereo(ch, nr50, nr51, enabled, agb)
     }
 
     /// Whether this machine mixes digitally (AGB). Callers holding tap data
@@ -1134,7 +1089,8 @@ impl Audio {
         }
         let faded = self.analog.fade(raw, self.channel_dacs_on());
         let agb = self.analog.model().is_agb();
-        let (left, right) = Self::mix_stereo(faded, self.nr50, self.nr51, self.audio_enabled, agb);
+        let (left, right) =
+            rustyboi_mix::mix_stereo(faded, self.nr50, self.nr51, self.audio_enabled, agb);
         self.analog.high_pass(left, right)
     }
 }
@@ -1843,7 +1799,7 @@ mod tests {
     /// triggered, so it feeds its live DAC a digital 0 and parks at analog +1
     /// (Pan Docs, Audio details: a deactivated channel with a live DAC sits at
     /// the positive rail, not at silence). NR51 routes it to both sides and
-    /// NR50 is at full master volume, so `mix_stereo` emits a constant
+    /// NR50 is at full master volume, so the mixer emits a constant
     /// `1.0 * 8/8 / 4` = +0.25 — exactly the offset the output high-pass exists
     /// to remove.
     ///

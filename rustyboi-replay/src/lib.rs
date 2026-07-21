@@ -3,6 +3,11 @@
 //! brotli stream layer ([`stream`]). ROM-free by construction — both formats
 //! carry only rendered output. Encoding is host-side (`encode` feature); the
 //! decoders compile to a small wasm module for client-side playback.
+//!
+//! Audio reconstruction goes through [`rustyboi_mix`], the emulator core's own
+//! stereo mixer. That crate is dependency-free precisely so this one can stay
+//! small enough to ship in the gallery's wasm player — depending on the core
+//! itself would drag `clap`, `zip`, `bincode`, and `serde` into the bundle.
 
 #![forbid(unsafe_code)]
 
