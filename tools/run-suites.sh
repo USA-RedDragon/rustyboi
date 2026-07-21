@@ -449,6 +449,44 @@ build_pgo() {
         cargo build --release -p rustyboi-test-runner "${target_args[@]}"
 }
 
+# --- ROM-presence preflight ---------------------------------------------------
+# A manifest whose ROM FILES are absent still parses into cases, and the runner
+# then grades every one of them as a failure: the JSON comes back passed=0
+# total=N, which is byte-identical to a total regression. Nothing in the JSON
+# distinguishes the two -- in particular `skipped_roms` does NOT, because only
+# the name-discovery path ever sets it; run_manifest (which every suite here
+# uses) leaves it 0 whether the ROMs exist or not. So "can this suite be
+# measured at all" has to be answered here, before any count is believed.
+#
+# Field 4 of every manifest row is the ROM path, relative to $ROOT. Echoes the
+# manifest-referenced ROMs that are not on disk.
+manifest_missing_roms() {
+    awk -F'|' '!/^#/ && NF >= 4 && $4 != "" { print $4 }' "$1" | sort -u |
+    while IFS= read -r rom; do
+        if [ ! -f "$ROOT/$rom" ]; then printf '%s\n' "$rom"; fi
+    done
+}
+
+# Echo the suites (of those named in $@, default $ORDER) that cannot be measured
+# right now: manifest absent, or any of its ROMs absent. Diagnostics go to
+# stderr so callers can capture the suite list on stdout. ~0.5s for all 28.
+unmeasurable_suites() {
+    local suites="${*:-$ORDER}" suite manifest missing count
+    for suite in $suites; do
+        manifest="$SUITES_DIR/$suite.manifest"
+        if [ ! -f "$manifest" ]; then
+            warn "suite '$suite' cannot be measured: manifest not found ($manifest)"
+            printf '%s\n' "$suite"
+            continue
+        fi
+        missing="$(manifest_missing_roms "$manifest")"
+        [ -n "$missing" ] || continue
+        count="$(printf '%s\n' "$missing" | wc -l | tr -d ' ')"
+        warn "suite '$suite' cannot be measured: $count ROM file(s) missing, e.g. $(printf '%s\n' "$missing" | head -n 3 | tr '\n' ' ')"
+        printf '%s\n' "$suite"
+    done
+}
+
 # --- run one suite + gate ----------------------------------------------------
 # echoes a one-line result; returns 0 pass / 1 regression / 2 config error.
 run_suite() {
@@ -458,6 +496,9 @@ run_suite() {
     [ -n "$row" ] || { warn "unknown suite: $suite (see 'list')"; return 2; }
     local manifest="$SUITES_DIR/$suite.manifest"
     [ -f "$manifest" ] || { warn "missing manifest: $manifest"; return 2; }
+    # Absent ROMs are a config error (2), not a regression (1): grading them
+    # would print a confident "FAIL ... REGRESSION" for a suite that never ran.
+    [ -z "$(unmeasurable_suites "$suite")" ] || return 2
 
     local floor frames
     floor="$(printf '%s' "$row" | cut -d' ' -f1)"
@@ -555,7 +596,15 @@ update_readme_report() {
         || die "SUITE-PROGRESS markers not found in $readme"
 
     tmp="$(mktemp)"
-    generate_report > "$tmp"
+    # No table -> no rewrite and no ratchet. Leaving the previous (measured)
+    # counts in place keeps README stale-but-true; overwriting them with counts
+    # we could not measure makes it confidently false, and the ratchet would
+    # then bake those numbers into threshold() as well.
+    if ! generate_report > "$tmp"; then
+        rm -f "$tmp"
+        warn "README suite table left UNCHANGED (nothing was overwritten)"
+        return 1
+    fi
 
     out="$(mktemp)"
     awk -v report="$tmp" '
@@ -620,6 +669,18 @@ PY
 # Emit a GitHub-flavored markdown progress table (one row per suite, this
 # platform's pass counts). Consumed by the README auto-update in CI.
 generate_report() {
+    # Preflight FIRST, before a single row is emitted: a table is only worth
+    # publishing if every row in it was actually measured. A suite whose ROMs
+    # are missing would otherwise contribute a confident 0 (and drag the Total
+    # down with it) -- that is exactly how a committed `| rustyboi | 0 | 25 |`
+    # regression reached README. Emit nothing rather than something wrong.
+    local blocked
+    blocked="$(unmeasurable_suites)"
+    if [ -n "$blocked" ]; then
+        warn "refusing to generate the progress table: $(printf '%s\n' "$blocked" | tr '\n' ' ')cannot be measured"
+        warn "provision the ROM set first ($0 setup), or build the first-party ROMs (make -C test-roms roms)"
+        return 3
+    fi
     printf '| Suite | Passing | Total |\n'
     printf '| :--- | ---: | ---: |\n'
     local suite row frames out passed total tp=0 tt=0
@@ -690,7 +751,18 @@ if [ "$1" = "report-update" ]; then
         fi
     fi
     if [ -x "$BIN" ] && [ -f "$ROMS/.rb-setup-complete" ]; then
-        update_readme_report
+        # update_readme_report refuses (nonzero) when some suite's ROMs are
+        # absent. Locally that is an ordinary state -- the first-party ROMs are
+        # gitignored build output, and pre-commit runs with them stashed away --
+        # so skip loudly rather than block the commit. In CI the table is the
+        # authoritative artifact, so the same condition is a hard failure: a
+        # green run that quietly published a stale table is the degradation we
+        # are trying to make impossible.
+        if ! update_readme_report; then
+            [ -z "${CI:-}" ] \
+                || die "report-update: refusing to publish an unmeasurable progress table"
+            echo "run-suites: report-update skipped (some suites' ROMs are not present)"
+        fi
     else
         echo "run-suites: report-update skipped (binary or ROM set not present)"
     fi
@@ -702,7 +774,8 @@ fi
 if [ "${RB_SKIP_BUILD:-0}" != "1" ] && ! bin_ready; then build; fi
 bin_ready || die "runner binary not found at $BIN (run: $0 build)"
 
-if [ "$1" = "report" ]; then generate_report; exit 0; fi
+# Propagate generate_report's refusal (3) instead of exiting 0 on an empty table.
+if [ "$1" = "report" ]; then generate_report || exit $?; exit 0; fi
 
 if [ "$1" = "all" ]; then
     # shellcheck disable=SC2086  # ORDER is a space-separated list of bare words
