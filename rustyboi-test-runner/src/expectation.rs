@@ -369,7 +369,7 @@ pub(crate) fn parse_manifest(
         // carries `frames=<N>` (the per-test frame budget derived from the
         // shootout `runtime` seconds); other gradings ignore it.
         let arg2 = fields.get(5).copied().unwrap_or("").trim();
-        let oracle = match grading {
+        let mut oracle = match grading {
             // GBEmulatorShootout-exact grading: field 4 is a `;`-separated list
             // of reference PNGs (OR-match), field 5 is `frames=<N>`.
             "png_shootout" => {
@@ -511,6 +511,30 @@ pub(crate) fn parse_manifest(
         } else {
             Vec::new()
         };
+        // Optional ungradeable-cell exclusion for `sram`, carried as a
+        // `skip=<start>-<end>[,<start>-<end>...]` token (half-open byte ranges
+        // into the reference) in ANY trailing field. Fills the `skip` field the
+        // `SramDump` oracle already grades through, so a manifest-driven case
+        // can exclude cells the same way the hand-built gambatte fexx dumper
+        // cases do. Reserved for regions a deterministic emulator provably
+        // cannot reproduce (per-unit power-on residue, human-press timing) --
+        // each use must carry a source-derived justification at the point the
+        // generator emits it, never "these bytes happen to differ".
+        let skip_tok = fields
+            .iter()
+            .skip(4)
+            .map(|f| f.trim())
+            .find(|f| f.starts_with("skip="));
+        if let Some(tok) = skip_tok {
+            let Oracle::SramDump { skip, .. } = &mut oracle else {
+                return Err(format!(
+                    "manifest line {}: skip= is only supported for sram grading",
+                    line_no + 1
+                ));
+            };
+            *skip = parse_skip_ranges(&tok["skip=".len()..])
+                .map_err(|e| format!("manifest line {}: {e}", line_no + 1))?;
+        }
         // Optional per-case frame budget for `png`/`png_fixed`/`memauto`/`mem`/
         // `sram`, carried as a `frames=<N>` token in ANY trailing field (for
         // `png_shootout` the positional field-5 token already feeds the oracle;
@@ -559,6 +583,38 @@ pub(crate) fn parse_manifest(
         });
     }
     Ok(cases)
+}
+
+/// Parse a `skip=` token: comma-separated half-open byte ranges `<start>-<end>`
+/// (decimal, or `0x`-prefixed hex) naming reference offsets that are NOT graded.
+pub(crate) fn parse_skip_ranges(spec: &str) -> Result<Vec<std::ops::Range<usize>>, String> {
+    let num = |s: &str| -> Result<usize, String> {
+        let s = s.trim();
+        let parsed = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            Some(hex) => usize::from_str_radix(hex, 16),
+            None => s.parse::<usize>(),
+        };
+        parsed.map_err(|_| format!("bad skip bound {s}"))
+    };
+    let mut ranges = Vec::new();
+    for tok in spec.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let (start, end) = tok
+            .split_once('-')
+            .ok_or_else(|| format!("bad skip range {tok}: expected <start>-<end>"))?;
+        let (start, end) = (num(start)?, num(end)?);
+        if end <= start {
+            return Err(format!("bad skip range {tok}: end must exceed start"));
+        }
+        ranges.push(start..end);
+    }
+    if ranges.is_empty() {
+        return Err("skip= needs at least one range".to_string());
+    }
+    Ok(ranges)
 }
 
 /// Parse an `input=` script: comma-separated events `<frame>[@<ly>]:<buttons>`
@@ -963,6 +1019,33 @@ plain|dmg|png|/r.gb|/ref.png
         assert_eq!(cases[1].frames, None);
         // input= on a non-screenshot grading is rejected.
         assert!(parse_manifest("x|dmg|mooneye|/r.gb|input=20:A", &all_modes()).is_err());
+    }
+
+    #[test]
+    fn parses_manifest_skip_token() {
+        let manifest = "\
+h|cgb|sram|/r.gbc|/real.sav|input=0:a|skip=0x3-0x6
+plain|cgb|sram|/r.gbc|/real.sav
+";
+        let cases = parse_manifest(manifest, &all_modes()).unwrap();
+        assert!(matches!(
+            &cases[0].oracle,
+            Oracle::SramDump { skip, .. } if skip.len() == 1 && skip[0] == (3..6)
+        ));
+        assert!(matches!(
+            &cases[1].oracle,
+            Oracle::SramDump { skip, .. } if skip.is_empty()
+        ));
+        // Decimal bounds and multiple ranges.
+        assert_eq!(parse_skip_ranges("3-6,10-12").unwrap(), vec![3..6, 10..12]);
+        // Empty, inverted, unparseable and malformed ranges all fail.
+        assert!(parse_skip_ranges("").is_err());
+        assert!(parse_skip_ranges("6-3").is_err());
+        assert!(parse_skip_ranges("3-3").is_err());
+        assert!(parse_skip_ranges("3").is_err());
+        assert!(parse_skip_ranges("z-6").is_err());
+        // skip= on a non-sram grading is rejected.
+        assert!(parse_manifest("x|dmg|png|/r.gb|/ref.png|skip=0-1", &all_modes()).is_err());
     }
 
     #[test]
