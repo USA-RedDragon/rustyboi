@@ -1200,6 +1200,22 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
     #    (real_gbc_1 != real_gbc_2) -> per-run nondeterministic by their own
     #    measurement; residue after the data is per-unit garbage.
     EXCLUDE = {"cpu/corrupted_stop", "timers/tac_set_everything"}
+    # Tests whose upstream doc requires a button held from power-on. Without the
+    # press they do not fail, they FREEZE, and the capture is graded against a
+    # half-written SRAM.
+    #  - joy_interrupt_manual_delay: results.txt "Keep any button pressed when
+    #    initing the ROM".
+    #  - dma_halt_stop_speedchange: info.txt "Press any key when running this."
+    #    Three phases write 0xA0 bytes each (3*0xA0 + 4 magic = 484 = the CGB/AGB
+    #    capture length); phase 2 sets rP1=$00 and executes a plain STOP, which
+    #    only a keypress exits. Ungated we wrote exactly the first 0xA0 bytes and
+    #    stalled -- first mismatch at 0x00A0, expected 0x00 got 0xFF (untouched
+    #    SRAM), 484-160 = 324 bytes short. rustyboi's STOP is correct; the
+    #    manifest simply never supplied the press.
+    NEEDS_KEYPRESS = {
+        "interrupts/joy_interrupt_manual_delay",
+        "dma/dma_halt_stop_speedchange",
+    }
 
     refs_root = out / "refs" / "gbc-hw-tests"
 
@@ -1214,11 +1230,7 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
         # (/CS & A13 -> also responds at E000-FDFF). OAM-DMA E000+ sources
         # read that SRAM on CGB (dma_valid_sources_* rows E0-FF), so the
         # board fixture is pinned suite-wide, like the `rev=` hardware pins.
-        extra = ""
-        if test_id == "interrupts/joy_interrupt_manual_delay":
-            # The test requires a button held from power-on (results.txt:
-            # "Keep any button pressed when initing the ROM").
-            extra = "|input=0:a"
+        extra = "|input=0:a" if test_id in NEEDS_KEYPRESS else ""
         lines.append(
             f"gbc-hw-tests/{test_id}{rev and '#agb'}|{mode}|sram|{rom}|"
             f"{rel_to_cwd(ref)}|cart=lazy_sram_cs{extra}{rev}"
