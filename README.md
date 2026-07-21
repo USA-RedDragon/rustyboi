@@ -17,7 +17,7 @@ adjudication.
 <!-- SUITE-PROGRESS:START -->
 | Suite | Passing | Total |
 | :--- | ---: | ---: |
-| rustyboi | 25 | 25 |
+| rustyboi | 41 | 41 |
 | acid2 | 3 | 3 |
 | cgb_acid_hell | 1 | 1 |
 | mealybug | 51 | 51 |
@@ -43,9 +43,9 @@ adjudication.
 | magentests | 11 | 11 |
 | little_things_extra | 4 | 4 |
 | sketchtests | 6 | 6 |
-| gbc_hw_tests | 284 | 343 |
+| gbc_hw_tests | 297 | 343 |
 | gambatte | 5248 | 5257 |
-| **Total** | **6771** | **6843** |
+| **Total** | **6800** | **6859** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core
