@@ -656,25 +656,28 @@ esac
 # report-update is the pre-commit hook (always_run): keep it FAST and SAFE.
 # Regenerate the README table (and ratchet the threshold() floors up to the
 # measured counts) only when the staged change could actually move a pass count
-# (emulator source or a suite manifest); never download ROMs or build during a
-# commit -- skip silently if the binary/ROM set isn't ready (CI keeps the table
-# honest regardless). update_readme_report stages its own edits, so the table
-# and ratchet land in the same commit rather than aborting it.
+# (emulator source or a suite manifest); never download ROMs during a commit --
+# skip silently if the binary/ROM set isn't ready (CI keeps the table honest
+# regardless). The one build it will do is the staleness rebuild below.
+# update_readme_report stages its own edits, so the table and ratchet land in
+# the same commit rather than aborting it.
 #
-# The staged-diff fast-skip only makes sense mid-commit (pre-commit exports
-# PRE_COMMIT=1); a manual `report-update` on a clean tree has nothing staged and
-# must still regenerate -- otherwise it is a silent no-op.
+# The fast-skip keys off "something is staged, but nothing that moves counts",
+# not off PRE_COMMIT (which pre-commit does not reliably export -- a tools-only
+# commit used to run the whole battery). A manual `report-update` on a clean
+# tree has nothing staged and must still regenerate, or it is a silent no-op.
 if [ "$1" = "report-update" ]; then
-    if [ -n "${PRE_COMMIT:-}" ] \
+    if ! git diff --cached --quiet 2>/dev/null \
         && git diff --cached --quiet -- rustyboi-core rustyboi-test-runner/suites 2>/dev/null; then
         exit 0  # committing, but no source/manifest change staged -> counts can't have moved
     fi
     # Staleness guard: a runner binary older than the staged core/runner
-    # sources grades the PREVIOUS tree and writes confidently wrong counts
-    # into README (it has happened repeatedly: false 205 and 215 gbc_hw rows).
-    # Refuse loudly instead of degrading silently; the committer rebuilds and
-    # re-commits.
-    if [ -n "${PRE_COMMIT:-}" ] && [ -x "$BIN" ]; then
+    # sources grades the PREVIOUS tree and writes confidently wrong counts into
+    # README (it has happened repeatedly: false 205 and 215 gbc_hw rows). This
+    # is the one case where building during a commit is worth the wall clock --
+    # we only get here with core/runner sources staged, i.e. counts really can
+    # move. A failed build aborts the commit, which is also what we want.
+    if [ -x "$BIN" ]; then
         newest_src=$(git -C "$ROOT" diff --cached --name-only -- \
                 rustyboi-core rustyboi-test-runner 2>/dev/null \
             | while IFS= read -r f; do
@@ -682,9 +685,8 @@ if [ "$1" = "report-update" ]; then
             done | sort -rn | head -n 1)
         bin_time=$(stat -c %Y "$BIN" 2>/dev/null || echo 0)
         if [ -n "$newest_src" ] && [ "$bin_time" -lt "$newest_src" ]; then
-            echo "run-suites: REFUSING report-update: $BIN is older than staged sources." >&2
-            echo "            Rebuild first:  cargo build -p rustyboi-test-runner --release" >&2
-            exit 1
+            log "runner binary is older than the staged sources; rebuilding"
+            build || die "rebuild failed; not grading with the stale $BIN"
         fi
     fi
     if [ -x "$BIN" ] && [ -f "$ROMS/.rb-setup-complete" ]; then
