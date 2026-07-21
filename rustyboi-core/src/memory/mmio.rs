@@ -1381,10 +1381,13 @@ impl Mmio {
 
     /// Set the AGB (GBA-in-GBC-mode) hardware flag. AGB == CGB plus the small
     /// AGB-specific diff set. Called once from `GB::new` for Hardware::AGB.
+    ///
+    /// The timer is NOT part of the fanout: the only AGB-specific timer
+    /// behaviour we ever modelled was the TAC-enable bump, removed after
+    /// AntonioND's real GBA-SP capture contradicted it (see `Timer::set_tac`).
     pub(crate) fn set_agb(&mut self, agb: bool) {
         self.is_agb = agb;
         self.audio.set_agb(agb);
-        self.timer.set_agb(agb);
     }
 
     /// Set the MGB (Game Boy Pocket) hardware flag. Only gates the undocumented

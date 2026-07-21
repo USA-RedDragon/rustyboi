@@ -3598,7 +3598,6 @@ mod reset_identity_tests {
     //! power cycle" rather than a hand-copied constant.
     use super::*;
     use crate::audio::NR52;
-    use crate::timer::{DIV, TAC, TIMA};
 
     /// Wave RAM ($FF30-$FF3F).
     const WAVE_RAM: u16 = 0xFF30;
@@ -3650,26 +3649,6 @@ mod reset_identity_tests {
         out
     }
 
-    /// TAC re-enable signature. Only an AGB timer bumps TIMA when a frequency
-    /// change moves the feeding DIV bit high->low, so sweeping (old freq, new
-    /// freq, delay) separates an AGB timer from a CGB one. Rides
-    /// `timer.is_agb`, reachable only through `set_agb`'s fanout.
-    fn tac_signature(gb: &mut GB) -> Vec<u8> {
-        let mut out = Vec::new();
-        for old in 0..4u8 {
-            for new in 0..4u8 {
-                for delay in [4u64, 8, 16, 32, 64, 128] {
-                    gb.write_memory(TAC, 0x04 | old);
-                    gb.write_memory(DIV, 0);
-                    gb.write_memory(TIMA, 0);
-                    step_t(gb, delay);
-                    gb.write_memory(TAC, 0x04 | new);
-                    out.push(gb.read_memory(TIMA));
-                }
-            }
-        }
-        out
-    }
 
     /// The observables are only worth asserting on if they separate the models
     /// they claim to separate.
@@ -3687,11 +3666,6 @@ mod reset_identity_tests {
             wave_signature(&mut machine(Hardware::AGB)),
             wave_signature(&mut machine(Hardware::CGB)),
             "wave-RAM probe must separate an AGB APU from a CGB one"
-        );
-        assert_ne!(
-            tac_signature(&mut machine(Hardware::AGB)),
-            tac_signature(&mut machine(Hardware::CGB)),
-            "TAC probe must separate an AGB timer from a CGB one"
         );
     }
 
@@ -3728,19 +3702,16 @@ mod reset_identity_tests {
         }
     }
 
-    /// A reset AGB must still be an AGB in all three places `set_agb` fans out
-    /// to: the `Mmio` itself, the timer, and the APU channels.
+    /// A reset AGB must still be an AGB in both places `set_agb` fans out to:
+    /// the `Mmio` itself and the APU channels. (The timer used to be a third
+    /// leg; its only AGB behaviour was the TAC-enable bump, removed after a
+    /// real GBA-SP capture contradicted it -- see `Timer::set_tac`.)
     #[test]
     fn agb_fanout_survives_in_place_reset() {
         let mut gb = machine(Hardware::AGB);
         gb.reset();
 
         assert!(gb.mmio.is_agb(), "Mmio forgot it is an AGB after reset");
-        assert_eq!(
-            tac_signature(&mut gb),
-            tac_signature(&mut machine(Hardware::AGB)),
-            "timer forgot it is an AGB after reset"
-        );
         assert_eq!(
             wave_signature(&mut gb),
             wave_signature(&mut machine(Hardware::AGB)),

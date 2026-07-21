@@ -11163,13 +11163,26 @@ impl Ppu {
                     // steady-state fork below) put AGB on the CGB-C side by
                     // INHERITANCE from the bare predicate, not by measurement:
                     // the LY-glitch fold is outside the four families
-                    // `Mmio::set_cgb_de` documents as deliberate, and no
-                    // AGB-graded oracle covers it. The evidence may already be on
-                    // disk though — gbc-hw-tests ships real-silicon AGB captures
-                    // (lcd/last_ly_ly_change/real_gba{,_sp}.sav,
-                    // lcd/last_ly_clocks/real_gba_sp.sav,
-                    // cpu/corrupted_stop/real_gba_sp.sav) that the manifest
-                    // deliberately leaves ungraded. Queued for the bench.
+                    // `Mmio::set_cgb_de` documents as deliberate.
+                    //
+                    // The gbc-hw-tests AGB captures are now graded (150 rows,
+                    // `rev=agb`) and they do NOT settle this. Measured: flipping
+                    // BOTH arms to `is_agb() || is_cgb_de()` (AGB -> the D/E side)
+                    // leaves the AGB pass/fail set unchanged, 84/150 either way.
+                    // The three on-point captures (lcd/last_ly_ly_change/
+                    // real_gba{,_sp}.sav, lcd/last_ly_clocks/real_gba_sp.sav) PASS
+                    // on BOTH sides, so they never reach this fold;
+                    // cpu/corrupted_stop is ungradeable (raw 128K dump,
+                    // un-delimited result). The flip does move six rows' bytes
+                    // (ly_timings_lyc_*_gbc_mode, alt_ly_timings_gbc_mode: 0x7C ->
+                    // 0x7D against an expected 0x7E; 0x88 -> 0x8B against 0x8C)
+                    // strictly CLOSER to hardware, but those rows fail identically
+                    // on the CGB column too, so their residual is a shared
+                    // CGB-level gap and the delta is noise inside an already-broken
+                    // row, not a verdict. Still open for the bench: settling it
+                    // needs a ROM that drives a DS->SS-during-mode-3 STOP switch
+                    // and reads FF44 on the glitch dot, which nothing in this
+                    // corpus does.
                     if !mmio.is_cgb_de() || par1 || total_par1 {
                         ly_reg & (ly_reg + 1)
                     } else {

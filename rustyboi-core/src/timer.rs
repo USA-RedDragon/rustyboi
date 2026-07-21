@@ -134,11 +134,6 @@ pub(crate) struct Timer {
     /// not on the early grid — its IF-set stays late).
     #[serde(skip, default)]
     isr_on_early_grid: bool,
-    // AGB (GBA-in-GBC-mode) hardware flag. Set once from `Mmio::set_agb`. Only
-    // consulted by `set_tac` for the AGB TAC-enable timer quirk; false for
-    // DMG/CGB so those targets are byte-identical.
-    #[serde(skip, default)]
-    is_agb: bool,
     // Re-anchor for DIV/TIMA reads on a halt-woken instruction stream. rustyboi's
     // halted CPU wakes at the exact IF-set cc, so the woken stream runs a few cc
     // early; reads resolve at `access_cc + halt_read_bias` to land on the
@@ -193,7 +188,6 @@ impl Timer {
             last_fire_cc: DISABLED_TIME,
             last_fire_cc_ei: DISABLED_TIME,
             isr_on_early_grid: false,
-            is_agb: false,
             halt_read_bias: 0,
         }
     }
@@ -201,12 +195,6 @@ impl Timer {
     /// Arm/clear the halt-woken DIV/TIMA read re-anchor (see `halt_read_bias`).
     pub(crate) fn set_halt_read_bias(&mut self, bias: u32) {
         self.halt_read_bias = bias;
-    }
-
-    /// Set the AGB (GBA-in-GBC-mode) hardware flag. Propagated from
-    /// `Mmio::set_agb` at construction.
-    pub(crate) fn set_agb(&mut self, agb: bool) {
-        self.is_agb = agb;
     }
 
     /// The cc the most recent still-undispatched TIMA IRQ became deliverable, or
@@ -506,13 +494,18 @@ impl Timer {
     /// Store TAC (FF07). Changing the enable bit or the frequency selection can
     /// produce a spurious TIMA increment when the DIV bit feeding TIMA sees a
     /// falling edge (documented: Pan Docs Timer Obscure Behaviour; TCAGBD §5.5
-    /// TAC-write glitch pseudocode). The AGB-specific enable quirk is gated on
-    /// `self.is_agb`, so DMG/CGB stay byte-identical: TCAGBD §5.5 records that
-    /// AGB/AGS differ ("AGB and AGS seem to have strange behaviour even in the
-    /// other statements", i.e. glitching even in the `old_enable == 0` case) but
-    /// calls the outcome a race condition that "cannot be predicted for every
-    /// device"; our deterministic old-bit-high/new-bit-low formula is a
-    /// refinement not spelled out in Pan Docs, TCAGBD, or GBCTR.
+    /// TAC-write glitch pseudocode).
+    ///
+    /// AGB takes the SAME path as DMG/CGB here. An earlier AGB-only enable quirk
+    /// (bump TIMA by one when the frequency change moves the feeding DIV bit
+    /// high->low) has been REMOVED: it was an undocumented refinement of TCAGBD
+    /// §5.5's remark that "AGB and AGS seem to have strange behaviour", which
+    /// TCAGBD itself calls a race that "cannot be predicted for every device", and
+    /// it had no oracle behind it. Grading AntonioND's real-silicon AGB captures
+    /// (gbc-hw-tests, `rev=agb`) contradicts it directly: on timers/timer_reset_test
+    /// the real GBA-SP capture is BYTE-IDENTICAL to the real CGB capture, and the
+    /// quirk was the sole reason our AGB diverged (TIMA 0x02 vs the captured 0x01).
+    /// Dropping it fixes that row and changes nothing else anywhere in the corpus.
     /// Pan Docs: Timer obscure behaviour — https://gbdev.io/pandocs/Timer_Obscure_Behaviour.html
     fn set_tac(&mut self, data: u8) {
         let cc = self.access_cc();
@@ -546,18 +539,6 @@ impl Timer {
             }
 
             if data & TAC_ENABLE != 0 {
-                // AGB-only enable quirk: re-enabling the timer bumps TIMA by one
-                // when the frequency change moves the feeding DIV bit from high to
-                // low (old-freq bit set, new-freq bit clear). is_agb-gated;
-                // DMG/CGB skip it entirely.
-                if self.is_agb {
-                    let diff = cc - self.div_anchor;
-                    let old_bit = (diff >> (TIMA_CLOCK[(self.tac & 3) as usize] - 1)) & 1;
-                    let new_bit = (diff >> (TIMA_CLOCK[(data & 3) as usize] - 1)) & 1;
-                    if old_bit == 1 && new_bit == 0 {
-                        self.tima = self.tima.wrapping_add(1);
-                    }
-                }
                 // Re-anchor the tick grid to the current DIV phase for the new
                 // frequency (drop the residual sub-tick bits of the divider), then
                 // schedule the next overflow from the present TIMA value.

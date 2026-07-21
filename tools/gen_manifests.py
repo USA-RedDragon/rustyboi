@@ -1208,7 +1208,7 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
             return data.rfind(MAGIC) + 4
         return len(data)
 
-    def emit(test_id: str, mode: str, rom: Path, ref: Path) -> None:
+    def emit(test_id: str, mode: str, rom: Path, ref: Path, rev: str = "") -> None:
         # cart=lazy_sram_cs: every capture in this suite was taken on
         # AntonioND's flashcart, whose SRAM chip-select decode is lazy
         # (/CS & A13 -> also responds at E000-FDFF). OAM-DMA E000+ sources
@@ -1220,7 +1220,8 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
             # "Keep any button pressed when initing the ROM").
             extra = "|input=0:a"
         lines.append(
-            f"gbc-hw-tests/{test_id}|{mode}|sram|{rom}|{rel_to_cwd(ref)}|cart=lazy_sram_cs{extra}"
+            f"gbc-hw-tests/{test_id}{rev and '#agb'}|{mode}|sram|{rom}|"
+            f"{rel_to_cwd(ref)}|cart=lazy_sram_cs{extra}{rev}"
         )
 
     dirs = sorted({p.parent for p in hw.rglob("real_*.sav")})
@@ -1276,6 +1277,18 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
                 if ref is not None:
                     emit(test_id, "dmg", rom, ref)
 
+        # AGB column: real_gba_sp.sav, run on Hardware::AGB via `rev=agb` (the
+        # row stays mode `cgb` so it is selected by the default mode set; the
+        # runner's `rev=` token overrides the machine). real_gba_sp.sav is the
+        # COMPLETE AGB column -- every dir that ships real_gba.sav ships the SP
+        # capture too -- so one row per dir covers the corpus without grading a
+        # single emulated machine against two different physical units.
+        agb_sav = d / "real_gba_sp.sav"
+        if agb_sav.is_file():
+            ref = graded_ref("real_gba_sp.sav", "gbasp")
+            if ref is not None:
+                emit(test_id, "cgb", rom, ref, rev="|rev=agb")
+
     write_manifest(out, "gbc_hw_tests", _GBCHW_HEADER, lines)
 
 
@@ -1290,7 +1303,22 @@ _GBCHW_HEADER = [
     "real_gbc (CGB), real_gba_sp (GBA-SP). rustyboi is a CGB emulator, so the",
     "PRIMARY grade is CGB vs real_gbc.sav; DMG-flagged ROMs (header 0x143==0x00,",
     "the *_dmg_mode + DMG-valid dma/timer tests) ALSO grade DMG vs real_gb.sav.",
-    "GBA-SP/GBP columns are not graded (distinct APU/serial revision + DMG).",
+    "The GBP column is not graded (DMG silicon, covered by real_gb.sav). The AGB",
+    "column IS graded, one row per dir: real_gba_sp.sav on Hardware::AGB via a",
+    "`rev=agb` token (the row stays mode `cgb` so the default mode set selects",
+    "it; `rev=` overrides the machine). real_gba_sp.sav is the COMPLETE AGB",
+    "column -- every dir shipping real_gba.sav ships the SP capture too -- so one",
+    "row per dir covers the corpus without grading a single emulated machine",
+    "against two different physical units. 85/150 AGB rows pass: the AGB column",
+    "is a REAL blind spot, not a floor artifact. Every one of the 65 failures is",
+    "shared with the CGB column -- same unmodelled behaviour, not AGB-specific.",
+    "Grading this column found exactly one AGB-ONLY divergence, since FIXED:",
+    "timers/timer_reset_test failed on AGB while CGB passed a BYTE-IDENTICAL",
+    "capture, caused by an unverified AGB TAC-enable quirk (see Timer::set_tac).",
+    "Where real_gba.sav disagrees with real_gba_sp.sav (dma/hdma_valid_sources,",
+    "timers/tac_set_disabled, timers/tac_set_everything) the two AGB-family units",
+    "disagree with EACH OTHER; hdma_valid_sources is the one row we match on the",
+    "GBA unit but not the SP unit. Bench material, not an emulator verdict.",
     "",
     "IMPORTANT revision caveat: AntonioND's captures are from ONE unit per class",
     "and the CGB unit's silicon revision is undocumented. Some rev-sensitive",
