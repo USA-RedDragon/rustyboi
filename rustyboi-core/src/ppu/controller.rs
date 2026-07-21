@@ -11179,10 +11179,15 @@ impl Ppu {
                     // strictly CLOSER to hardware, but those rows fail identically
                     // on the CGB column too, so their residual is a shared
                     // CGB-level gap and the delta is noise inside an already-broken
-                    // row, not a verdict. Still open for the bench: settling it
-                    // needs a ROM that drives a DS->SS-during-mode-3 STOP switch
-                    // and reads FF44 on the glitch dot, which nothing in this
-                    // corpus does.
+                    // row, not a verdict. Still open for the bench, but no longer
+                    // for want of a stimulus: test-roms/src/ppu/
+                    // stop_ly_glitch.cgb.bench.asm (T19) now drives the
+                    // DS->SS-during-mode-3 STOP switch and reads FF44 on the
+                    // glitch dot. It is VERIFIED to discriminate the two arms --
+                    // flipping both to `is_agb() || is_cgb_de()` moves 7 of its
+                    // recorded bytes on Hardware::AGB (e.g. 0x88 -> 0x8B at
+                    // LY 139, 0x80 -> 0x87 at LY 135) and moves none on
+                    // Hardware::CGB. Awaiting a real AGB + CGB capture.
                     if !mmio.is_cgb_de() || par1 || total_par1 {
                         ly_reg & (ly_reg + 1)
                     } else {

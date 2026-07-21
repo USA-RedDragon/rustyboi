@@ -2,7 +2,7 @@
 //! standalone bin is a subcommand keeping its exact CLI shape and output
 //! format:
 //!
-//!   harness sramdump <rom> <out.bin> [frames] [dmg|cgb]
+//!   harness sramdump <rom> <out.bin> [frames] [dmg|cgb|cgbe|agb]
 //!       Run a ROM for N frames and dump cartridge save RAM to a file.
 //!
 //!   harness glitch --rom <rom-or-zip> --state <savestate.rustyboisave>
@@ -49,7 +49,7 @@ use rustyboi_test_runner_lib::cli::{Cli, parse_frame_list};
 use rustyboi_test_runner_lib::imaging::{encode_rgb_png, fnv1a, frame_rgb, write_ppm};
 use rustyboi_test_runner_lib::script;
 
-const USAGE_SRAMDUMP: &str = "harness sramdump <rom> <out.bin> [frames] [dmg|cgb]";
+const USAGE_SRAMDUMP: &str = "harness sramdump <rom> <out.bin> [frames] [dmg|cgb|cgbe|agb]";
 const USAGE_GLITCH: &str = "harness glitch --rom <rom-or-zip> --state <savestate.rustyboisave> \
                             [--frames N] [--out DIR] [--dump-all] [--vram-frames F1,F2,...]";
 const USAGE_UNLBOOT: &str = "harness unlboot <rom> [frames] [--hw dmg|cgb|auto] [--out DIR] \
@@ -104,14 +104,16 @@ fn cmd_sramdump(args: &[String]) -> Result<(), String> {
         _ => return Err(format!("usage: {USAGE_SRAMDUMP}")),
     };
     // Positional-tail semantics preserved from the standalone bin: a
-    // non-numeric [frames] falls back to 800, and anything but dmg/cgb in the
-    // [dmg|cgb] slot means auto.
+    // non-numeric [frames] falls back to 800, and an unrecognised model in the
+    // [dmg|cgb|cgbe|agb] slot means auto.
     let frames: usize = p.get(2).and_then(|s| s.parse().ok()).unwrap_or(800);
     let bytes = std::fs::read(rom).expect("read ROM file");
     let cart = Cartridge::from_bytes(&bytes).expect("load ROM");
     let hardware = match p.get(3).map(|s| s.as_str()) {
         Some("dmg") => Hardware::DMG,
         Some("cgb") => Hardware::CGB,
+        Some("cgbe") => Hardware::CGBE,
+        Some("agb") => Hardware::AGB,
         _ => {
             if cart.supports_cgb() {
                 Hardware::CGB
