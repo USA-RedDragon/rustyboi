@@ -25,8 +25,9 @@
 # (31 dirs) and real_gba_sp.sav otherwise: the SP column is the COMPLETE one,
 # which is why it is the fallback, but availability was never authority, so
 # where both exist the plain GBA -- the AGB-family reference part -- is the
-# closer comparison. Which capture a dir uses depends only on which it ships,
-# never on which one rustyboi matches. The AGB column is a REAL blind spot,
+# closer comparison. Which capture a dir uses depends only on which it ships
+# and, in one dir, on which unit the OTHER physical units corroborate -- never
+# on which one rustyboi matches. The AGB column is a REAL blind spot,
 # not a floor artifact, and nearly every failure is shared with the CGB
 # column -- same unmodelled behaviour, not AGB-specific. Grading it found
 # exactly one AGB-ONLY divergence, since FIXED: timers/timer_reset_test failed
@@ -38,10 +39,17 @@
 # nondeterministic). On hdma_valid_sources the SP is the lone outlier -- offset
 # 0x21 reads 0xFF on the SP while the GBA unit, the CGB unit and rustyboi all
 # read 0x3E -- so grading it against the SP asserted a value two independent
-# physical units contradict. tac_set_disabled fails against BOTH units (at
-# 0x0E80 vs the GBA, 0x0EE0 vs the SP), so it is a genuine unmodelled
-# behaviour, not a unit-selection artifact. The GBA/SP split is bench material
-# about those units, not an emulator verdict.
+# physical units contradict. tac_set_disabled is the same defect with the
+# units swapped: there the plain GBA is the outlier (on the 1145 disputed
+# cells the CGB unit sides with the SP 969-176, and on the 574 the DMG unit
+# also covers it sides with the SP 574-0, unanimous), and grading against the
+# GBA additionally demanded a model that BOTH AGB units satisfy -- impossible,
+# since the five sibling tac_set_* AGB rows grade against the SP and pass. It
+# now grades against real_gba_sp.sav and STILL FAILS, at 3 cells (0x638E,
+# 0x6796, 0x6B94) where both AGB units read N+1 and we and the CGB unit read
+# N: a genuine unmodelled AGB TIMA increment, not a unit-selection artifact.
+# The GBA/SP split is bench material about those units, not an emulator
+# verdict.
 #
 # DO NOT model the AGB timers/tac_set_when_inc_{16,64,256,1024} rows. All four
 # fail identically on one cell class (TAC=$07 = enable + freq-3 written from
@@ -68,7 +76,25 @@
 # corrupted_stop (raw dump, un-delimited result + garbage tail) and
 # tac_set_everything (author committed two DIFFERING CGB captures -> per-run
 # nondeterministic by their own measurement). speed_change_cancel grades its
-# not_pressed (input-free) capture. Regenerate: tools/gen_manifests.py.
+# not_pressed (input-free) capture.
+#
+# One COLUMN is excluded rather than a whole dir: tac_set_enabled's CGB row.
+# This ROM writes a magic at the end of each 8K SRAM bank (0x1C00/0x3C00/
+# 0x5C00/0x7C00), so a CGB-family capture runs the double-speed pass and ends
+# at 0x7C04 = 31748 -- as both of this dir's AGB captures and the sibling
+# tac_set_disabled's CGB capture do. tac_set_enabled's real_gbc.sav is 15364:
+# banks 2 and 3 never wrote their magic. It also holds the memset fill 0x00 in
+# 563 cells that BOTH real_gb.sav and real_gba.sav wrote nonzero, all inside
+# bank 0 below 0x74C (real_gba_sp.sav: 0 such holes), plus 11 bytes of 0x95/
+# 0xC8 at 0x737..0x74B. It is a failed card read, and NOT a mislabelled DMG
+# dump -- it differs from real_gb.sav in 574 cells -- so there is no DMG
+# capture hiding under the name to regrade onto. A `skip=` of the damaged
+# window would grade only bytes already byte-identical to real_gb.sav (every
+# one of the 574 differences is at or below 0x74C), i.e. a row that passes by
+# construction. The dir's AGB row stays graded and stays FAILING: there both
+# AGB captures are BYTE-IDENTICAL, so the oracle is sound and our 112-cell
+# diff (a uniform +1 TIMA) is a real modelling gap, not a bad capture.
+# Regenerate: tools/gen_manifests.py.
 gbc-hw-tests/cpu/cpu_registers_initial_dmg|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/cpu_registers_initial_dmg.gbc|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/cpu/cpu_registers_initial_dmg|dmg|sram|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/cpu_registers_initial_dmg.gbc|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/real_gb.sav|cart=lazy_sram_cs
 gbc-hw-tests/cpu/cpu_registers_initial_dmg#agb|cgb|sram|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/cpu_registers_initial_dmg.gbc|gb-test-roms/gbc-hw-tests/cpu/cpu_registers_initial_dmg/real_gba.sav|cart=lazy_sram_cs|rev=agb
@@ -374,8 +400,7 @@ gbc-hw-tests/timers/sys_clocks_init_dmg_mode#agb|cgb|sram|gb-test-roms/gbc-hw-te
 gbc-hw-tests/timers/sys_clocks_init_gbc_mode|cgb|sram|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_gbc_mode/sys_clocks_init_gbc_mode.gbc|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_gbc_mode/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/timers/sys_clocks_init_gbc_mode#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_gbc_mode/sys_clocks_init_gbc_mode.gbc|gb-test-roms/gbc-hw-tests/timers/sys_clocks_init_gbc_mode/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/timers/tac_set_disabled|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_disabled/tac_set_disable.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_disabled/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/timers/tac_set_disabled#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_disabled/tac_set_disable.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_disabled/real_gba.sav|cart=lazy_sram_cs|rev=agb
-gbc-hw-tests/timers/tac_set_enabled|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_enabled/tac_set_enabled.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_enabled/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
+gbc-hw-tests/timers/tac_set_disabled#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_disabled/tac_set_disable.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_disabled/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/timers/tac_set_enabled#agb|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_enabled/tac_set_enabled.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_enabled/real_gba.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/timers/tac_set_timer_disabled|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_timer_disabled/tac_set_timer_disabled.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_timer_disabled/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/timers/tac_set_timer_disabled_2|cgb|sram|gb-test-roms/gbc-hw-tests/timers/tac_set_timer_disabled_2/tac_set_timer_disabled_2.gbc|gb-test-roms/gbc-hw-tests/timers/tac_set_timer_disabled_2/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe

@@ -1380,6 +1380,52 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
     #    (real_gbc_1 != real_gbc_2) -> per-run nondeterministic by their own
     #    measurement; residue after the data is per-unit garbage.
     EXCLUDE = {"cpu/corrupted_stop", "timers/tac_set_everything"}
+    # Per-COLUMN exclusion: the dir's other columns stay graded. Used where one
+    # capture file is defective but its siblings in the same dir are sound, so
+    # a dir-level EXCLUDE would throw away good oracles with the bad one.
+    #
+    #  - timers/tac_set_enabled, CGB column. real_gbc.sav is an INCOMPLETE dump,
+    #    not a measurement of CGB silicon. Provenance, all re-measured:
+    #
+    #    a) Shape. This ROM writes a magic (12 34 56 78) at the end of each 8K
+    #       SRAM bank: 0x1C00, 0x3C00, 0x5C00, 0x7C00. A CGB-family run does the
+    #       second double-speed pass and fills all four banks, ending at 0x7C04
+    #       = 31748; a DMG run fills two and ends at 0x3C04 = 15364. The capture
+    #       tool trims through the LAST magic. real_gbc.sav is 15364 -- banks 2
+    #       and 3 are absent, i.e. the double-speed pass never wrote its magic.
+    #       Both AGB captures of this same ROM are 31748, and so is the sibling
+    #       tac_set_disabled's real_gbc.sav, so 31748 is what this dir's CGB
+    #       column should be.
+    #    b) Holes. 563 cells that BOTH real_gb.sav and real_gba.sav wrote
+    #       nonzero read 0x00 -- the ROM's memset fill -- in real_gbc.sav. Every
+    #       one of them is in bank 0, inside 0x000..0x74C. real_gba_sp.sav has 0
+    #       such holes and tac_set_disabled's CGB capture has 0. 11 further
+    #       bytes at 0x737..0x74B hold 0x95/0xC8 where every other unit holds
+    #       0x00. A partially written opening bank plus two missing banks is a
+    #       failed card read, not silicon behaviour.
+    #    c) It is NOT a mislabelled DMG dump, which was the first hypothesis.
+    #       real_gbc.sav differs from real_gb.sav in 574 cells, so the file is
+    #       its own (damaged) artefact. That rules out REGRADING the CGB row
+    #       against real_gb.sav: there is no DMG capture hiding under this name,
+    #       and a DMG capture could not stand in for the CGB column anyway --
+    #       it covers only the single-speed pass, which is precisely the half
+    #       this ROM's CGB column exists to extend.
+    #
+    #    Why not `skip=` the damaged window (the dma/hdma_halt precedent): all
+    #    574 of the real_gb-vs-real_gbc differences lie at or below 0x74C, so
+    #    from 0x74D to the end real_gbc.sav is byte-identical to real_gb.sav.
+    #    Skipping 0..0x74C would leave the row grading only bytes that are
+    #    already identical to the DMG capture we match byte-exactly -- a row
+    #    that passes by construction and asserts nothing. Excluding says the
+    #    same thing honestly.
+    #
+    #    Not oracle-shopping: the four sound captures of this ROM all corroborate
+    #    us and each other. Our CGB output equals real_gb.sav AND real_gbp.sav
+    #    byte-exactly over their full 15364, and sits 112 cells from real_gba.sav
+    #    and real_gba_sp.sav over the full 31748. real_gbc.sav is the lone file
+    #    that disagrees, and it disagrees only by holding the fill byte.
+    #    The AGB column of this dir stays graded and stays FAILING (see below).
+    CGB_COLUMN_EXCLUDE = {"timers/tac_set_enabled"}
     # Tests whose upstream doc requires a button held from power-on. Without the
     # press they do not fail, they FREEZE, and the capture is graded against a
     # half-written SRAM.
@@ -1500,6 +1546,45 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
     #    defect in the core. These rows still FAIL after this change, and that
     #    is the point: the failure is now diagnostic instead of a truncation
     #    artifact that hid an 11-cell core bug behind 636 unwritten bytes.
+    # Dirs where the AGB column does NOT take the default "prefer real_gba.sav"
+    # capture. Deviating needs the hdma_valid_sources standard -- the preferred
+    # unit is contradicted by a MAJORITY OF INDEPENDENT PHYSICAL UNITS -- never
+    # "the other file is the one we match". Measured evidence per entry.
+    #
+    #  - timers/tac_set_disabled -> real_gba_sp.sav. The two AGB units disagree
+    #    at 1145 cells here. Tie-broken by the units that are NOT in the dispute:
+    #      * the CGB unit sides with the SP at 969 of 1145 and with the plain
+    #        GBA at 176 (0 cells agree with neither);
+    #      * of the 574 disputed cells inside the single-speed pass the DMG unit
+    #        also covers, the DMG unit sides with the SP at 574 and the GBA at 0
+    #        -- unanimous.
+    #    So the plain GBA is the outlier device on this ROM, which is the same
+    #    defect (with the units swapped) that moved dma/hdma_valid_sources OFF
+    #    the SP: grading against it asserts values two independent physical
+    #    units contradict.
+    #
+    #    Second, independent reason: the oracle set was UNSATISFIABLE as it
+    #    stood. The five sibling tac_set_* AGB rows are graded against the SP
+    #    unit (it is the only AGB capture their dirs ship) and they pass, while
+    #    this row demanded the plain GBA -- a unit that differs from the SP by
+    #    1145 cells in the +-1 TIMA shape TCAGBD 5.5 calls a race that "cannot
+    #    be predicted for every device". No single AGB model can satisfy both,
+    #    so the suite was asking for a model that cannot exist.
+    #
+    #    Stated against ourselves, so this is not read as oracle-shopping: the
+    #    switch does NOT make the row pass, and our matching the SP is not the
+    #    reason for it. We sit 3 cells from the SP and 1148 from the GBA, and
+    #    the row still FAILS on those 3 -- 0x638E, 0x6796, 0x6B94, all in bank 3
+    #    (the double-speed pass), where BOTH AGB units read N+1 and we and the
+    #    CGB unit read N. That residue is a genuine unmodelled AGB TIMA
+    #    increment, the same shape as tac_set_enabled#agb, and it stays failing.
+    #    Recorded honestly: the switch is not free. On the 176 cells where the
+    #    CGB unit sides with the plain GBA, the SP (and we) read the other
+    #    value, so grading against the SP asserts 176 cells two units contradict
+    #    -- against 969 the other way. The SP is the better oracle here, not a
+    #    clean one; the real fix is the hardware bench, not a constant.
+    AGB_UNIT_OVERRIDE = {"timers/tac_set_disabled": "real_gba_sp.sav"}
+
     NEEDS_LONG_BUDGET = {
         "lcd/mode2/mode2_oam_timing_spr_dis_gbc_mode",
         "lcd/mode2/mode2_oam_timing_spr_en_gbc_mode",
@@ -1584,7 +1669,7 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
         # real_gb.sav byte-for-byte as a control). Same finding as Wilbert Pol's
         # ly_lyc/line-153 captures above; graded C, 14 of these rows fail on the
         # coincidence tail-hold and the LY-register read, both C-vs-D/E gates.
-        if cgb_sav:
+        if cgb_sav and d_key not in CGB_COLUMN_EXCLUDE:
             ref = graded_ref(cgb_sav, "gbc")
             if ref is not None:
                 emit(test_id, "cgb", rom, ref, rev="|rev=cgbe")
@@ -1612,17 +1697,22 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
         # The SP was never the more authoritative capture, only the more
         # available one, so where both exist the plain GBA is the closer
         # comparison for Hardware::AGB. This is decided by which captures a dir
-        # ships, never by which one we happen to match.
+        # ships, never by which one we happen to match. AGB_UNIT_OVERRIDE is the
+        # only exception and carries its own per-dir justification.
         #
         # Only three dirs disagree between the two units at all:
         # dma/hdma_valid_sources (1 byte of 148), timers/tac_set_disabled (1145)
-        # and timers/tac_set_everything (EXCLUDEd as nondeterministic). On
-        # hdma_valid_sources the SP is the lone outlier -- offset 0x21 reads
-        # 0xFF there while the GBA unit, the CGB unit and rustyboi all read
-        # 0x3E -- so the old policy graded us against a value two independent
-        # physical units contradict. The GBA/SP split is real bench material
-        # about those units, not an emulator verdict.
-        agb_sav = next(
+        # and timers/tac_set_everything (EXCLUDEd as nondeterministic). Both
+        # graded ones are settled the same way -- by which unit the OTHER
+        # physical units corroborate -- and they land on opposite files. On
+        # hdma_valid_sources the SP is the lone outlier (offset 0x21 reads 0xFF
+        # there while the GBA unit, the CGB unit and rustyboi all read 0x3E), so
+        # it grades against the plain GBA. On tac_set_disabled the plain GBA is
+        # the outlier (the CGB unit sides with the SP 969-176, the DMG unit
+        # 574-0), so it grades against the SP via AGB_UNIT_OVERRIDE. The GBA/SP
+        # split is real bench material about those units, not an emulator
+        # verdict.
+        agb_sav = AGB_UNIT_OVERRIDE.get(d_key) or next(
             (n for n in ("real_gba.sav", "real_gba_sp.sav")
              if (d / n).is_file()),
             None,
@@ -1663,8 +1753,9 @@ _GBCHW_HEADER = [
     "(31 dirs) and real_gba_sp.sav otherwise: the SP column is the COMPLETE one,",
     "which is why it is the fallback, but availability was never authority, so",
     "where both exist the plain GBA -- the AGB-family reference part -- is the",
-    "closer comparison. Which capture a dir uses depends only on which it ships,",
-    "never on which one rustyboi matches. The AGB column is a REAL blind spot,",
+    "closer comparison. Which capture a dir uses depends only on which it ships",
+    "and, in one dir, on which unit the OTHER physical units corroborate -- never",
+    "on which one rustyboi matches. The AGB column is a REAL blind spot,",
     "not a floor artifact, and nearly every failure is shared with the CGB",
     "column -- same unmodelled behaviour, not AGB-specific. Grading it found",
     "exactly one AGB-ONLY divergence, since FIXED: timers/timer_reset_test failed",
@@ -1676,10 +1767,17 @@ _GBCHW_HEADER = [
     "nondeterministic). On hdma_valid_sources the SP is the lone outlier -- offset",
     "0x21 reads 0xFF on the SP while the GBA unit, the CGB unit and rustyboi all",
     "read 0x3E -- so grading it against the SP asserted a value two independent",
-    "physical units contradict. tac_set_disabled fails against BOTH units (at",
-    "0x0E80 vs the GBA, 0x0EE0 vs the SP), so it is a genuine unmodelled",
-    "behaviour, not a unit-selection artifact. The GBA/SP split is bench material",
-    "about those units, not an emulator verdict.",
+    "physical units contradict. tac_set_disabled is the same defect with the",
+    "units swapped: there the plain GBA is the outlier (on the 1145 disputed",
+    "cells the CGB unit sides with the SP 969-176, and on the 574 the DMG unit",
+    "also covers it sides with the SP 574-0, unanimous), and grading against the",
+    "GBA additionally demanded a model that BOTH AGB units satisfy -- impossible,",
+    "since the five sibling tac_set_* AGB rows grade against the SP and pass. It",
+    "now grades against real_gba_sp.sav and STILL FAILS, at 3 cells (0x638E,",
+    "0x6796, 0x6B94) where both AGB units read N+1 and we and the CGB unit read",
+    "N: a genuine unmodelled AGB TIMA increment, not a unit-selection artifact.",
+    "The GBA/SP split is bench material about those units, not an emulator",
+    "verdict.",
     "",
     "DO NOT model the AGB timers/tac_set_when_inc_{16,64,256,1024} rows. All four",
     "fail identically on one cell class (TAC=$07 = enable + freq-3 written from",
@@ -1706,7 +1804,25 @@ _GBCHW_HEADER = [
     "corrupted_stop (raw dump, un-delimited result + garbage tail) and",
     "tac_set_everything (author committed two DIFFERING CGB captures -> per-run",
     "nondeterministic by their own measurement). speed_change_cancel grades its",
-    "not_pressed (input-free) capture. Regenerate: tools/gen_manifests.py.",
+    "not_pressed (input-free) capture.",
+    "",
+    "One COLUMN is excluded rather than a whole dir: tac_set_enabled's CGB row.",
+    "This ROM writes a magic at the end of each 8K SRAM bank (0x1C00/0x3C00/",
+    "0x5C00/0x7C00), so a CGB-family capture runs the double-speed pass and ends",
+    "at 0x7C04 = 31748 -- as both of this dir's AGB captures and the sibling",
+    "tac_set_disabled's CGB capture do. tac_set_enabled's real_gbc.sav is 15364:",
+    "banks 2 and 3 never wrote their magic. It also holds the memset fill 0x00 in",
+    "563 cells that BOTH real_gb.sav and real_gba.sav wrote nonzero, all inside",
+    "bank 0 below 0x74C (real_gba_sp.sav: 0 such holes), plus 11 bytes of 0x95/",
+    "0xC8 at 0x737..0x74B. It is a failed card read, and NOT a mislabelled DMG",
+    "dump -- it differs from real_gb.sav in 574 cells -- so there is no DMG",
+    "capture hiding under the name to regrade onto. A `skip=` of the damaged",
+    "window would grade only bytes already byte-identical to real_gb.sav (every",
+    "one of the 574 differences is at or below 0x74C), i.e. a row that passes by",
+    "construction. The dir's AGB row stays graded and stays FAILING: there both",
+    "AGB captures are BYTE-IDENTICAL, so the oracle is sound and our 112-cell",
+    "diff (a uniform +1 TIMA) is a real modelling gap, not a bad capture.",
+    "Regenerate: tools/gen_manifests.py.",
 ]
 
 
