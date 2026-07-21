@@ -112,8 +112,8 @@ gbc-hw-tests/dma/gdma_timing_coarse|cgb|sram|gb-test-roms/gbc-hw-tests/dma/gdma_
 gbc-hw-tests/dma/gdma_timing_coarse#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/gdma_timing_coarse/gdma_timing_coarse.gbc|gb-test-roms/gbc-hw-tests/dma/gdma_timing_coarse/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/gdma_timing_fine|cgb|sram|gb-test-roms/gbc-hw-tests/dma/gdma_timing_fine/gdma_timing_fine.gbc|gb-test-roms/gbc-hw-tests/dma/gdma_timing_fine/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/dma/gdma_timing_fine#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/gdma_timing_fine/gdma_timing_fine.gbc|gb-test-roms/gbc-hw-tests/dma/gdma_timing_fine/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
-gbc-hw-tests/dma/hdma_halt|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_halt/hdma_halt.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_halt/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
-gbc-hw-tests/dma/hdma_halt#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_halt/hdma_halt.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_halt/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
+gbc-hw-tests/dma/hdma_halt|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_halt/hdma_halt.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_halt/real_gbc.sav|cart=lazy_sram_cs|input=0:a|skip=0x3-0x6|rev=cgbe
+gbc-hw-tests/dma/hdma_halt#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_halt/hdma_halt.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_halt/real_gba_sp.sav|cart=lazy_sram_cs|input=0:a|skip=0x3-0x6|rev=agb
 gbc-hw-tests/dma/hdma_modify_address|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_modify_address/hdma_modify_address.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_modify_address/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe
 gbc-hw-tests/dma/hdma_modify_address#agb|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_modify_address/hdma_modify_address.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_modify_address/real_gba_sp.sav|cart=lazy_sram_cs|rev=agb
 gbc-hw-tests/dma/hdma_start|cgb|sram|gb-test-roms/gbc-hw-tests/dma/hdma_start/hdma_start_test.gbc|gb-test-roms/gbc-hw-tests/dma/hdma_start/real_gbc.sav|cart=lazy_sram_cs|rev=cgbe

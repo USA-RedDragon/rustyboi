@@ -1339,9 +1339,32 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
     # erased between runs the residue can itself contain magic markers from an
     # EARLIER test, and "through the last magic" then over-captures into them.
     PREFIX_ONLY = {
-        # One magic in the whole dump, at 0x1000 -> the last-magic rule and the
-        # explicit length agree here. Left as measured.
-        "serial/sc_change_freq_gbc": 0x1004,
+        # NON-DETERMINISM EXCLUSION, not a convenience trim. The graded window
+        # stops at 0x1000 -- the end of the test's FIRST pass -- and deliberately
+        # drops the `12 34 56 78` magic that sits at 0x1000..0x1004 in the
+        # capture, because whether the magic lands there at all is decided by
+        # the capture machine's power-on RAM, not by serial behaviour.
+        #
+        # The ROM gates a second pass on UNINITIALISED WRAM ($0BD8):
+        #     LD A,[$C0AD] / AND A / JR NZ,$0BE9   ; nonzero -> write magic, halt
+        #     CALL $017C / LD A,$01 / LD [$C0AD],A ; zero -> speed-switch, rerun
+        # Both AntonioND units powered on with $C0AD nonzero (residue from an
+        # earlier run), so they ran ONE pass: 0x1000 bytes of output followed by
+        # the magic at 0x1000. A cold boot has $C0AD == 0, so the second pass
+        # runs and its output overwrites 0x1000.. , pushing the magic to $C000 --
+        # past the end of the 8 KB cart SRAM, where nothing can observe it.
+        # PROVEN: poking $C0AD=1 makes the CGB column byte-exact, 0 of 4100.
+        # So [0x1000, 0x1004) encodes which power-on state the capture machine
+        # happened to be in; no deterministic emulator can match it and matching
+        # it would assert nothing about the serial port. [0, 0x1000) is pass 1,
+        # which runs unconditionally BEFORE the gate is read and is therefore
+        # identical under either power-on state -- that is the whole gradeable
+        # region, and it is graded byte-exact.
+        # Cost of the trim, stated plainly: the magic was also this row's
+        # completion sentinel, so a run that died inside pass 1 is no longer
+        # caught by a missing marker. It would still have to reproduce 4096
+        # bytes of hardware capture exactly to pass.
+        "serial/sc_change_freq_gbc": 0x1000,
         # Five magics (0x280, 0x900, 0xC00, 0x1000, 0x1080); the last-magic rule
         # captured through 0x1084 and swept in four of them. The test's own
         # output ends at the FIRST one: [0x284 .. 0x904) is byte-identical to
@@ -1369,9 +1392,53 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
     #    stalled -- first mismatch at 0x00A0, expected 0x00 got 0xFF (untouched
     #    SRAM), 484-160 = 324 bytes short. rustyboi's STOP is correct; the
     #    manifest simply never supplied the press.
+    #  - hdma_halt: block 2 sets rP1=$00 ($0262) and runs a plain STOP ($0264)
+    #    that only a joypad press exits, exactly like dma_halt_stop_speedchange.
+    #    Ungated we wrote 3 of the 10 result bytes and stalled inside the STOP;
+    #    offsets 3..5 then still held the tentative magic an earlier block had
+    #    parked there, so the row failed at 0x0003 "expected 0x12 got 0x34" --
+    #    a truncated run reported as a data mismatch.
     NEEDS_KEYPRESS = {
         "interrupts/joy_interrupt_manual_delay",
         "dma/dma_halt_stop_speedchange",
+        "dma/hdma_halt",
+    }
+    # Cells a HUMAN PRESS TIME decides, excluded from grading. Derived from the
+    # ROM, not from which bytes happen to differ.
+    #
+    # hdma_halt writes 10 result bytes at $A000 then a magic. Disassembly of the
+    # three blocks gives each offset a provenance:
+    #     0,1,2  rHDMA5 around the block-1 HALT and the block-2 HDMA start --
+    #            all BEFORE the joypad STOP at $0264.
+    #     3      $0266 LDH A,[rHDMA5]  -- HBlanks elapsed during the STOP.
+    #     4      $0269 LDH A,[rLY]     -- LY two instructions after the wake.
+    #     5      $0272 LDH A,[rHDMA5]  -- after `B = offset4 + 5; wait LY == B`,
+    #            i.e. offset 3's baseline minus a fixed 5 HBlanks.
+    #     6,7,8  block 3, entered through `LD B,$04; CALL $0373` ($0373 is
+    #            `wait until LY == B`), a resync of the frame phase to LY=4.
+    #     9      $02BD, after `wait LY == offset8 + 5`.
+    # The captures corroborate the split: offsets 0,1,2 and 6,7,8 and the magic
+    # are byte-identical across real_gbc.sav and real_gba_sp.sav, while 3,4,5
+    # differ -- the disagreement is confined to exactly the window bracketed by
+    # the joypad STOP and the LY=4 resync. No silicon revision can differ only
+    # inside that window and agree on both sides of it; when the human pressed
+    # is the only variable with that signature. Offset 4 alone reads LY=0x69
+    # (105) on the CGB unit and LY=0x46 (70) on the GBA SP: a 35-scanline spread
+    # in a value sampled two instructions after a press-gated wake. Offsets 3
+    # and 5 track it (0x12->0x0d and 0x13->0x0e, both exactly -5).
+    # So no `input=` script can satisfy both columns -- the two rows share one
+    # script and differ only by `rev=`, and a revision pin cannot move a human's
+    # reflex by 35 lines. Grade the other seven cells; exclude these three.
+    #
+    # NOT excluded: offset 9, which also differs (0x78 CGB / 0xFF SP). It sits
+    # after the LY=4 resync, so press timing reaches it only as sub-scanline
+    # phase residue, and a genuine CGB-vs-AGB difference in the ~4-T-cycle LY=153
+    # window is an equally live explanation. Excluding it would be excluding a
+    # cell because it differs, which is the thing this list must not do. Both
+    # rows are expected to keep failing there, now reported against offset 9
+    # instead of against a truncated run.
+    PRESS_TIMING_SKIP = {
+        "dma/hdma_halt": "0x3-0x6",
     }
 
     # 2. Tests whose ROM needs more than the suite-wide budget to finish
@@ -1404,6 +1471,8 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
         # read that SRAM on CGB (dma_valid_sources_* rows E0-FF), so the
         # board fixture is pinned suite-wide, like the `rev=` hardware pins.
         extra = "|input=0:a" if test_id in NEEDS_KEYPRESS else ""
+        if test_id in PRESS_TIMING_SKIP:
+            extra += f"|skip={PRESS_TIMING_SKIP[test_id]}"
         if test_id in NEEDS_LONG_BUDGET:
             extra += "|frames=3000"
         # `#agb` disambiguates the AGB column from the CGB row for the same
