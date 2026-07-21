@@ -10589,11 +10589,25 @@ impl Ppu {
     /// under an ungated term (failed 9 -> 15, and 9 -> 11 / 9 -> 13 for the two
     /// halves separately), while AntonioND's CGB-D/E and GBA-SP captures require
     /// it on both columns.
+    ///
+    /// The VBLANK wake class is excluded: only the LCD/LYC/timer wakes re-phase
+    /// the CPU to the IRQ edge (charging the exit M-cycle as a real stall). A
+    /// VBLANK-woken stream instead leaves that exit M-cycle un-charged and runs
+    /// FREE-RUNNING off the dot grid -- its phase is already carried by
+    /// `uncharged_halt_exit`, and its mode-3 -> mode-0 boundary is the
+    /// free-running 3 dots (6cc DS), NOT the M-cycle grid's 4cc. Disassembling
+    /// `timings_mode1int_gbc_mode` confirms it: one VBLANK `halt` syncs the run,
+    /// then a tight `ldh a,[$FF41]` / `ld [hl+],a` polling train sweeps the whole
+    /// frame free-running -- the opposite of the per-probe `ei;halt` LYC-raise
+    /// train `mode3_stat_timing_spr_en` (the read this M-cycle term was added
+    /// for). Conflating the two put the poll's DS 3->0 reads one dot long
+    /// (`exp 90 got 93`).
     #[inline]
     fn halt_woken_m3_read(mmio: &mmio::Mmio) -> bool {
         (mmio.halt_wake_grid_cgb() || mmio.halt_wakeup_skew())
             && mmio.is_cgb_features_enabled()
             && Self::late_rev(mmio)
+            && !mmio.halt_wake_vblank()
     }
 
     /// The hardware STAT resolve, mode-3 <-> mode-0, at the CPU's access cc.
@@ -10665,7 +10679,18 @@ impl Ppu {
         // suite: SS 0, DS -1; the DS read samples one cc past the SS phase since
         // each dot is 2 cc, so the boundary sits a cc earlier in the read window).
         let access_cc = {
-            let off = if ds { GETSTAT_OFF_DS } else { 0 };
+            // `GETSTAT_OFF_DS` (-1) is the generic DS phase bias for a read whose
+            // M-cycle start cc must be nudged back one cc (each dot is 2cc). But a
+            // VBLANK-woken free-running stream on CGB-D/E / AGB already has its phase
+            // placed by `uncharged_halt_exit` (+1cc, applied in `get_stat` before
+            // this): the un-charged VBLANK exit M-cycle IS one dot, so at DS the
+            // residue is 2cc, not the 1cc the flat term supplies. The -1 here would
+            // cancel that +1 and drop every mode 0/1/2 boundary one dot late
+            // (`timings_mode1int_gbc_mode`'s DS poll: `exp 92 got 90` / `exp 93 got
+            // 92` at the 0->2 / 2->3 edges). Skip it for that stream so the two
+            // corrections sum to the +1dot the free-running poll samples at.
+            let vblank_woken_free = Self::uncharged_halt_exit(mmio) != 0 && Self::late_rev(mmio);
+            let off = if ds && !vblank_woken_free { GETSTAT_OFF_DS } else { 0 };
             (access_cc as i64 + off).max(0) as u64
         };
         // CGB halt-exit +5: the halt-exit M-cycle
@@ -11208,9 +11233,23 @@ impl Ppu {
         // LY==LYC probe at time-to-next-LY 3 and wants $C4, and an uncompensated
         // threshold returns $C0 — a REGRESSION, in the opposite direction to the
         // cells this term fixes.
+        // VBLANK-woken free-running DS coincidence clear, ONE DOT earlier. Same
+        // cc-vs-dots root as the mode-bit fix: `uncharged_halt_exit` places this
+        // stream one dot late (the un-charged VBLANK exit M-cycle is a DOT = 2cc,
+        // not the flat 1cc), so the LY==LYC coincidence the read samples has
+        // already cleared one dot sooner than the mid-frame `ds_anticipate` model
+        // predicts. Raising the tail threshold by one master cc clears it at
+        // time-to-next-LY == 1 instead of 0. Scoped to the same
+        // VBLANK-woken / CGB-D-E-or-AGB / double-speed stream as the mode fix, so
+        // gambatte's cgb04c and the non-woken captures that pin `ds_anticipate` /
+        // `tail_hold` are untouched. `timings_mode1int_gbc_mode`'s LY0-tail poll
+        // reads (LYC=0) read `exp 92 got 96` without it (coincidence over-held).
+        let vblank_clear_early =
+            (lc.ds && Self::late_rev(mmio) && Self::uncharged_halt_exit(mmio) != 0) as i64;
         Some(
             lyc_reg == cmp.ly
-                && cmp.time_to_next_ly > 2 - tail_hold - ds_anticipate - wrap_anticipate,
+                && cmp.time_to_next_ly
+                    > 2 - tail_hold - ds_anticipate - wrap_anticipate + vblank_clear_early,
         )
     }
 
