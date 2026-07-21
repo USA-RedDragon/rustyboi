@@ -10659,7 +10659,7 @@ impl Ppu {
             // references (`lcd_offset/*lyc8fint_m1stat*`) read mode 0 at the same
             // cc. That is the same C-vs-D/E stepping split already modelled for
             // the mode-1 END below (age stat-mode M1E), so scope it the same way.
-            let m1_entry = 144 * cpl - 2 - mmio.is_cgb_de() as i64;
+            let m1_entry = 144 * cpl - 2 - Self::late_rev(mmio) as i64;
             if frame_cycles >= m1_entry && frame_cycles < cpf - 4 + dsi + agb_last_line {
                 return Some(1);
             }
