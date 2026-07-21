@@ -3,6 +3,10 @@ use crate::memory::mmio::Mmio;
 use crate::ppu::{self, Ppu};
 use std::ops::{Deref, DerefMut};
 
+/// One CPU M-cycle in master cc. Always 4, at either speed (a double-speed cc is
+/// half a dot, not half an M-cycle).
+const M_CYCLE_CC: u64 = 4;
+
 /// DMG OAM-corruption-bug access classification. Each variant selects the OAM
 /// mutation applied to the row the PPU is scanning in mode 2: a plain OAM-bus
 /// write or a plain OAM-bus read.
@@ -850,8 +854,33 @@ impl<'a> Bus<'a> {
         } else {
             IF_PRE_MASK
         };
+        // UN-CHARGED HALT-EXIT RESIDUE. On a VBLANK-woken CGB-native stream sm83.rs
+        // never charges the halt-exit M-cycle (see `Ppu::uncharged_halt_exit`), so
+        // the resumed stream has already spent it: every read's bus M-cycle sits one
+        // WHOLE M-cycle later on hardware than `master_cc()` places it. The snapshot
+        // above excludes exactly that M-cycle — it exists to stop "an IRQ flagged
+        // within this read M-cycle" leaking in "4 dots early" — so for this stream it
+        // excludes 4 dots the read is entitled to. Re-admit, after the tick, any
+        // masked bit whose rise lands in `(pre_cc, pre_cc + 4]`.
+        //
+        // The residue's two consequences are distinct quantities of ONE event, and
+        // both are the event's own geometry rather than tuned constants: FF44/FF41
+        // resolve a continuous LY/mode POSITION and take the sub-cc grid re-phase
+        // (1 cc, 0259982d / 701eca4b); FF0F is a whole-M-cycle WINDOW membership
+        // test and takes the whole un-charged M-cycle. Swept over the AntonioND
+        // lcd_frame_timings real-silicon captures at --frames 800, the mismatching
+        // graded cells fall 1245 -> 1225 -> 1207 -> 1203 -> 1193 for windows
+        // 0/1/2/3/4 and then stay flat at 1193 through 5, 6, 8 and 12 — the boundary
+        // is the M-cycle, and no cell moves the wrong way at ANY window.
+        //
+        // Carried on the `if_pre` tuple rather than computed alongside it: this runs
+        // on the hot path of EVERY read, and only an FF0F read can use it.
         let if_pre = if addr == 0xFF0F {
-            Some(self.mmio.snapshot_serial_read(addr) & if_pre_mask)
+            Some((
+                self.mmio.snapshot_serial_read(addr) & if_pre_mask,
+                self.mmio.master_cc(),
+                Ppu::uncharged_halt_exit(self.mmio) as u64 * M_CYCLE_CC,
+            ))
         } else {
             None
         };
@@ -983,7 +1012,30 @@ impl<'a> Bus<'a> {
         if let Some(v) = timer_read {
             return v;
         }
-        if let Some(pre) = if_pre {
+        if let Some((mut pre, if_pre_cc, if_pre_residue)) = if_pre {
+            // Re-admit the masked bits whose rise lands inside the un-charged
+            // halt-exit residue window: the resumed stream reads `if_pre_residue`
+            // cc later than the snapshot was taken, so a bit raised in
+            // `(if_pre_cc, if_pre_cc + residue]` IS visible to it. Zero-width
+            // (the residue is 0) on every stream but a VBLANK-woken CGB-native one.
+            if if_pre_residue != 0 {
+                use crate::cpu::registers::InterruptFlag;
+                for flag in [
+                    InterruptFlag::VBlank,
+                    InterruptFlag::Lcd,
+                    InterruptFlag::Timer,
+                    InterruptFlag::Serial,
+                ] {
+                    let bit = flag as u8;
+                    if if_pre_mask & bit == 0 {
+                        continue;
+                    }
+                    let rise = self.mmio.if_raise_cc_of(flag);
+                    if rise > if_pre_cc && rise <= if_pre_cc + if_pre_residue {
+                        pre |= bit;
+                    }
+                }
+            }
             return pre | (self.mmio.read(addr) & !if_pre_mask);
         }
         if stat_mode_pre.is_some() || stat_lyc_pre.is_some() {
