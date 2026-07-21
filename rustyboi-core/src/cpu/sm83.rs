@@ -230,7 +230,23 @@ impl SM83 {
                                     && !mmio.mmio.is_cgb_features_enabled()));
                         let is_m2 = f == registers::InterruptFlag::Lcd
                             && kind == memory::mmio::LCD_RAISE_M2;
+                        // A proximate m2 dispatch only cancels the exit stall when
+                        // the interrupt machinery is live (IME=1) and can actually
+                        // dispatch it; an IME=0 HALT just falls through to the next
+                        // instruction, so the m2 never contends for the exit and the
+                        // plain setup window applies. Same IME-on scoping the legacy
+                        // m2 stall path below already uses.
+                        // Discriminator pinned by two captures that agree on every
+                        // other observable (VBlank wake, kind=m2, m2 4cc back, LY144,
+                        // B-E=2, IE.1 clear) and want opposite answers:
+                        // mooneye vblank_stat_intr (IME=1, no stall) vs
+                        // gbc-hw-tests lcd_frame_timings/mode2 (IME=0, stall). Without
+                        // the gate a leftover STATF_MODE10 in FF41 silently cancels
+                        // the stall for mode2's banks 1..7 but not bank 0 (which runs
+                        // before the probe routine arms mode-2 select), collapsing the
+                        // ROM's first 4cc delay-sled increment.
                         let m2_prox = !is_m2
+                            && self.registers.ime
                             && mmio.mmio.last_m2_irq_fire_cc().is_some_and(|fire| {
                                 mmio.master_cc_dbg().wrapping_sub(fire) < 8
                             });
