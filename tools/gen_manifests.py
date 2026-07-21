@@ -23,7 +23,7 @@ png_shootout), ADDR=VAL (mem), rev=<model>, input=<script>, frames=<N>.
 
 Usage:
   tools/gen_manifests.py [--roms DIR] [--out DIR]
-                         [--only SUITE[,SUITE...]]
+                         [--only SUITE[,SUITE...]] [--allow-shrink]
 """
 
 import argparse
@@ -40,12 +40,108 @@ HERE = Path(__file__).resolve().parent.parent
 # ---------------------------------------------------------------------------
 
 
+# Staged manifests, written only once flush_manifests() has cleared the whole
+# batch: (path, name, body, row count).
+_PENDING: list[tuple[Path, str, str, int]] = []
+
+# Fraction of a committed manifest's rows that may vanish without an explicit
+# --allow-shrink. See flush_manifests() for why the trigger sits here.
+SHRINK_TOLERANCE = 0.10
+
+
 def write_manifest(out: Path, name: str, header: list[str], lines: list[str]) -> None:
-    out.mkdir(parents=True, exist_ok=True)
-    path = out / f"{name}.manifest"
+    """Stage a manifest. Nothing reaches disk until flush_manifests() has run
+    the shrink guard over the whole batch."""
     body = [f"# {h}" if h else "#" for h in header] + lines
-    path.write_text("\n".join(body) + "\n")
+    _PENDING.append((out / f"{name}.manifest", name, "\n".join(body) + "\n", len(lines)))
     print(f"  {name}: {len(lines)} cases")
+
+
+def manifest_rows(text: str) -> list[str]:
+    return [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+
+
+def missing_input_root(rom: Path) -> Path | None:
+    """The outermost absent component of `rom` -- i.e. the TREE whose absence
+    explains a row disappearing, rather than the individual ROM under it."""
+    if rom.exists():
+        return None
+    while rom.parent != rom and not rom.parent.exists():
+        rom = rom.parent
+    return rom
+
+
+def missing_roots(rows: list[str]) -> list[tuple[str, int]]:
+    """Input trees the committed rows point into that are no longer on disk.
+    Derived from the manifest being REPLACED rather than from a table of input
+    paths, so it cannot drift out of sync with the generators above."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        fields = row.split("|")
+        if len(fields) < 4:
+            continue
+        root = missing_input_root(Path(fields[3]))
+        if root is not None:
+            counts[str(root)] = counts.get(str(root), 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def flush_manifests(allow_shrink: bool) -> int:
+    """Write the staged manifests, refusing a batch that would shrink one.
+
+    Every manifest here is derived by globbing a ROM tree, so an ABSENT tree is
+    indistinguishable from an empty suite: the generator emits a short-or-empty
+    manifest and exits 0. That is a live data-loss footgun -- a fresh worktree
+    has no test-roms/build (gitignored RGBDS output), so a plain regen blanked
+    the committed 25-row rustyboi.manifest, and "regen, then confirm git status
+    is clean" is now a standard verification step since the generator became
+    idempotent. Unmeasured absence must never be rendered as a real result.
+
+    Trigger: a manifest losing ALL its rows, or more than SHRINK_TOLERANCE of
+    them. A missing tree takes out a whole suite or a whole subdirectory, far
+    past a tenth, while deliberately pruning a row or two from a large suite
+    stays friction-free. The batch is checked BEFORE anything is written so a
+    multi-manifest run cannot leave a half-updated tree.
+
+    Derived refs/ artifacts are written eagerly by the generators; they are
+    additive (bytes extracted from inputs that ARE present) and never delete,
+    so they sit outside this guard.
+    """
+    refused = []
+    for path, name, _body, new_n in _PENDING:
+        if not path.is_file():
+            continue  # brand-new manifest: no committed baseline to shrink
+        old = manifest_rows(path.read_text())
+        lost = len(old) - new_n
+        if lost <= 0 or (new_n > 0 and lost <= len(old) * SHRINK_TOLERANCE):
+            continue
+        refused.append((name, len(old), new_n, missing_roots(old)))
+
+    if refused:
+        sys.stdout.flush()  # keep the diagnostic below the per-suite counts
+        verb = "WARNING (--allow-shrink)" if allow_shrink else "error"
+        for name, old_n, new_n, roots in refused:
+            print(f"{verb}: {name}.manifest: {old_n} -> {new_n} rows", file=sys.stderr)
+            for root, n in roots[:5]:
+                print(f"    missing input: {root} ({n} committed rows point into it)", file=sys.stderr)
+            if len(roots) > 5:
+                print(f"    ... and {len(roots) - 5} more missing inputs", file=sys.stderr)
+        if not allow_shrink:
+            print(
+                "\nNothing was written. The usual cause is an absent ROM tree:\n"
+                "test-roms/build is gitignored RGBDS output (`make -C test-roms`) and\n"
+                "gb-test-roms is fetched by tools/run-suites.sh. Symlinking a tree does\n"
+                "NOT work -- the generator then emits absolute paths; copy it in.\n"
+                "If the shrink is intentional, re-run with --allow-shrink (or\n"
+                "RB_ALLOW_MANIFEST_SHRINK=1).",
+                file=sys.stderr,
+            )
+            return 1
+
+    for path, _name, body, _new_n in _PENDING:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+    return 0
 
 
 def rel_to_cwd(path: Path) -> Path:
@@ -1600,6 +1696,12 @@ def main() -> int:
     ap.add_argument("--roms", type=Path, default=Path(os.environ.get("ROMS", "gb-test-roms")))
     ap.add_argument("--out", type=Path, default=HERE / "rustyboi-test-runner" / "suites")
     ap.add_argument("--only", help="comma-separated suite names")
+    ap.add_argument(
+        "--allow-shrink",
+        action="store_true",
+        default=os.environ.get("RB_ALLOW_MANIFEST_SHRINK") == "1",
+        help="permit a regeneration that drops rows from a committed manifest",
+    )
     args = ap.parse_args()
 
     only = set(args.only.split(",")) if args.only else None
@@ -1616,6 +1718,8 @@ def main() -> int:
     for name, fn in INTERNAL.items():
         if only is None or name in only:
             fn(roms, args.out)
+    if flush_manifests(args.allow_shrink):
+        return 1
     print("done.")
     return 0
 
