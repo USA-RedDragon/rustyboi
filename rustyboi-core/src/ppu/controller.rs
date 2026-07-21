@@ -5456,6 +5456,7 @@ impl Ppu {
         }
 
         if self.sched_oneshot_statirq <= cc {
+            mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_LYC);
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
             self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
         }
@@ -5477,6 +5478,7 @@ impl Ppu {
         if self.sched_m1irq <= cc + m1_anticip {
             let stat = self.stat_reg_committed;
             if self.mstat_irq.do_m1_event(stat) {
+                mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_M1);
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
             }
             // The hardware VBlank interrupt (IF bit 0) and the mode-1 STAT IRQ both
@@ -5503,6 +5505,7 @@ impl Ppu {
         if self.sched_lycirq <= cc + ds as u64 {
             let lc = self.ly_counter(mmio);
             if self.lyc_irq.do_event(&lc) {
+                mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_LYC);
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
             }
             self.sched_lycirq = self.lyc_irq.time;
@@ -5535,6 +5538,7 @@ impl Ppu {
             let m0_event_cc = self.m0_irq_event_cc_master(mmio);
             let fired = self.mstat_irq.do_m0_event(ly, stat, self.lyc_irq.lyc_reg_src());
             if fired {
+                mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_M0);
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
                 mmio.set_pending_m0_irq_fire_cc(m0_event_cc);
             }
@@ -5574,6 +5578,7 @@ impl Ppu {
         let stat = self.stat_reg_committed;
         let fired = self.mstat_irq.do_m2_event(ly, stat, self.lyc_irq.lyc_reg_src());
         if fired {
+            mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_M2);
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
             // FAITHFUL HALT-EXIT: a halted CPU wakes at this exact cc; the DMG
             // halt-exit fixup (sm83.rs) needs the m2 event time to apply the
@@ -10453,15 +10458,6 @@ impl Ppu {
         } else {
             access_cc
         };
-        // HALT-exit fixup: when a HALT wakeup lands within 2cc of the woken
-        // mode-0 STAT IRQ event, the +4 wakeup latency advances the CPU clock so
-        // the halt-woken FF41 read samples +4cc later in the line — lifting the
-        // read from the stale mode-0 line tail into the next line's OAM (mode 2).
-        // The per-stream M-cycle phase (0 or 1) is derived at unhalt from the
-        // HALT-entry cc vs the snap target, so only the streams that actually
-        // straddle the boundary take the +4. Set at unhalt, cleared on the next
-        // HALT, so it only ever biases the single woken instruction stream.
-        let access_cc = access_cc + 4 * mmio.halt_prefetch_phase() as u64;
         let lc = self.ly_counter_obs(mmio); // read-path phase
         let ly = lc.ly as i64;
         let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
@@ -11044,21 +11040,6 @@ impl Ppu {
             && !ds
             && !mmio.halt_wakeup_hdma()
             && !mmio.m2_halt_stall_charged_cgb();
-        // FAITHFUL HALT-EXIT (DMG m0-woken stream): re-anchor the woken FF44
-        // read by the real hardware wake advance (snap + conditional +4,
-        // derived at unhalt from the m0 event time phase). The un-advanced wake
-        // stream reads `adv` cc earlier than hardware's, and this read path's
-        // `time` base already matches the hardware LY time, so the effective
-        // comparison is `to_next - adv` — byte-exact for the
-        // hblank_ly_scx_timing-GS per-SCX classes (to_next 9 for delay_a /
-        // 5 for delay_b across all SCX and both wake-M-cycle phases, skipping
-        // the ly&(ly+1) glitch dot the -1-skewed read landed on). Replaces the
-        // generic -1 halt skew for exactly this stream shape.
-        let m0_halt_adv = if halt_skew && !mmio.is_cgb_features_enabled() && !ds {
-            mmio.dmg_m0_halt_ly_advance()
-        } else {
-            None
-        };
         // DS analog of `cgb_halt_exit`: a halt-woken stream that crossed an SS->DS
         // speed switch (halt-wake -> STOP, no intervening HALT) still carries the
         // un-charged CGB halt-exit M-cycle, so its post-switch FF44 reads sample
@@ -11096,8 +11077,6 @@ impl Ppu {
             None
         };
         let tn = if let Some(adv) = cgb_m0_halt_adv {
-            to_next - adv as i64
-        } else if let Some(adv) = m0_halt_adv {
             to_next - adv as i64
         } else if cgb_halt_exit || ssds_haltskew {
             to_next - 5

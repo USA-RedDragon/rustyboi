@@ -155,17 +155,73 @@ impl SM83 {
         let mut just_unhalted = false;
         if self.halted {
             if pending_interrupt.is_some() {
-                // HALT-exit +4 (DMG, m2-woken): hardware spends one extra M-cycle
-                // leaving HALT when the wake lands on the waking IRQ's event time.
-                // The m2 STAT event is 4-aligned to the instruction stream, so it
-                // always takes this +4; without it the whole woken stream runs 4cc
-                // early. Charged as a REAL stall (still halted; the world advances)
-                // so downstream event cc's shift with it. IME-on only (the IME-off
-                // resume reads stay co-tuned to the un-advanced wake cc). Scoped to
-                // the m2-woken wake: LYC/m1 events (event time ≡ 2 mod 4) miss the
-                // `< 2` window, and m0/CGB wakes use the read-side biases below. On
-                // CGB the +4 applies only for a rendering-line (LY 0..143) m2 wake,
-                // not the LY 144 VBlank-entry m2 quirk. DMG keeps the whole range.
+                // M-cycle-grid wake (DMG): with idle batches quantized to whole
+                // M-cycles (Bus::halted_idle_dots), this boundary B is the first
+                // grid point that SEES the waking IF bit (raised at cc R during
+                // the last batch). Hardware samples IF near the END of each
+                // M-cycle: an IF that rose fewer than 2 T-cycles before B misses
+                // the sample and the exit slips one more whole M-cycle. The
+                // per-source event time E is the raise cc for the m0/m2 STAT
+                // dispatches (they raise AT their event cc) and raise-1 for
+                // LYC/m1/VBlank/Timer (their IF delivery runs one dot after the
+                // event; timer delivery = sched+CC_OFF, one past the +4 IF cc).
+                // This one rule replaces the DMG per-source +4 stalls and every
+                // DMG read-side wake bias: the woken stream now RESUMES at the
+                // hardware cc instead of reconstructing it per consumer.
+                // Base extra-4-clock HALT exit: TCAGBD §4.9; the 2-T-cycle
+                // sampling setup window is a sub-cycle refinement from test-ROM
+                // refs (the {E%4 -> +4,+3,+2,+5} advance staircase).
+                if !mmio.mmio.is_cgb()
+                    && !self.stopped
+                    && !self.m2_halt_stall_charged
+                    && let Some(f) = pending_interrupt
+                {
+                    // Minimum-residency clamp: an IF that rises during (or right
+                    // after) the HALT M-cycle itself cannot end the halt at the
+                    // first post-entry boundary — hardware spends at least one
+                    // full HALTED M-cycle before the exit sampling can hit, so
+                    // the earliest wake is entry+8. This is the real mechanism
+                    // behind the legacy _1b/_2b prefetch-phase split (the woken
+                    // stream 'inheriting' an extra M-cycle when the event fell
+                    // inside the entry window).
+                    if let Some(h) = mmio.mmio.halt_entry_cc()
+                        && mmio.master_cc_dbg().wrapping_sub(h) < 8
+                    {
+                        return 4;
+                    }
+                    let r = mmio.mmio.if_raise_cc_of(f);
+                    if r != u64::MAX {
+                        let e_off = match f {
+                            registers::InterruptFlag::Lcd => {
+                                match mmio.mmio.lcd_raise_kind() {
+                                    memory::mmio::LCD_RAISE_M0
+                                    | memory::mmio::LCD_RAISE_M2 => 0,
+                                    _ => 1,
+                                }
+                            }
+                            registers::InterruptFlag::VBlank => 1,
+                            // The timer raise cc (sched + CC_OFF) already
+                            // includes the CPU's sampling M-cycle (+4 M-cycle
+                            // end, +1 step lag): it IS the hardware wake
+                            // boundary, so the setup rule must never add to it.
+                            registers::InterruptFlag::Timer => 5,
+                            _ => 0,
+                        };
+                        let e = r.wrapping_sub(e_off);
+                        if mmio.master_cc_dbg().wrapping_sub(e) <= 1 {
+                            self.m2_halt_stall_charged = true;
+                            return 4;
+                        }
+                    }
+                }
+                // HALT-exit +4 (CGB legacy path, m2-woken): hardware spends one
+                // extra M-cycle leaving HALT when the wake lands on the waking
+                // IRQ's event time. Charged as a REAL stall (still halted; the
+                // world advances) so downstream event cc's shift with it. IME-on
+                // only. CGB-only now: the DMG m2 wake takes the same +4 through
+                // the M-cycle-grid setup rule above; here the +4 applies only for
+                // a rendering-line (LY 0..143) m2 wake, not the LY 144
+                // VBlank-entry m2 quirk.
                 // Base extra-4-clock HALT exit: TCAGBD §4.9. The m2-woken per-source
                 // split (and CGB LY<144 scope) is from test-ROM refs, not Pan Docs/GBCTR.
                 let m2_stall_ok = if mmio.mmio.is_cgb() {
@@ -173,7 +229,8 @@ impl SM83 {
                 } else {
                     true
                 };
-                if self.registers.ime
+                if mmio.mmio.is_cgb()
+                    && self.registers.ime
                     && m2_stall_ok
                     && pending_interrupt == Some(registers::InterruptFlag::Lcd)
                     && mmio
@@ -244,7 +301,8 @@ impl SM83 {
                 // from test-ROM refs, not in Pan Docs or GBCTR.
                 // NOTE: TCAGBD §4.9 frames the +4 as universal ("any interrupt");
                 // our model makes it per-source (serial delayed, timer not).
-                if !self.stopped
+                if mmio.mmio.is_cgb()
+                    && !self.stopped
                     && pending_interrupt == Some(registers::InterruptFlag::Serial)
                     && !self.cgb_lcd_halt_stall_charged
                 {
@@ -274,7 +332,8 @@ impl SM83 {
                 // The resumed stream carries the unmodeled HALT-prefetch sub-M-cycle
                 // skew; flag it so the FF41 STAT line-tail override defers to the
                 // renderer register (already correct there). Cleared on the next HALT.
-                mmio.set_halt_wakeup_skew(true);
+                let cgb_console = mmio.mmio.is_cgb();
+                mmio.set_halt_wakeup_skew(cgb_console);
                 // The line-tail mode-2 STAT overrides model the m0/m2-wake-exit
                 // skew of those streams; mark whether THIS wake is m0/m2-proximate so
                 // an LYC/m1-woken stream's line-tail STAT read resolves the true mode
@@ -293,85 +352,20 @@ impl SM83 {
                         || self.m2_halt_stall_charged;
                     let lcd_wake =
                         pending_interrupt == Some(registers::InterruptFlag::Lcd);
-                    mmio.set_halt_wake_m0m2(lcd_wake && (m0_prox || m2_prox));
+                    mmio.set_halt_wake_m0m2(
+                        cgb_console && lcd_wake && (m0_prox || m2_prox),
+                    );
                 }
-                // HALT-exit timer-read facet: re-anchor the woken stream's DIV/TIMA
-                // reads by the full HALT-exit advance — the ceil-to-M-cycle snap plus
-                // the conditional +4, i.e. {E%4 -> adv}: 0->+4, 1->+3, 2->+2, 3->+5
-                // from the waking IRQ's event time E. An m0/m2-woken stream wakes ON
-                // that grid (mcc == E); LYC/m1/VBlank IF-sets are delivered one dot
-                // AFTER their event time, so E = mcc-1 and the bias nets -1. Scoped to
-                // DMG Lcd/VBlank wakes: Timer-woken streams read TIMA on models
-                // co-tuned to the un-advanced wake cc, and CGB carries its own +5
-                // read-side biases. An m2-woken wake that charged +4 as a real stall
-                // above is already at the hardware cc -> bias 0.
-                // Base extra-4-clock HALT exit: TCAGBD §4.9. The DIV/TIMA read
-                // re-anchor by the exit advance is a sub-cycle refinement from
-                // test-ROM refs, not in Pan Docs or GBCTR.
-                let m2_stall_charged = std::mem::take(&mut self.m2_halt_stall_charged);
-                if !mmio.mmio.is_cgb() {
-                    let bias = if !m2_stall_charged
-                        && matches!(
-                            pending_interrupt,
-                            Some(registers::InterruptFlag::Lcd)
-                                | Some(registers::InterruptFlag::VBlank)
-                        ) {
-                        let mcc = mmio.master_cc_dbg() as i64;
-                        // m0-woken window: the closed-form `ev` misses the scx
-                        // fine-scroll, so the wake lands at mcc-ev in [-1,6]. The
-                        // nearest other STAT/IF event is ~85cc away, so this widened
-                        // window cannot misclassify a LYC/m1/VBlank wake.
-                        let on_grid = mmio
-                            .mmio
-                            .pending_m0_irq_fire_cc()
-                            .is_some_and(|ev| (-2..=6).contains(&(mcc - ev as i64)))
-                            || mmio
-                                .mmio
-                                .last_m2_irq_fire_cc()
-                                .is_some_and(|fire| mcc.wrapping_sub(fire as i64) < 2);
-                        let e = if on_grid { mcc } else { mcc - 1 };
-                        let align = ((4 - (e % 4)) % 4) as u32;
-                        let adv = align + 4 * (align < 2) as u32;
-                        // bias = (E + adv) - mcc
-                        (e + adv as i64 - mcc) as u32
-                    } else {
-                        0
-                    };
-                    mmio.mmio.set_halt_timer_read_bias(bias);
-                }
-                // HALT-exit fixup, DMG m0 branch: the exit advances cc by +4 when
-                // the wake landed within 2cc of the woken mode-0 STAT IRQ's event
-                // time. (The CGB branch of this same fixup is modelled by the +5
-                // STAT read bias in controller.rs.) Flag it so the DMG halt-woken
-                // STAT read samples +4cc later, landing in the next-line OAM/mode 2
-                // instead of the stale mode 0.
-                // Base extra-4-clock HALT exit: TCAGBD §4.9. The m0-wake STAT-read
-                // re-anchor is a sub-cycle refinement from test-ROM refs, not in
-                // Pan Docs or GBCTR.
-                if pending_interrupt == Some(registers::InterruptFlag::Lcd)
-                    && !mmio.mmio.is_cgb()
-                    && let Some(ev) = mmio.mmio.pending_m0_irq_fire_cc() {
-                        let mcc = mmio.master_cc_dbg() as i64;
-                        if mcc - (ev as i64) < 2 {
-                            mmio.mmio.set_halt_wake_plus4_dmg(true);
-                            // Full m0-woken wake advance: the ceil-to-M-cycle snap
-                            // plus the conditional +4, the m0 event time's mod-4 phase
-                            // deciding both. Consumed by the woken FF44 read
-                            // (get_ly_reg_at_cc) as a read-side re-anchor; the
-                            // FF41/VRAM models stay on the un-advanced cc. Phase from
-                            // the wake mcc (the closed-form `ev` carries a +1 phase
-                            // that would misclass the snap).
-                            let align = ((4 - (mcc % 4)) % 4) as u32;
-                            let adv = align + 4 * (align < 2) as u32;
-                            mmio.mmio.set_dmg_m0_halt_ly_advance(Some(adv));
-                        }
-                    }
-                // HALT-exit, CGB m0-woken stream: the CGB analog of the DMG
-                // dmg_m0_halt_ly_advance block above. On CGB the +4 is unconditional
-                // (not gated on delta < 2), so the wake advance is the ceil-to-M-cycle
-                // snap plus a flat +4. Scoped to the DMG-cart case: a CGB-flagged cart
-                // instead takes the +5 read bias in get_ly_reg_at_cc, so this must not
-                // double-apply there. Consumed read-side by the woken FF44 read.
+                // One-shot M-cycle-grid stall guard consumed: the woken DMG
+                // stream is already at the hardware cc (real batch quantization +
+                // setup-time stall), so no read-side re-anchors are armed for it.
+                let _m2_stall_charged = std::mem::take(&mut self.m2_halt_stall_charged);
+                // HALT-exit, CGB m0-woken stream: on CGB the halt-exit +4 is
+                // unconditional (not gated on delta < 2), so the wake advance is the
+                // ceil-to-M-cycle snap plus a flat +4. Scoped to the DMG-cart case: a
+                // CGB-flagged cart instead takes the +5 read bias in get_ly_reg_at_cc,
+                // so this must not double-apply there. Consumed read-side by the woken
+                // FF44 read.
                 // Base extra-4-clock HALT exit: TCAGBD §4.9. The CGB unconditional-+4
                 // m0 LY-read re-anchor is a sub-cycle refinement from test-ROM refs,
                 // not in Pan Docs or GBCTR.
@@ -383,39 +377,10 @@ impl SM83 {
                     let mcc = mmio.master_cc_dbg() as i64;
                     if mcc - (ev as i64) < 2 {
                         let align = ((4 - (mcc % 4)) % 4) as u32;
-                        // Unconditional +4 on CGB, vs the DMG block's `4 * (align < 2)`.
+                        // Unconditional +4 on CGB, vs the DMG rule's setup-gated +4.
                         let adv = align + 4;
                         mmio.mmio.set_cgb_m0_halt_ly_advance(Some(adv));
                     }
-                }
-                // HALT-prefetch phase bit separating the _1b/_2b streams. The
-                // pre-snap HALT-entry cc H carries the extra M-cycle that the
-                // ceil_4(event time) snap to S would erase: H+4 < S means the snap
-                // fired -> phase 0; H+4 >= S means it was skipped and the woken read
-                // inherits its extra M-cycle -> phase 1. _2b enters HALT one M-cycle
-                // later than _1b, pushing H across S. Consumed at the FF41 read site.
-                // Fetch/execute overlap is described in GBCTR (CPU core timing); this
-                // HALT-entry prefetch snap phase is not in Pan Docs, TCAGBD, or GBCTR
-                // (test-ROM refs).
-                if pending_interrupt == Some(registers::InterruptFlag::Lcd)
-                    && !mmio.mmio.is_cgb()
-                {
-                    let phase = match (mmio.mmio.pending_m0_irq_fire_cc(), mmio.mmio.halt_entry_cc()) {
-                        (Some(ev), Some(h)) => {
-                            let e = ev as i64;
-                            // S = ceil_4(E), the snap target cc rounds up to.
-                            let s = e + ((e.wrapping_neg()) & 3);
-                            // Snap-skip test: the HALT M-cycle charges cc forward;
-                            // when the pre-snap entry H lands in the M-cycle just
-                            // below S, the post-charge cc reaches the event and the
-                            // snap is skipped, so the woken read inherits the extra
-                            // M-cycle (phase 1). The +4 aligns the pre-charge entry
-                            // cc to the post-HALT-charge origin.
-                            if (h as i64) + 4 >= s { 1u32 } else { 0u32 }
-                        }
-                        _ => 0,
-                    };
-                    mmio.mmio.set_halt_prefetch_phase(phase);
                 }
                 // HALT-prefetch woken-PC push phase. The interrupt service undoes
                 // the boundary prefetch unconditionally (`pc -= 1`), correct when the
@@ -424,8 +389,7 @@ impl SM83 {
                 // peeks pc=HALT+1 without advancing pc), so the unconditional undo
                 // over-subtracts by one, pinning the pushed resume PC one short. Mark
                 // phase 1 for exactly that case so the push consume re-adds the +1.
-                // Gated to Timer + CGB and stored in a separate register so the FF41
-                // STAT consumer of halt_prefetch_phase is untouched.
+                // Gated to Timer + CGB, in its own register (timer_push_phase).
                 // Not in Pan Docs, TCAGBD, or GBCTR; HALT-wake PC-push prefetch phase
                 // from test-ROM refs.
                 let req_halt_peek = self.prefetched

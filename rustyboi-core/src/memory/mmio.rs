@@ -622,13 +622,6 @@ struct HaltWake {
     #[serde(skip, default)]
     wakeup_hdma: bool,
     // Set at HALT-exit when the hardware +4 wakeup-latency fixup applies on
-    // a non-CGB (DMG) wakeup — i.e. the wakeup landed within 2cc of the woken IRQ
-    // event time. (Hardware charges the +4 unconditionally on CGB, or on DMG only
-    // when within 2cc of the event.) The DMG halt-woken STAT read then samples
-    // +4cc later in the line (the same place the existing CGB `+5` read bias models
-    // the CGB branch). Cleared on the next HALT entry.
-    #[serde(skip, default)]
-    wake_plus4_dmg: bool,
     // The pre-snap master_cc at real HALT entry (on_cpu_halt). This is the
     // un-snapped HALT-entry cc that hardware's ceil-to-M-cycle event-time snap
     // would otherwise erase; compared against the captured m0 event time at
@@ -636,12 +629,6 @@ struct HaltWake {
     // byte-identical woken instruction streams. None when not in a real-halt window.
     #[serde(skip, default)]
     entry_cc: Option<u64>,
-    // Per-stream HALT-prefetch phase (0 or 1), derived at unhalt from
-    // entry_cc vs the snapped event time; carried onto the single woken
-    // FF41 read as access_cc += 4 * phase. Cleared at the consume site so it
-    // biases only the one woken instruction stream.
-    #[serde(skip, default)]
-    prefetch_phase: u32,
 }
 
 impl Default for HdmaEngine {
@@ -707,9 +694,7 @@ impl Default for HaltWake {
             wakeup_skew: false,
             wake_m0m2: false,
             wakeup_hdma: false,
-            wake_plus4_dmg: false,
             entry_cc: None,
-            prefetch_phase: 0,
         }
     }
 }
@@ -1021,6 +1006,22 @@ pub struct Mmio {
     #[serde(skip, default)]
     pending_m0_irq_fire_cc: Option<u64>,
 
+    // Exact master-cc at which each IF bit (index = bit number) last rose from
+    // clear. The halted CPU's M-cycle-grid wake rule measures its sampling
+    // boundary against these; u64::MAX = never raised. Not serialized (same
+    // in-flight-wake bookkeeping class as the m0/m2 fire ccs above): a restore
+    // mid-halt degrades to a stall-free wake for that single wake.
+    #[serde(skip, default = "if_raise_cc_never")]
+    if_raise_cc: [u64; 5],
+    // Which STAT source produced the still-pending Lcd raise (LCD_RAISE_* in
+    // this module), latched from `staged_lcd_kind` when the Lcd bit rises.
+    // Decides the wake rule's event-time offset (m0/m2 raise AT the event;
+    // LYC/m1 raises land one dot after it).
+    #[serde(skip, default)]
+    lcd_raise_kind: u8,
+    #[serde(skip, default)]
+    staged_lcd_kind: u8,
+
     // (mooneye intr_2) master_cc at which the mode-2 STAT
     // IRQ event last raised IF (the m2 event time). A
     // DMG halt wake landing within 2cc of it takes the real +4 halt-exit M-cycle as
@@ -1035,17 +1036,6 @@ pub struct Mmio {
     #[serde(skip, default)]
     last_m2_irq_ly: u8,
 
-    // (mooneye hblank_ly_scx) the total halt-exit cc
-    // advance hardware charges for a DMG m0-STAT-IRQ-woken wake — the ceil-to-
-    // M-cycle snap plus the conditional +4 (charged only when the wake lands
-    // within 2cc of the event) — derived from the m0 event time's
-    // mod-4 phase. rustyboi's per-cycle halt loop wakes at the exact IF-set cc
-    // instead, so the woken stream's single FF44 read must be re-anchored by
-    // this advance at the consume site (get_ly_reg_at_cc). Read-side only (the
-    // m0-woken FF41/VRAM read models are co-tuned to the un-advanced wake cc).
-    // Cleared on the next HALT.
-    #[serde(skip, default)]
-    dmg_m0_halt_ly_advance: Option<u32>,
 
     // CGB-console analog of `dmg_m0_halt_ly_advance` for an m0-woken HALT exit on
     // a CGB console running a DMG-flagged cart (hblank_ly_scx_timing-C: console is
@@ -1065,7 +1055,7 @@ pub struct Mmio {
     // halt-state): there the service_interrupt `pc -= 1` prefetch undo
     // over-subtracts, so phase 1 tells it to re-add the +1, matching hardware's
     // CONDITIONAL prefetch undo (undone only when a prefetch actually occurred). Separate register
-    // from halt.prefetch_phase (the DMG+Lcd FF41 STAT consumer) so that path is
+    // from the retired DMG FF41 prefetch-phase facet so that path is
     // untouched. Cleared at the push consume so it biases only the one woken
     // interrupt service.
     #[serde(skip, default)]
@@ -1132,6 +1122,18 @@ const CGB_OBJP_POWERON: [u8; 64] = [
     0x07, 0x6A, 0x55, 0xEC, 0x83, 0x40, 0x0B, 0x77,
 ];
 
+/// STAT sub-sources of an Lcd IF raise, for the halt wake rule's event-time
+/// offset. m0/m2 dispatches raise IF at their event cc; LYC/m1/one-shot raises
+/// land one dot after their event time.
+pub(crate) const LCD_RAISE_M0: u8 = 1;
+pub(crate) const LCD_RAISE_M2: u8 = 2;
+pub(crate) const LCD_RAISE_LYC: u8 = 3;
+pub(crate) const LCD_RAISE_M1: u8 = 4;
+
+fn if_raise_cc_never() -> [u64; 5] {
+    [u64::MAX; 5]
+}
+
 impl Mmio {
     pub fn new() -> Self {
         Mmio {
@@ -1193,9 +1195,11 @@ impl Mmio {
             ssds_haltskew_ly_advance: false,
             m3_lcdc_write_seen: false,
             pending_m0_irq_fire_cc: None,
+            if_raise_cc: if_raise_cc_never(),
+            lcd_raise_kind: 0,
+            staged_lcd_kind: 0,
             last_m2_irq_fire_cc: None,
             last_m2_irq_ly: 0,
-            dmg_m0_halt_ly_advance: None,
             cgb_m0_halt_ly_advance: None,
             timer_push_phase: 0,
             cpu_halted: false,
@@ -2171,7 +2175,32 @@ impl Mmio {
 
     pub(crate) fn request_interrupt(&mut self, flag: cpu::registers::InterruptFlag) {
         let current = self.read(cpu::registers::INTERRUPT_FLAG);
+        if current & flag as u8 == 0 {
+            let bit = (flag as u8).trailing_zeros() as usize;
+            self.if_raise_cc[bit] = self.timer.abs_cc();
+            if matches!(flag, cpu::registers::InterruptFlag::Lcd) {
+                self.lcd_raise_kind = self.staged_lcd_kind;
+            }
+        }
         self.write(cpu::registers::INTERRUPT_FLAG, current | flag as u8);
+    }
+
+    /// The exact cc `flag`'s IF bit last rose from clear (u64::MAX = never).
+    #[inline]
+    pub(crate) fn if_raise_cc_of(&self, flag: cpu::registers::InterruptFlag) -> u64 {
+        self.if_raise_cc[(flag as u8).trailing_zeros() as usize]
+    }
+
+    #[inline]
+    pub(crate) fn lcd_raise_kind(&self) -> u8 {
+        self.lcd_raise_kind
+    }
+
+    /// Stage the STAT sub-source of an Lcd raise about to be requested; consumed
+    /// (latched) by `request_interrupt` iff that raise sets a clear bit.
+    #[inline]
+    pub(crate) fn stage_lcd_raise_kind(&mut self, k: u8) {
+        self.staged_lcd_kind = k;
     }
 
     /// Initialize the timer's internal 16-bit counter at boot. See
@@ -2956,18 +2985,6 @@ impl Mmio {
         self.ssds_haltskew_ly_advance
     }
 
-    /// Record the DMG HALT-exit `cc += 4` wakeup-latency decision
-    /// (the wakeup landed within 2cc of the IRQ event).
-    pub(crate) fn set_halt_wake_plus4_dmg(&mut self, v: bool) {
-        self.halt.wake_plus4_dmg = v;
-    }
-
-    /// Arm/clear the halt-woken stream's DIV/TIMA read re-anchor
-    /// (Timer::halt_read_bias).
-    pub(crate) fn set_halt_timer_read_bias(&mut self, bias: u32) {
-        self.timer.set_halt_read_bias(bias);
-    }
-
     /// Record the master_cc the mode-2 STAT IRQ event raised IF at (its event
     /// time; the per-dot dispatch fires at it).
     pub(crate) fn set_last_m2_irq_fire_cc(&mut self, cc: u64) {
@@ -2990,31 +3007,12 @@ impl Mmio {
         self.last_m2_irq_ly
     }
 
-    /// Set the DMG m0-woken wake's halt-exit cc advance
-    /// (snap + conditional +4) for the woken stream's FF44 read.
-    pub(crate) fn set_dmg_m0_halt_ly_advance(&mut self, adv: Option<u32>) {
-        self.dmg_m0_halt_ly_advance = adv;
-    }
-
     pub(crate) fn set_cgb_m0_halt_ly_advance(&mut self, adv: Option<u32>) {
         self.cgb_m0_halt_ly_advance = adv;
     }
 
     pub(crate) fn cgb_m0_halt_ly_advance(&self) -> Option<u32> {
         self.cgb_m0_halt_ly_advance
-    }
-
-    /// The DMG m0-woken halt-exit advance, if this stream
-    /// was woken by the mode-0 STAT IRQ at its event cc.
-    pub(crate) fn dmg_m0_halt_ly_advance(&self) -> Option<u32> {
-        self.dmg_m0_halt_ly_advance
-    }
-
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
-    /// True when this DMG wakeup carried the +4 read-phase bias.
-    pub(crate) fn halt_wake_plus4_dmg(&self) -> bool {
-        self.halt.wake_plus4_dmg
     }
 
     /// Record the pre-snap master_cc at real HALT entry.
@@ -3025,17 +3023,6 @@ impl Mmio {
     /// The pre-snap HALT-entry master_cc, if captured.
     pub(crate) fn halt_entry_cc(&self) -> Option<u64> {
         self.halt.entry_cc
-    }
-
-    /// Set the per-stream HALT-prefetch phase count (0 or 1).
-    pub(crate) fn set_halt_prefetch_phase(&mut self, phase: u32) {
-        self.halt.prefetch_phase = phase;
-    }
-
-    /// The per-stream HALT-prefetch phase carried onto the
-    /// single woken FF41 read (access_cc += 4 * phase).
-    pub(crate) fn halt_prefetch_phase(&self) -> u32 {
-        self.halt.prefetch_phase
     }
 
     /// Set the per-stream woken-PC push phase (0 or 1).
@@ -3216,14 +3203,10 @@ impl Mmio {
         self.m2_halt_stall_charged_cgb = false;
         self.halt.wake_m0m2 = false;
         self.ssds_haltskew_ly_advance = false;
-        // A fresh HALT ends the previous wakeup's +4 read bias.
-        self.halt.wake_plus4_dmg = false;
-        self.dmg_m0_halt_ly_advance = None;
         self.cgb_m0_halt_ly_advance = None;
         // A fresh HALT supersedes the prior wakeup's prefetch-phase bias (and its
         // captured pre-snap entry cc).
         self.halt.entry_cc = None;
-        self.halt.prefetch_phase = 0;
         self.timer_push_phase = 0;
         // Record the pre-snap HALT-entry master_cc here (above the DMG
         // `!cgb_features_enabled` early-return) so the DMG streams capture it. This

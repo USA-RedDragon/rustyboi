@@ -436,8 +436,17 @@ impl<'a> Bus<'a> {
     /// frame-loop return points (input-application boundaries) stay exact,
     /// and globally at 456 dots (poll overhead is already amortized ~100x).
     pub(crate) fn halted_idle_dots(&self) -> u32 {
+        // M-cycle-grid batching (DMG): the halted SM83 is still clocked in whole
+        // 4-T-cycle M-cycles, so idle consumption must be a multiple of 4 to keep
+        // every subsequent instruction boundary on the CPU's power-on grid. The
+        // quantization is RELATIVE (floor of the event bound, minimum one
+        // M-cycle) — never anchored on absolute master_cc parity, so a folded or
+        // restored clock keeps its phase. An IF bit may now rise INSIDE the final
+        // batch; the wake rule in sm83.rs samples it at the next boundary with
+        // the 2-T-cycle setup-time rule, which is exactly the hardware shape.
+        let grid = !self.mmio.is_cgb();
         if !self.mmio.halt_batchable() {
-            return 1;
+            return if grid { 4 } else { 1 };
         }
         // Account for any carried unresolved lag: the CPU's true position is
         // `master_cc + lag`, and the frame-wrap distance (measured from the
@@ -456,7 +465,11 @@ impl<'a> Bus<'a> {
                     .dots_until_frame_wrap_conservative(ds)
                     .saturating_sub(lag),
             );
-        n.clamp(1, 456) as u32
+        if grid {
+            ((n as u32) & !3).clamp(4, 456)
+        } else {
+            n.clamp(1, 456) as u32
+        }
     }
 
     pub(crate) fn master_cc_dbg(&self) -> u64 { self.mmio.master_cc() }

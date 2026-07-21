@@ -134,17 +134,6 @@ pub(crate) struct Timer {
     /// not on the early grid — its IF-set stays late).
     #[serde(skip, default)]
     isr_on_early_grid: bool,
-    // Re-anchor for DIV/TIMA reads on a halt-woken instruction stream. rustyboi's
-    // halted CPU wakes at the exact IF-set cc, so the woken stream runs a few cc
-    // early; reads resolve at `access_cc + halt_read_bias` to land on the
-    // hardware read cc. Armed at each DMG LCD/VBlank halt-wake with the per-phase
-    // advance, zeroed for other wakes; cleared by any timer register WRITE (a
-    // woken-stream write commits at the un-advanced cc, so post-write reads must
-    // return to that anchor). Not in Pan Docs, TCAGBD, or GBCTR (a rustyboi
-    // wake-cc model correction, not a hardware register behaviour); derived from
-    // gbmicrotest halt/interrupt refs.
-    #[serde(default)]
-    halt_read_bias: u32,
 }
 
 fn disabled_time() -> u64 {
@@ -188,13 +177,7 @@ impl Timer {
             last_fire_cc: DISABLED_TIME,
             last_fire_cc_ei: DISABLED_TIME,
             isr_on_early_grid: false,
-            halt_read_bias: 0,
         }
-    }
-
-    /// Arm/clear the halt-woken DIV/TIMA read re-anchor (see `halt_read_bias`).
-    pub(crate) fn set_halt_read_bias(&mut self, bias: u32) {
-        self.halt_read_bias = bias;
     }
 
     /// The cc the most recent still-undispatched TIMA IRQ became deliverable, or
@@ -771,7 +754,7 @@ impl Addressable for Timer {
     fn read(&self, addr: u16) -> u8 {
         match addr {
             DIV => {
-                let cc = self.access_cc() + self.halt_read_bias as u64;
+                let cc = self.access_cc();
                 let div = (cc.wrapping_sub(self.div_anchor) & 0xFFFF) as u16;
                 (div >> 8) as u8
             }
@@ -781,7 +764,7 @@ impl Addressable for Timer {
                 if self.tac & TAC_ENABLE == 0 {
                     self.tima
                 } else {
-                    let cc = self.access_cc() + self.halt_read_bias as u64;
+                    let cc = self.access_cc();
                     let clk = self.clk();
                     let ticks = (cc - self.tima_last_update) >> clk;
                     let mut tima = self.tima;
@@ -806,9 +789,6 @@ impl Addressable for Timer {
     }
 
     fn write(&mut self, addr: u16, value: u8) {
-        // A woken-stream timer write commits at the un-advanced access cc;
-        // subsequent reads must resolve on that same anchor (see halt_read_bias).
-        self.halt_read_bias = 0;
         match addr {
             DIV => {
                 let cc = self.access_cc();
