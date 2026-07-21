@@ -120,38 +120,170 @@ const KEY_COMBO_ID: [u8; 12] = [
     0x12, 0xB0, 0x79, 0xB8, 0xAD, 0x16, 0x17, 0x07, 0xBA, 0x05, 0x7C, 0x13,
 ];
 
+/// $007A/$007B: the two title checksums the boot ROM singles out at $05F8 for
+/// an extra `call $03DA` (a Nintendo-logo tilemap fixup). Reached only from the
+/// Nintendo path, because $D000 — the byte compared against these — is written
+/// only by the title-hash walk. Pinned against the images by
+/// `tables_match_cgb_boot_bin`.
+const FIXUP_CHECKSUMS: [u8; 2] = [0x58, 0x43];
+
 /// Palette ID for a cart header, per the boot ROM's $0475-$04D6 walk:
 /// `title` = $0134-$0143, `old_licensee` = $014B, `new_licensee` = $0144-$0145.
 pub(crate) fn select_palette_id(title: &[u8; 16], old_licensee: u8, new_licensee: [u8; 2]) -> u8 {
-    let default = PALETTE_PER_CHECKSUM[0];
-    let nintendo = if old_licensee == 0x33 {
+    walk(title, old_licensee, new_licensee).0
+}
+
+/// The boot ROM's "this cart is Nintendo-published, colorize it" predicate:
+/// old licensee $01, or the $33 escape with a "01" new-licensee code.
+fn is_nintendo(old_licensee: u8, new_licensee: [u8; 2]) -> bool {
+    if old_licensee == 0x33 {
         new_licensee == *b"01"
     } else {
         old_licensee == 0x01
-    };
-    if !nintendo {
-        return default;
     }
-    let checksum = title.iter().fold(0u8, |s, &b| s.wrapping_add(b));
-    let Some(mut idx) = TITLE_CHECKSUMS.iter().position(|&c| c == checksum) else {
-        return default;
-    };
-    if idx >= 65 {
-        // Ambiguous checksum: scan the 4th-letter rows (stride 14) until the
-        // running index leaves the 94-entry table, exactly like the boot ROM.
-        let mut row_idx = idx;
-        loop {
-            if FOURTH_LETTERS[row_idx - 65] == title[3] {
-                idx = row_idx;
-                break;
-            }
-            row_idx += 14;
-            if row_idx >= PALETTE_PER_CHECKSUM.len() {
-                return default;
+}
+
+/// The boot ROM's DMG-compat palette walk, as both its outcome and its cost:
+/// `(palette id, master cycles from $0475 to the $04D0 reconvergence)`.
+///
+/// The cost half is what makes the CGB/AGB post-boot divider cart-dependent,
+/// so the two are produced together — a second copy of this control flow would
+/// be free to drift away from the palette it is supposed to be timing.
+fn walk(title: &[u8; 16], old_licensee: u8, new_licensee: [u8; 2]) -> (u8, i32) {
+    let default = PALETTE_PER_CHECKSUM[0];
+    // $0475 ld hl,$014B / ld a,(hl) / cp $33.
+    let mut cc = 28;
+    let nintendo = if old_licensee == 0x33 {
+        // jr nz not taken, then ld l,$44 / ld e,$30 / ldi a,(hl) / cp e.
+        cc += 8 + 28;
+        if new_licensee[0] != b'0' {
+            cc += 12; // jr nz taken -> $04CE
+            false
+        } else {
+            // jr nz not taken / inc e / jr $048C / ldi a,(hl) / cp e.
+            cc += 8 + 4 + 12 + 12;
+            if new_licensee[1] != b'1' {
+                cc += 12;
+                false
+            } else {
+                cc += 8;
+                true
             }
         }
+    } else {
+        // jr nz taken, then ld l,$4B / ld e,$01 / ldi a,(hl) / cp e.
+        cc += 12 + 28;
+        if old_licensee != 0x01 {
+            cc += 12;
+            false
+        } else {
+            cc += 8;
+            true
+        }
+    };
+    if !nintendo {
+        return (default, cc + 8); // $04CE ld c,$00
     }
-    PALETTE_PER_CHECKSUM[idx]
+    // $0490: ld l,$34 / ld bc,$0010 / the 16-pass title sum / ld ($D000),a /
+    // ld hl,$06C7 / ld c,$00.
+    cc += 564;
+    let checksum = title.iter().fold(0u8, |s, &b| s.wrapping_add(b));
+    let Some(mut idx) = TITLE_CHECKSUMS.iter().position(|&c| c == checksum) else {
+        // All 79 probes fail, then jr $04CE / ld c,$00.
+        return (default, cc + 3808);
+    };
+    // 48 cc per rejected probe, 24 to fall out of the loop on the hit.
+    cc += 48 * idx as i32 + 24;
+    if idx < 65 {
+        // ld a,c / sub $41 / jr c taken -> $04D0.
+        return (PALETTE_PER_CHECKSUM[idx], cc + 24);
+    }
+    // Ambiguous checksum: `jr c` not taken, then scan the 4th-letter rows
+    // (stride 14) until the running index leaves the 94-entry table, exactly
+    // like the boot ROM.
+    cc += 20 + 32;
+    let mut row_idx = idx;
+    loop {
+        if FOURTH_LETTERS[row_idx - 65] == title[3] {
+            idx = row_idx;
+            cc += 44; // the matching pass, ending in `jr z` -> $04D0
+            break;
+        }
+        row_idx += 14;
+        if row_idx >= PALETTE_PER_CHECKSUM.len() {
+            // Final pass falls out of the loop, then $04CE ld c,$00.
+            return (default, cc + 88 + 8);
+        }
+        cc += 92;
+    }
+    (PALETTE_PER_CHECKSUM[idx], cc)
+}
+
+/// Master cycles the CGB/AGB boot ROM's DMG-compat setup spends on **this**
+/// cart header, relative to the shortest arm — old licensee $33 with a
+/// new-licensee code that does not start with '0'. That reference is the shape
+/// mooneye's `boot_div-{cgbABCDE,cgb0,A}` carts carry ($014B = $33, new
+/// licensee "ZZ"), so it is exactly the arm the HLE's base constants are
+/// calibrated on and this returns 0 for them.
+///
+/// Three costs stack, and only the first was ever modelled:
+///   1. the licensee walk itself ([`walk`]), which is +4 for any non-$33 cart
+///      and +36 for a $33 cart whose new-licensee code starts with '0' but is
+///      not "01" — and, for the Nintendo arms, the whole title-hash search,
+///      which runs 48 cc per rejected checksum and so is *position dependent*
+///      (about +600 cc for a first-row hit, +4.4k for a miss);
+///   2. installing the chosen palette ($04F5 and the $0582 index loop): 32 cc
+///      per unit of the combination index, plus three per-pass branches keyed
+///      on the id's top three bits;
+///   3. the $05F8 fixup for the two title checksums the image singles out.
+///
+/// Every arm is derived from the images and pinned by
+/// `boot_rom_hle_parity::compat_boot_cost_matches_every_cgb_boot_rom`.
+pub(crate) fn compat_boot_extra_cc(
+    title: &[u8; 16],
+    old_licensee: u8,
+    new_licensee: [u8; 2],
+) -> i32 {
+    /// The $0475 walk for the reference arm above.
+    const REFERENCE_WALK_CC: i32 = 84;
+    /// Combination index of [`PALETTE_PER_CHECKSUM`]`[0]`, the palette that
+    /// reference arm installs.
+    const REFERENCE_COMBINATION: i32 = 28;
+
+    let (id, walk_cc) = walk(title, old_licensee, new_licensee);
+    let mut extra = walk_cc - REFERENCE_WALK_CC;
+
+    // $0582: `add hl,de` (de = 0x18) once per unit of the combination index.
+    extra += 32 * ((id & 0x1F) as i32 - REFERENCE_COMBINATION);
+    // $04F5, 30 passes: a clear flag bit leaves two `inc de` pairs in the path
+    // (12 cc each pass, twice), and a set bit 2 leaves a 5-instruction tail
+    // (36 cc each pass). The reference palette's flags are 0b011.
+    let flags = id >> 5;
+    if flags & 1 == 0 {
+        extra += 720;
+    }
+    if flags & 2 == 0 {
+        extra += 720;
+    }
+    if flags & 4 != 0 {
+        extra += 1080;
+    }
+
+    // $05F8 compares the stored title checksum against the two bytes at $007A.
+    // Only the Nintendo arms reach it with $D000 written; every other cart
+    // leaves $D000 at its power-on value, which the boot ROM never matches
+    // deterministically. Both fixups run the same $03DA routine, but land 40 cc
+    // apart — the routine's VRAM tilemap writes are not phase-independent — so
+    // they are two measured constants rather than one.
+    if is_nintendo(old_licensee, new_licensee) {
+        let checksum = title.iter().fold(0u8, |s, &b| s.wrapping_add(b));
+        if checksum == FIXUP_CHECKSUMS[0] {
+            extra += 1400;
+        } else if checksum == FIXUP_CHECKSUMS[1] {
+            extra += 1440;
+        }
+    }
+    extra
 }
 
 /// Palette ID forced by a button combo held at boot ($0589-$05C8), or None if
@@ -347,5 +479,64 @@ mod tests {
         assert_eq!(bin[0x7E8..0x8D8], PALETTE_DATA);
         assert_eq!(bin[0x8E4..0x8F0], KEY_COMBO_JOYP);
         assert_eq!(bin[0x8F0..0x8FC], KEY_COMBO_ID);
+        assert_eq!(bin[0x7A..0x7C], FIXUP_CHECKSUMS);
+    }
+
+    /// `walk` re-derives the Nintendo predicate inline so it can charge each
+    /// branch, which is exactly the kind of second copy that drifts. Pin the
+    /// two against each other over every shape of licensee pair.
+    #[test]
+    fn walk_agrees_with_the_nintendo_predicate() {
+        for old in [0x00u8, 0x01, 0x33, 0xA4, 0xFF] {
+            for new in [*b"01", *b"00", *b"08", *b"0Z", *b"ZZ", *b"1Z", *b"\0\0"] {
+                let nintendo = is_nintendo(old, new);
+                // Only the Nintendo arms can pick a non-default palette, and
+                // only they can run long enough to reach the table.
+                let picked_from_table = select_palette_id(&title(b"TETRIS"), old, new) != 0x7C;
+                assert_eq!(
+                    nintendo,
+                    picked_from_table,
+                    "$014B=0x{old:02X} new={:?}",
+                    std::str::from_utf8(&new).unwrap_or("??")
+                );
+            }
+        }
+    }
+
+    /// The reference arm — a $33 cart whose new-licensee code does not start
+    /// with '0' — must cost exactly nothing, because that is the shape the HLE
+    /// base constants in `gb.rs` are calibrated on (mooneye's boot_div carts).
+    #[test]
+    fn compat_extra_is_zero_for_the_calibration_arm() {
+        for new in [*b"ZZ", *b"A4", *b"\0\0", *b"1Z"] {
+            assert_eq!(compat_boot_extra_cc(&title(b"mooneye-gb test"), 0x33, new), 0);
+        }
+    }
+
+    /// The arms the old one-constant model flattened. Values are re-measured
+    /// against the real images by `tests/boot_rom_hle_parity.rs`; this pins the
+    /// pure function so a refactor cannot quietly move them.
+    #[test]
+    fn compat_extra_covers_every_arm() {
+        let t = |s: &[u8]| title(s);
+        // Non-Nintendo: three arms within 36 cc.
+        assert_eq!(compat_boot_extra_cc(&t(b"RUSTYBOI"), 0x00, *b"ZZ"), 4);
+        assert_eq!(compat_boot_extra_cc(&t(b"RUSTYBOI"), 0xA4, *b"ZZ"), 4);
+        assert_eq!(compat_boot_extra_cc(&t(b"RUSTYBOI"), 0x33, *b"08"), 36);
+        // Nintendo: thousands of cycles, and title dependent.
+        assert_eq!(compat_boot_extra_cc(&t(b""), 0x01, *b"\0\0"), 604);
+        assert_eq!(compat_boot_extra_cc(&t(b"TETRIS"), 0x01, *b"\0\0"), 1612);
+        assert_eq!(compat_boot_extra_cc(&t(b"ZELDA"), 0x01, *b"\0\0"), 2772);
+        assert_eq!(compat_boot_extra_cc(&t(b"SUPER MARIOLAND"), 0x01, *b"\0\0"), 3268);
+        assert_eq!(compat_boot_extra_cc(&t(b"ZZZZZZZZ"), 0x01, *b"\0\0"), 4364);
+        // The $33 + "01" spelling reaches the same walk 32 cc later.
+        assert_eq!(compat_boot_extra_cc(&t(b"ZZZZZZZZ"), 0x33, *b"01"), 4396);
+        // The two singled-out checksums, and their neighbours to show the
+        // fixup is keyed on the checksum and not on the palette it selects.
+        assert_eq!(compat_boot_extra_cc(&t(b"\x58"), 0x01, *b"\0\0"), 3828);
+        assert_eq!(compat_boot_extra_cc(&t(b"\x43"), 0x01, *b"\0\0"), 3644);
+        // …and are unreachable from a non-Nintendo cart, which never writes
+        // $D000 for the $05F8 compare.
+        assert_eq!(compat_boot_extra_cc(&t(b"\x58"), 0x00, *b"ZZ"), 4);
     }
 }

@@ -729,24 +729,46 @@ impl GB {
         // (bios/cgb_boot.bin) in-emulator hands off at DIV_CTR 0x1E9D for a
         // CGB cart vs 0x2675 for a DMG cart (--validate-bios), reproducing
         // both anchors with the same ~3 cc residual.
-        // The DMG-compat path is additionally CART-CONTENT dependent, by one
-        // M-cycle. Its palette lookup tests the old-licensee byte ($014B) for
-        // $33 ("see the new licensee code at $0144") before hashing the title,
-        // and the following conditional branch costs 12 cc taken vs 8 cc not:
-        // a cart with $014B != $33 boots 4 cc LONGER, handing off with the
-        // divider 4 further along. The CGB-cart path never runs the compat
-        // setup, so its anchor is content-independent.
-        //   - $014B == $33 -> the mooneye boot_div-{cgbABCDE,cgb0,A} carts, which
-        //     pin the anchors below; unchanged by this branch.
-        //   - $014B != $33 -> gbc-hw-tests timers/sys_clocks_init_dmg_mode, whose
-        //     real CGB/AGB captures land the timer ISR one `inc b` earlier than
-        //     the $33 anchor does (b = 0x2E/0x2D, not 0x2F/0x2E).
-        // DMG/MGB/SGB have no compat path and are content-independent here
-        // (the SGB arm below varies for an unrelated reason: it bit-bangs the
-        // header to the SNES, so its DURATION scales with header popcount).
+        // The DMG-compat path is additionally CART-CONTENT dependent, and by a
+        // great deal more than one M-cycle. Its palette setup branches on the
+        // licensee bytes, runs a linear search of the 79-entry title-checksum
+        // table for Nintendo-published carts, then installs the chosen palette
+        // through two data-dependent loops. `cgb_compat_palette` walks the same
+        // code to produce both the palette and its cost; see
+        // `compat_boot_extra_cc` for the three terms. Range over real headers:
+        // roughly -900 cc to +5800 cc against the reference arm.
+        //
+        // The reference arm (extra = 0) is `$014B == $33` with a new-licensee
+        // code not starting with '0' — the shape mooneye's
+        // boot_div-{cgbABCDE,cgb0,A} carts carry, which is what pins the base
+        // constants below. Two anchors constrain the non-zero arms:
+        //   - $014B != $33 (+4) -> gbc-hw-tests timers/sys_clocks_init_dmg_mode,
+        //     whose real CGB/AGB captures land the timer ISR one `inc b` earlier
+        //     than the $33 anchor does (b = 0x2E/0x2D, not 0x2F/0x2E).
+        //   - the Nintendo/title-hash arms have no test-ROM oracle at all —
+        //     homebrew does not carry Nintendo's licensee code — so they are
+        //     derived from the boot ROM images themselves and pinned by
+        //     `boot_rom_hle_parity::compat_boot_cost_matches_every_cgb_boot_rom`,
+        //     which re-measures every arm against all four images.
+        // The CGB-cart path never runs the compat setup, so its anchor is
+        // content-independent. DMG/MGB have no compat path either (the SGB arm
+        // below varies for an unrelated reason: it bit-bangs the header to the
+        // SNES, so its DURATION scales with header popcount).
         let cgb_cart = self.should_enable_cgb_features();
-        let compat_slow = !cgb_cart && self.mmio.read(0x014B) != 0x33;
-        let compat = |base: u16| base + if compat_slow { 4 } else { 0 };
+        let compat_extra = if cgb_cart {
+            0
+        } else {
+            let mut title = [0u8; 16];
+            for (i, b) in title.iter_mut().enumerate() {
+                *b = self.mmio.read(0x0134 + i as u16);
+            }
+            crate::cgb_compat_palette::compat_boot_extra_cc(
+                &title,
+                self.mmio.read(0x014B),
+                [self.mmio.read(0x0144), self.mmio.read(0x0145)],
+            )
+        };
+        let compat = |base: u16| base.wrapping_add_signed(compat_extra as i16);
         let boot_counter: u16 = match self.hardware {
             Hardware::CGB | Hardware::CGBB | Hardware::CGBE => {
                 if cgb_cart { 0x1EA0 } else { compat(0x2678) }
@@ -3821,19 +3843,44 @@ mod reset_identity_tests {
 
 #[cfg(test)]
 mod dmg_compat_boot_duration_tests {
-    //! The CGB/AGB DMG-compat boot path is CART-CONTENT dependent by one
-    //! M-cycle: its palette lookup tests the old-licensee byte ($014B) for $33
-    //! before hashing the title, and the branch that follows costs 12 cc taken
-    //! vs 8 cc not. A cart with $014B != $33 therefore boots 4 cc longer and
-    //! hands off with the divider 4 further along. The CGB-cart path never runs
-    //! the compat setup and must stay content-independent.
+    //! The CGB/AGB DMG-compat boot path is CART-CONTENT dependent: its palette
+    //! setup branches on the licensee bytes, searches the title-checksum table
+    //! for Nintendo-published carts and installs the result through two
+    //! data-dependent loops, so the hand-off divider moves with the header.
+    //! `cgb_compat_palette::compat_boot_extra_cc` is the model; these tests pin
+    //! that `skip_bios` actually consults it, and that the paths which must
+    //! stay content-independent still are. The *values* are pinned against the
+    //! real images by `tests/boot_rom_hle_parity.rs`.
     use super::*;
+
+    const CGB_FAMILY: [Hardware; 5] = [
+        Hardware::CGB,
+        Hardware::CGBB,
+        Hardware::CGBE,
+        Hardware::CGB0,
+        Hardware::AGB,
+    ];
 
     /// Blank 32KB cart carrying a chosen CGB flag ($0143) and old licensee
     /// ($014B).
     fn seeded_counter(hardware: Hardware, cgb_flag: u8, old_licensee: u8) -> u16 {
+        seeded(hardware, cgb_flag, b"", old_licensee, *b"\0\0")
+    }
+
+    /// …and the full header form: title ($0134), old licensee ($014B) and the
+    /// new-licensee code ($0144-$0145).
+    fn seeded(
+        hardware: Hardware,
+        cgb_flag: u8,
+        title: &[u8],
+        old_licensee: u8,
+        new_licensee: [u8; 2],
+    ) -> u16 {
         let mut rom = vec![0u8; 0x8000];
+        rom[0x134..0x134 + title.len()].copy_from_slice(title);
         rom[0x143] = cgb_flag;
+        rom[0x144] = new_licensee[0];
+        rom[0x145] = new_licensee[1];
         rom[0x14B] = old_licensee;
         let mut gb = GB::new(hardware);
         gb.insert(cartridge::Cartridge::from_bytes(&rom).unwrap());
@@ -3846,8 +3893,7 @@ mod dmg_compat_boot_duration_tests {
     /// side is the anchor those fingerprints pin; gbc-hw-tests carts use $00.
     #[test]
     fn compat_boot_is_four_cc_longer_off_the_33_licensee() {
-        for hardware in [Hardware::CGB, Hardware::CGBB, Hardware::CGBE, Hardware::CGB0, Hardware::AGB]
-        {
+        for hardware in CGB_FAMILY {
             let anchored = seeded_counter(hardware, 0x00, 0x33);
             let slow = seeded_counter(hardware, 0x00, 0x00);
             assert_eq!(
@@ -3855,6 +3901,66 @@ mod dmg_compat_boot_duration_tests {
                 4,
                 "{hardware:?}: a DMG cart with $014B != $33 must hand off 4 cc later"
             );
+        }
+    }
+
+    /// The third arm of the licensee branch, which the HLE used to flatten: a
+    /// $33 cart whose new-licensee code starts with '0' but is not "01" pays
+    /// the extra `inc e` / `jr` hop before failing, +36 cc rather than +0.
+    /// Capcom ("08"), Bandai ("09") and friends are all on this arm.
+    #[test]
+    fn compat_boot_costs_36_cc_for_a_zero_prefixed_new_licensee() {
+        for hardware in CGB_FAMILY {
+            let anchored = seeded(hardware, 0x00, b"", 0x33, *b"ZZ");
+            for code in [*b"08", *b"09", *b"00", *b"0Z"] {
+                assert_eq!(
+                    seeded(hardware, 0x00, b"", 0x33, code).wrapping_sub(anchored),
+                    36,
+                    "{hardware:?}: new licensee {:?} must hand off 36 cc after the anchor",
+                    std::str::from_utf8(&code).unwrap()
+                );
+            }
+        }
+    }
+
+    /// The unmodelled arm this module is really about: a Nintendo-published
+    /// cart runs the whole title-hash lookup, thousands of cycles the HLE used
+    /// to charge nothing for. The cost is *title dependent* — a first-row
+    /// checksum hit and a miss are ~3.7k cc apart — so a single constant could
+    /// not have covered it.
+    #[test]
+    fn compat_boot_charges_the_nintendo_title_hash() {
+        for hardware in CGB_FAMILY {
+            let anchored = seeded(hardware, 0x00, b"", 0x33, *b"ZZ");
+            // Checksum 0x00 hits table row 0: the cheapest Nintendo arm.
+            let first_row = seeded(hardware, 0x00, b"", 0x01, *b"\0\0").wrapping_sub(anchored);
+            // "ZZZZZZZZ" hashes to 0xD0, which is in no row: the full 79-probe
+            // search, then the default palette.
+            let miss = seeded(hardware, 0x00, b"ZZZZZZZZ", 0x01, *b"\0\0").wrapping_sub(anchored);
+            assert_eq!(first_row, 604, "{hardware:?}: table row 0");
+            assert_eq!(miss, 4364, "{hardware:?}: checksum miss");
+            // Both Nintendo spellings reach the same walk; the $33 + "01" form
+            // pays 32 cc more to get there.
+            assert_eq!(
+                seeded(hardware, 0x00, b"ZZZZZZZZ", 0x33, *b"01").wrapping_sub(anchored),
+                miss + 32,
+                "{hardware:?}: the $33 + \"01\" spelling of Nintendo"
+            );
+            // Real titles, to keep the search-position dependence honest.
+            for (title, expected) in [
+                (&b"TETRIS"[..], 1612u16),
+                (&b"ZELDA"[..], 2772),
+                (&b"SUPER MARIOLAND"[..], 3268),
+                (&b"POKEMON RED"[..], 1996),
+                (&b"POKEMON BLUE"[..], 4308),
+            ] {
+                assert_eq!(
+                    seeded(hardware, 0x00, title, 0x01, *b"\0\0").wrapping_sub(anchored),
+                    expected,
+                    "{hardware:?}: {}",
+                    std::str::from_utf8(title).unwrap()
+                );
+            }
         }
     }
 

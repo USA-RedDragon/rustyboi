@@ -349,70 +349,231 @@ fn cgb_family_hle_matches_real_boot_rom() {
     }
 }
 
-/// Pin the DMG-compat hand-off's cart-content dependence to the boot ROM images
-/// themselves. `gb.rs` models a cart with $014B != $33 as booting 4 cc longer;
-/// the HLE side of that is unit-tested there, but only the real images can say
-/// whether 4 is the right number, and whether CGB0 — which ships a genuinely
-/// different boot ROM — shares the behaviour at all. It does: all four images
-/// carry the same `cp $33 / jr nz` at the head of the compat palette setup.
-///
-/// Note the branch is really three-way, and only the first arm is modelled. An
-/// old-licensee of $01 (or $33 with a "01" new-licensee at $0144) means Nintendo
-/// and sends the boot ROM into the title-hash palette lookup, which costs ~4.6k
-/// cc more — running these images with $014B = $01 hands off at 0x398D rather
-/// than 0x2885 on CGB0. `skip_bios` flattens that to one constant, as it always
-/// has. That is a pre-existing modelling gap, not a regression, and closing it
-/// needs a silicon oracle; it is recorded here so it is not rediscovered as new.
-#[test]
-fn licensee_branch_costs_four_cc_on_every_cgb_boot_rom() {
-    let mut checked = 0;
-    for m in EXPECTED {
-        if m.cgb_flag != 0x00 || !matches!(m.hw, Hardware::CGB0 | Hardware::CGB | Hardware::CGBE | Hardware::AGB) {
-            continue;
-        }
-        let Some(bios) = bios_bytes(m.bios) else { continue };
+/// Every CGB-family boot ROM revision, on the DMG-compat cart path.
+const COMPAT_ROWS: [(Hardware, &str); 4] = [
+    (Hardware::CGB0, "cgb0_boot.bin"),
+    (Hardware::CGB, "cgb_boot.bin"),
+    (Hardware::CGBE, "cgbE_boot.bin"),
+    (Hardware::AGB, "agb_boot.bin"),
+];
 
-        // The image must literally contain `ld hl,$014B; ld a,(hl); cp $33; jr nz`.
-        const SEQ: &[u8] = &[0x21, 0x4B, 0x01, 0x7E, 0xFE, 0x33, 0x20];
+/// Build a DMG-compat cartridge with a chosen title and licensee pair, keeping
+/// the boot ROM's own logo so the revision's logo check passes.
+fn compat_cartridge(bios: &[u8], title: &[u8], old: u8, new: [u8; 2]) -> Vec<u8> {
+    let model = Model {
+        hw: Hardware::CGB,
+        bios: "",
+        logo: Logo::At(0x42),
+        cgb_flag: 0x00,
+        div_gap: 0,
+        io_exceptions: &[],
+    };
+    let mut rom = cartridge_for(&model, bios);
+    rom[0x134..0x144].fill(0);
+    rom[0x134..0x134 + title.len()].copy_from_slice(title);
+    rom[0x144] = new[0];
+    rom[0x145] = new[1];
+    rom[0x14B] = old;
+    let mut sum = 0u8;
+    for b in &rom[0x134..0x14D] {
+        sum = sum.wrapping_sub(*b).wrapping_sub(1);
+    }
+    rom[0x14D] = sum;
+    rom
+}
+
+/// Pin the DMG-compat hand-off's cart-content dependence to the boot ROM images
+/// themselves, arm by arm.
+///
+/// Every CGB-family image branches **three** ways on the licensee bytes at the
+/// head of the compat palette setup (0x0475 in the CGB/CGBE/AGB images, 0x046F
+/// in CGB0's, which is a genuinely different ROM):
+///
+/// ```text
+///   ld hl,$014B / ld a,(hl) / cp $33 / jr nz $0488
+///   $0488: ld l,$4B / ld e,$01 / ldi a,(hl) / cp e / jr nz $04CE
+///   $047D: ld l,$44 / ld e,$30 / ldi a,(hl) / cp e / jr nz $04CE
+///          inc e / jr $048C
+/// ```
+///
+/// so the cart is Nintendo-published — and gets the title-hash palette lookup —
+/// iff `$014B == $01`, or `$014B == $33` with the new-licensee code at
+/// $0144-$0145 equal to `"01"`. Everything else falls straight through to
+/// $04CE, which is why the four non-Nintendo arms sit within 36 cc of each
+/// other while the Nintendo arms run thousands of cycles longer.
+///
+/// The cost is **not** a constant on the Nintendo side: the checksum table is
+/// searched linearly, 48 cc per rejected entry, so it is position dependent
+/// (Tetris +1612, Zelda +2772, an unrecognised title +4364), and then the
+/// chosen palette is installed through two more data-dependent loops. That is
+/// what `cgb_compat_palette::compat_boot_extra_cc` models, and what this
+/// re-measures against the genuine images on every revision.
+#[test]
+fn compat_boot_cost_matches_every_cgb_boot_rom() {
+    // (title, old licensee, new licensee, cc after the $33/non-'0' reference)
+    const ARMS: &[(&[u8], u8, [u8; 2], i32)] = &[
+        // --- non-Nintendo: the three cheap arms ---
+        (b"RUSTYBOI", 0x33, *b"ZZ", 0), // the reference; mooneye's boot_div carts
+        (b"RUSTYBOI", 0x00, *b"ZZ", 4), // any non-$33 old licensee
+        (b"RUSTYBOI", 0xA4, *b"ZZ", 4),
+        (b"RUSTYBOI", 0x33, *b"08", 36), // '0'-prefixed but not "01" (Capcom)
+        (b"RUSTYBOI", 0x33, *b"00", 36),
+        (b"RUSTYBOI", 0x33, *b"0Z", 36),
+        // --- Nintendo, both spellings, across the search range ---
+        (b"", 0x01, *b"\0\0", 604),          // checksum 0x00 -> table row 0
+        (b"TETRIS", 0x01, *b"\0\0", 1612),   // row 29
+        (b"POKEMON RED", 0x01, *b"\0\0", 1996),
+        (b"ZELDA", 0x01, *b"\0\0", 2772),
+        (b"SUPER MARIOLAND", 0x01, *b"\0\0", 3268), // ambiguous row, 4th letter 'E'
+        (b"POKEMON BLUE", 0x01, *b"\0\0", 4308),    // ambiguous row, deeper column
+        (b"ZZZZZZZZ", 0x01, *b"\0\0", 4364),        // no row at all: full search
+        (b"ZZZZZZZZ", 0x33, *b"01", 4396),          // …the $33 spelling, +32 cc
+        (b"TETRIS", 0x33, *b"01", 1644),
+        // --- the two title checksums the image singles out at $05F8 ---
+        // $D000 (the title sum) is compared against the pair at $007A, and a
+        // match costs an extra `call $03DA`. Only reachable from a Nintendo arm.
+        (b"\x58", 0x01, *b"\0\0", 3828),
+        (b"\x43", 0x01, *b"\0\0", 3644),
+    ];
+
+    let mut checked = 0;
+    for (hw, bios_name) in COMPAT_ROWS {
+        let Some(bios) = bios_bytes(bios_name) else { continue };
+
+        // The image must literally contain the three-way branch above; a
+        // revision that lacks it is not modelled by `compat_boot_extra_cc` and
+        // must fail loudly rather than inherit constants measured elsewhere.
+        const SEQ: &[u8] = &[
+            0x21, 0x4B, 0x01, // ld hl,$014B
+            0x7E, // ld a,(hl)
+            0xFE, 0x33, // cp $33
+            0x20, 0x0B, // jr nz,$0488
+            0x2E, 0x44, // ld l,$44
+            0x1E, 0x30, // ld e,$30
+            0x2A, 0xBB, // ldi a,(hl) / cp e
+            0x20, 0x49, // jr nz,$04CE
+            0x1C, // inc e
+            0x18, 0x04, // jr $048C
+            0x2E, 0x4B, // ld l,$4B
+            0x1E, 0x01, // ld e,$01
+            0x2A, 0xBB, // ldi a,(hl) / cp e
+            0x20, 0x3E, // jr nz,$04CE
+        ];
         assert!(
             bios.windows(SEQ.len()).any(|w| w == SEQ),
-            "{}: no `ld hl,$014B / cp $33 / jr nz` in the image — the compat \
-             boot-duration model in gb.rs does not apply to this revision",
-            m.bios
+            "{bios_name}: the three-way licensee branch is not in this image — \
+             the compat boot-duration model in cgb_compat_palette does not \
+             apply to this revision and must not be inherited blindly",
+        );
+        // …and the pair of singled-out title checksums it fixes up at $05F8.
+        assert_eq!(
+            &bios[0x7A..0x7C],
+            &[0x58, 0x43],
+            "{bios_name}: the $05F8 fixup checksums moved",
         );
 
-        let handoff = |licensee: u8| {
-            let mut rom = cartridge_for(m, &bios);
-            rom[0x14B] = licensee;
-            let mut sum = 0u8;
-            for b in &rom[0x134..0x14D] {
-                sum = sum.wrapping_sub(*b).wrapping_sub(1);
-            }
-            rom[0x14D] = sum;
-            let mut gb = GB::new(m.hw);
+        let handoff = |title: &[u8], old: u8, new: [u8; 2]| {
+            let rom = compat_cartridge(&bios, title, old, new);
+            let mut gb = GB::new(hw);
             gb.insert(Cartridge::from_bytes(&rom).expect("build cartridge"));
             gb.load_bios_bytes(&bios).expect("load bios");
             gb.run_boot_rom();
-            assert_eq!(gb.read_memory(0xFF50), 0xFF, "{}: never handed off", m.bios);
+            assert_eq!(gb.read_memory(0xFF50), 0xFF, "{bios_name}: never handed off");
             gb.timer_internal_counter()
         };
 
-        // $A4 stands in for "any non-Nintendo licensee": it must behave exactly
-        // like the $00 the other rows use, since only the $33/$01 arms branch.
-        let anchored = handoff(0x33);
-        for other in [0x00u8, 0xA4] {
+        let reference = handoff(ARMS[0].0, ARMS[0].1, ARMS[0].2);
+        for &(title, old, new, expected) in ARMS {
+            let measured = handoff(title, old, new).wrapping_sub(reference) as i32;
             assert_eq!(
-                handoff(other).wrapping_sub(anchored),
-                4,
-                "{} ({:?}): $014B = 0x{other:02X} must hand off exactly 4 cc after \
-                 the $33 anchor",
-                m.bios,
-                m.hw
+                measured,
+                expected,
+                "{bios_name} ({hw:?}): title {title:?} / $014B=0x{old:02X} / \
+                 new licensee {:?} hands off {measured:+} cc after the reference \
+                 arm, model says {expected:+}",
+                std::str::from_utf8(&new).unwrap_or("??"),
+            );
+
+            // …and the HLE must agree with the image it was derived from.
+            let mut rom = compat_cartridge(&bios, title, old, new);
+            rom[0x143] = 0x00;
+            let mut hle = GB::new(hw);
+            hle.insert(Cartridge::from_bytes(&rom).expect("build cartridge"));
+            hle.skip_bios();
+            let mut plain = GB::new(hw);
+            plain.insert(
+                Cartridge::from_bytes(&compat_cartridge(&bios, ARMS[0].0, ARMS[0].1, ARMS[0].2))
+                    .expect("build cartridge"),
+            );
+            plain.skip_bios();
+            assert_eq!(
+                hle.timer_internal_counter().wrapping_sub(plain.timer_internal_counter()) as i32,
+                expected,
+                "{bios_name} ({hw:?}): skip_bios disagrees with the image on \
+                 title {title:?} / $014B=0x{old:02X}",
             );
         }
         checked += 1;
     }
-    assert!(checked == 0 || checked == 4, "expected all four CGB-family compat rows, saw {checked}");
+    assert!(
+        checked == 0 || checked == COMPAT_ROWS.len(),
+        "expected all {} CGB-family compat rows, saw {checked}",
+        COMPAT_ROWS.len()
+    );
+}
+
+/// The named arms above are a curated list, so they can only catch drift in the
+/// cases someone thought of. This sweeps the model against the image across the
+/// *whole* checksum space instead: every one of the 256 title sums a cart can
+/// have, which walks every position of the linear search, every hash miss, both
+/// $05F8 fixups and — through the palette each row selects — every combination
+/// index and flag pattern the install loops can take.
+///
+/// The full sweep runs on the canonical CGB image; the other three revisions
+/// take a stride through it, which is enough to catch a revision whose tables or
+/// loop structure differ while keeping the suite quick.
+#[test]
+fn compat_boot_cost_matches_the_whole_checksum_table() {
+    let mut checked = 0;
+    for (hw, bios_name) in COMPAT_ROWS {
+        let Some(bios) = bios_bytes(bios_name) else { continue };
+        let stride = if hw == Hardware::CGB { 1 } else { 16 };
+
+        let counters = |title: &[u8]| {
+            let rom = compat_cartridge(&bios, title, 0x01, *b"\0\0");
+            let mut real = GB::new(hw);
+            real.insert(Cartridge::from_bytes(&rom).expect("build cartridge"));
+            real.load_bios_bytes(&bios).expect("load bios");
+            real.run_boot_rom();
+            assert_eq!(real.read_memory(0xFF50), 0xFF, "{bios_name}: never handed off");
+            let mut hle = GB::new(hw);
+            hle.insert(Cartridge::from_bytes(&rom).expect("build cartridge"));
+            hle.skip_bios();
+            (real.timer_internal_counter(), hle.timer_internal_counter())
+        };
+
+        // A one-byte title puts the sum under direct control; the 4th title
+        // letter stays 0, so the ambiguous rows exercise their miss path.
+        let (real0, hle0) = counters(&[0x00]);
+        let mut swept = 0;
+        for sum in (0u16..256).step_by(stride) {
+            let (real, hle) = counters(&[sum as u8]);
+            assert_eq!(
+                hle.wrapping_sub(hle0) as i16,
+                real.wrapping_sub(real0) as i16,
+                "{bios_name} ({hw:?}): title checksum 0x{sum:02X} — skip_bios and \
+                 the real boot ROM disagree on the compat hand-off",
+            );
+            swept += 1;
+        }
+        assert_eq!(swept, 256 / stride, "{bios_name}: sweep did not run");
+        checked += 1;
+    }
+    assert!(
+        checked == 0 || checked == COMPAT_ROWS.len(),
+        "expected all {} CGB-family compat rows, saw {checked}",
+        COMPAT_ROWS.len()
+    );
 }
 
 /// Guard the skip-if-absent escape hatch: when `bios/` *is* populated the suite
