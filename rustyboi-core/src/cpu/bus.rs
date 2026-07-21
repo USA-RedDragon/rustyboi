@@ -689,11 +689,29 @@ impl<'a> Bus<'a> {
         // `is_cgb_features_enabled` (KEY0 compat off).
         let is_cgb = self.mmio.is_cgb();
         let cgb_de = self.mmio.is_cgb_de();
+        // The dma_timing_lcd_on OAM-read population: a CGB-native/AGB stream
+        // resumed by a bare (non-serviced) VBLANK `di; halt` exit, whose grid
+        // re-phasing is still live (grid/legacy flag set at the wake, cleared only
+        // by the next HALT). dma_timing_lcd_on is exactly this -- each DMA row's
+        // OAM readback follows a `di; halt` VBLANK wake (wait_vbl), IME=0, then a
+        // free-running readback loop with no intervening HALT.
+        //
+        // The `halt_wake_vblank` gate is load-bearing, NOT just a source label: it
+        // excludes the `ei; halt` LYC-SERVICED OAM-read streams (gbc-hw-tests
+        // mode2_read_oam_spr_{dis,en}), whose read fires inside the interrupt
+        // handler and resolves the mode-3->0 END at the free-running boundary, not
+        // the +4 M-cycle grid. Both set grid/skew, so without the VBLANK gate the
+        // bias would over-unblock those 4 rows. age/oam-read-cgbE is pure
+        // free-running (grid/skew never set), so it is untouched regardless.
+        let halt_woken = (self.mmio.halt_wake_grid_cgb() || self.mmio.halt_wakeup_skew())
+            && self.mmio.halt_wake_vblank()
+            && self.mmio.is_cgb_features_enabled()
+            && (cgb_de || self.mmio.is_agb());
         if let Some(blocked) = self.ppu.cpu_access_blocked(
             kind,
             is_read,
             mode_locked,
-            crate::ppu::controller::AccessEnv { is_cgb, cgb_de, double_speed: ds },
+            crate::ppu::controller::AccessEnv { is_cgb, cgb_de, double_speed: ds, halt_woken },
             gate_cc,
         ) {
             return blocked;

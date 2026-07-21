@@ -777,6 +777,11 @@ pub(crate) struct AccessEnv {
     pub is_cgb: bool,
     pub(crate) cgb_de: bool,
     pub(crate) double_speed: bool,
+    /// True when the access is issued by a HALT-woken CGB-native/AGB stream (the
+    /// same `halt_woken_m3_read` population the STAT resolver keys on). Such reads
+    /// land on the CPU M-cycle grid (re-phased to the waking IRQ edge), not the
+    /// free-running dot grid the OAM-read boundaries are otherwise tuned to.
+    pub(crate) halt_woken: bool,
 }
 
 const WY1_DELAY: i64 = 2;
@@ -10181,7 +10186,30 @@ impl Ppu {
     /// END boundary against `scheduled_mode0_dot` (the hardware current-line mode-0 (HBlank) time);
     /// the start stays on the renderer's mode set, which is window-independent.
     pub(crate) fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, env: AccessEnv, access_cc: u64) -> Option<bool> {
-        let AccessEnv { is_cgb, cgb_de, double_speed } = env;
+        let AccessEnv { is_cgb, cgb_de, double_speed, halt_woken } = env;
+        // A HALT-woken CGB-native/AGB OAM READ lands on the CPU M-cycle grid: the
+        // CGB-native halt exit re-phases the CPU clock to the waking IRQ edge (the
+        // `halt_woken_m3_read` population), so the woken stream's reads sit on the
+        // CPU's M-cycle grid, not the free-running dot grid the OAM-read boundaries
+        // are otherwise tuned to. dma_timing_lcd_on's probe train is exactly this --
+        // each DMA row's OAM readback follows a `di; halt` VBLANK wake (wait_vbl)
+        // with no intervening HALT, so every graded read inherits that grid --
+        // whereas age/oam-read-cgbE is pure free-running (its only halt is the
+        // end-of-test freeze), so it stays at bias 0 and its boundary is unchanged.
+        //
+        // Two boundaries shift, by different amounts because they sample the read
+        // at different sub-M-cycle phases:
+        //  - mode-3->0 END (`ended`): read through one M-cycle (4 master cc, at
+        //    BOTH speeds -- 140864f4) below the mode-0 time. `open_bias = 4`.
+        //  - OAM line-wrap pre-lock (`line_cycles_at`): the mid-M-cycle read phase
+        //    lands 1 cc later, and hardware already locks at line-cycle 447 vs the
+        //    free-running 452. `close_bias = 5`.
+        // 4/5 is uniform across CPU-CGB-D/E (real_gbc) and AGB (real_gba); the AGB
+        // 4-dot post-boot video lead narrows the open tolerance to exactly 4 (open
+        // 5 over-unblocks AGB) but leaves 4/5 valid on both columns. Scoped to OAM
+        // reads so VRAM / cgbp / OAM-write are untouched.
+        let (open_bias, close_bias): (i64, i64) =
+            if kind == 1 && is_read && halt_woken { (4, 5) } else { (0, 0) };
         if self.disabled {
             return Some(false);
         }
@@ -10211,7 +10239,7 @@ impl Ppu {
                 } else {
                     3 + is_cgb as i64
                 };
-                if wrap_lc + k >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
+                if wrap_lc + k + close_bias >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
                     return Some(true);
                 }
             }
@@ -10418,7 +10446,7 @@ impl Ppu {
             } else {
                 3 + 2 * is_cgb as i64
             };
-            if oam_line_cycle + k >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
+            if oam_line_cycle + k + close_bias >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
                 let ly = self.internal_ly_val as i64;
                 let accessible = (143..153).contains(&ly);
                 return Some(!accessible);
@@ -10429,7 +10457,8 @@ impl Ppu {
         // blocked on E exactly where B/C already read through. VRAM keeps the
         // shared boundary (vram-read is BCE-common).
         let de_read_hold = (kind == 1 && is_read && cgb_de) as i64;
-        let ended = self.state != State::OAMSearch && cc_end + 2 - de_read_hold >= m0t;
+        let ended =
+            self.state != State::OAMSearch && cc_end + 2 - de_read_hold + open_bias >= m0t;
         // OAM-WRITE DMG quirk (the hardware OAM-writable check): at exactly line cycles(cc) == 76
         // (the last mode-2 OAM-scan dot, DMG only) an OAM write is accepted. CGB has
         // no such escape.
