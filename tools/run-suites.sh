@@ -669,6 +669,24 @@ if [ "$1" = "report-update" ]; then
         && git diff --cached --quiet -- rustyboi-core rustyboi-test-runner/suites 2>/dev/null; then
         exit 0  # committing, but no source/manifest change staged -> counts can't have moved
     fi
+    # Staleness guard: a runner binary older than the staged core/runner
+    # sources grades the PREVIOUS tree and writes confidently wrong counts
+    # into README (it has happened repeatedly: false 205 and 215 gbc_hw rows).
+    # Refuse loudly instead of degrading silently; the committer rebuilds and
+    # re-commits.
+    if [ -n "${PRE_COMMIT:-}" ] && [ -x "$BIN" ]; then
+        newest_src=$(git -C "$ROOT" diff --cached --name-only -- \
+                rustyboi-core rustyboi-test-runner 2>/dev/null \
+            | while IFS= read -r f; do
+                [ -f "$ROOT/$f" ] && stat -c %Y "$ROOT/$f"
+            done | sort -rn | head -n 1)
+        bin_time=$(stat -c %Y "$BIN" 2>/dev/null || echo 0)
+        if [ -n "$newest_src" ] && [ "$bin_time" -lt "$newest_src" ]; then
+            echo "run-suites: REFUSING report-update: $BIN is older than staged sources." >&2
+            echo "            Rebuild first:  cargo build -p rustyboi-test-runner --release" >&2
+            exit 1
+        fi
+    fi
     if [ -x "$BIN" ] && [ -f "$ROMS/.rb-setup-complete" ]; then
         update_readme_report
     else
