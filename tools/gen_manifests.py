@@ -1260,10 +1260,21 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
              if (d / n).is_file()),
             None,
         )
+        # `rev=cgbe`: AntonioND's CGB unit is CPU-CGB-D/E silicon, not CPU-CGB-C.
+        # SameBoy (built from source) gates the line-153 LY/LYC rollover on
+        # `model <= GB_MODEL_CGB_C` (Core/display.c:2218-2232, plus the
+        # GB_STAT_update ly_for_comparison == -1 arm at :532); run against these
+        # ROMs its CGB-C model loses STAT bit 2 (the LY=LYC coincidence flag) at
+        # exactly the cells real_gbc.sav holds set -- vbl_irq_delay_timer 0x0008
+        # (C4) and mode1_disableint 0x0009 (94) -- while its CGB-D and CGB-E
+        # models reproduce the captures byte-for-byte (its DMG model reproduces
+        # real_gb.sav byte-for-byte as a control). Same finding as Wilbert Pol's
+        # ly_lyc/line-153 captures above; graded C, 14 of these rows fail on the
+        # coincidence tail-hold and the LY-register read, both C-vs-D/E gates.
         if cgb_sav:
             ref = graded_ref(cgb_sav, "gbc")
             if ref is not None:
-                emit(test_id, "cgb", rom, ref)
+                emit(test_id, "cgb", rom, ref, rev="|rev=cgbe")
 
         # DMG column: only for DMG-flagged ROMs, graded vs real_gb.sav.
         if cgb_flag == 0x00:
@@ -1303,6 +1314,16 @@ _GBCHW_HEADER = [
     "real_gbc (CGB), real_gba_sp (GBA-SP). rustyboi is a CGB emulator, so the",
     "PRIMARY grade is CGB vs real_gbc.sav; DMG-flagged ROMs (header 0x143==0x00,",
     "the *_dmg_mode + DMG-valid dma/timer tests) ALSO grade DMG vs real_gb.sav.",
+    "",
+    "The CGB rows carry `rev=cgbe`: AntonioND's CGB unit is CPU-CGB-D/E silicon,",
+    "not CPU-CGB-C. SameBoy built from source gates the line-153 LY/LYC rollover",
+    "on `model <= GB_MODEL_CGB_C`; its CGB-C model loses STAT bit 2 (LY=LYC",
+    "coincidence) at exactly the cells these captures hold set, while its CGB-D",
+    "and CGB-E models reproduce them byte-for-byte (DMG model vs real_gb.sav as",
+    "a control). Graded as C, 14 rows failed on the two independent C-vs-D/E",
+    "gates (the FF41 coincidence tail-hold and the LY-register read). Same",
+    "conclusion the mooneye_wilbertpol ly_lyc/line-153 rows reached; gambatte's",
+    "explicitly-cgb04c oracles keep the CGB-C model, which is left untouched.",
     "The GBP column is not graded (DMG silicon, covered by real_gb.sav). The AGB",
     "column IS graded, one row per dir: real_gba_sp.sav on Hardware::AGB via a",
     "`rev=agb` token (the row stays mode `cgb` so the default mode set selects",
