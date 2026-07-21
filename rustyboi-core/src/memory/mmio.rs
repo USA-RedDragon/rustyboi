@@ -2210,6 +2210,35 @@ impl Mmio {
         self.staged_lcd_kind = k;
     }
 
+    /// Whether the current halt stream runs on the M-cycle-grid wake model
+    /// (quantized idle batches + the setup-window exit rule in sm83.rs), vs the
+    /// legacy sub-M-cycle wake. Everything is on-grid except CGB-cart streams
+    /// that are double-speed or HDMA-entangled (including the sticky
+    /// FF55-machinery markers, whose wake ccs feed the block state machine's
+    /// ~1cc straddles). Every term is stable across one halt window: FF55
+    /// (HDMA arm) and KEY1 speed switches cannot happen while halted, so the
+    /// batch quantization and the wake rule always agree.
+    pub(crate) fn halt_grid_quantized(&self) -> bool {
+        if !self.is_cgb_features_enabled() {
+            return true;
+        }
+        // CGB-native LCD-waiting halts stay legacy: their real-silicon
+        // observables sit at R+4 (one dot OFF the model's boundary grid), so
+        // an on-grid wake cannot reproduce them without a per-mode register
+        // access sub-cycle convention that has not been derived yet (the
+        // vbl_irq_delay_timer / last_ly_ly_change / mode1_disablestat_end
+        // gbc_mode knife-edge cells). IE cannot change while halted, so the
+        // predicate is stable across the halt window.
+        (self.ie_register & 0x02) == 0
+            && !self.is_double_speed_mode()
+            && !self.is_speed_switch_armed()
+            && !self.hdma_is_enabled()
+            && !self.hdma_req_pending()
+            && !self.hdma_machinery_used()
+            && self.hdma_last_fire_cc().is_none()
+            && matches!(self.halt_hdma_state(), HaltHdmaState::Low)
+    }
+
     pub(crate) fn set_halt_wake_grid_cgb(&mut self, v: bool) {
         self.halt_wake_grid_cgb = v;
     }

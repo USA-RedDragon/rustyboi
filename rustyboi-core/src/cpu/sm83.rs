@@ -171,7 +171,7 @@ impl SM83 {
                 // Base extra-4-clock HALT exit: TCAGBD §4.9; the 2-T-cycle
                 // sampling setup window is a sub-cycle refinement from test-ROM
                 // refs (the {E%4 -> +4,+3,+2,+5} advance staircase).
-                if !mmio.mmio.is_cgb_features_enabled()
+                if mmio.mmio.halt_grid_quantized()
                     && !self.stopped
                     && !self.m2_halt_stall_charged
                     && let Some(f) = pending_interrupt
@@ -218,7 +218,16 @@ impl SM83 {
                         // by real-silicon captures: the LY144 VBlank-entry m2
                         // quirk, a wake right after an m2 dispatch
                         // (vblank_stat_intr), and mid-m3 LCDC racer streams.
-                        let cgb = mmio.mmio.is_cgb();
+                        // The CGB extra exit M-cycle covers LCD wakes in both
+                        // cart modes, but the VBlank wake only in DMG-compat
+                        // mode: CGB-native VBlank wakes exit on the DMG window
+                        // (daid speed_switch first-read $85 vs the dmg_mode
+                        // if/ly_timings families' +4-pinned cells, all real
+                        // silicon).
+                        let cgb = mmio.mmio.is_cgb()
+                            && (f == registers::InterruptFlag::Lcd
+                                || (f == registers::InterruptFlag::VBlank
+                                    && !mmio.mmio.is_cgb_features_enabled()));
                         let is_m2 = f == registers::InterruptFlag::Lcd
                             && kind == memory::mmio::LCD_RAISE_M2;
                         let m2_prox = !is_m2
@@ -266,7 +275,7 @@ impl SM83 {
                 } else {
                     true
                 };
-                if mmio.mmio.is_cgb_features_enabled()
+                if !mmio.mmio.halt_grid_quantized()
                     && self.registers.ime
                     && m2_stall_ok
                     && pending_interrupt == Some(registers::InterruptFlag::Lcd)
@@ -294,7 +303,7 @@ impl SM83 {
                 // Base extra-4-clock HALT exit: TCAGBD §4.9 (which frames it as
                 // model-independent); this per-wake-source CGB LYC/m1 delta is from
                 // test-ROM refs, not in Pan Docs or GBCTR.
-                if mmio.mmio.is_cgb_features_enabled()
+                if !mmio.mmio.halt_grid_quantized()
                     && !self.stopped
                     && pending_interrupt == Some(registers::InterruptFlag::Lcd)
                     && !self.m2_halt_stall_charged
@@ -338,7 +347,7 @@ impl SM83 {
                 // from test-ROM refs, not in Pan Docs or GBCTR.
                 // NOTE: TCAGBD §4.9 frames the +4 as universal ("any interrupt");
                 // our model makes it per-source (serial delayed, timer not).
-                if mmio.mmio.is_cgb_features_enabled()
+                if !mmio.mmio.halt_grid_quantized()
                     && !self.stopped
                     && pending_interrupt == Some(registers::InterruptFlag::Serial)
                     && !self.cgb_lcd_halt_stall_charged
@@ -369,7 +378,7 @@ impl SM83 {
                 // The resumed stream carries the unmodeled HALT-prefetch sub-M-cycle
                 // skew; flag it so the FF41 STAT line-tail override defers to the
                 // renderer register (already correct there). Cleared on the next HALT.
-                let legacy_wake = mmio.mmio.is_cgb_features_enabled();
+                let legacy_wake = !mmio.mmio.halt_grid_quantized();
                 let grid_cgb = mmio.mmio.is_cgb() && !legacy_wake;
                 mmio.set_halt_wakeup_skew(legacy_wake);
                 mmio.mmio.set_halt_wake_grid_cgb(grid_cgb);

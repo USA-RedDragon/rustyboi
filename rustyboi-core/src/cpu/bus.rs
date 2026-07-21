@@ -444,7 +444,7 @@ impl<'a> Bus<'a> {
         // restored clock keeps its phase. An IF bit may now rise INSIDE the final
         // batch; the wake rule in sm83.rs samples it at the next boundary with
         // the 2-T-cycle setup-time rule, which is exactly the hardware shape.
-        let grid = !self.mmio.is_cgb_features_enabled();
+        let grid = self.mmio.halt_grid_quantized();
         if !self.mmio.halt_batchable() {
             return if grid { 4 } else { 1 };
         }
