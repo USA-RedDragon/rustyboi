@@ -446,6 +446,7 @@ fn stat_change_triggers_m0lyc_or_m1_cgb(
     lc: &LyCounter,
     cc: u64,
     m0_irq_time: u64,
+    agb: bool,
 ) -> bool {
     let ly = lc.ly as i64;
     let time_to_next_ly = lc.time as i64 - cc as i64;
@@ -480,7 +481,14 @@ fn stat_change_triggers_m0lyc_or_m1_cgb(
     // own `> 4 + 2*ds` last-line window) or an LYC match fires.
     let not_last_line = ly < LCD_LINES_PER_FRAME as i64 - 1;
     let m1_blocked = (old & STAT_M1EN != 0) && (not_last_line || time_to_next_ly > 3 + 3 * ds);
-    let m1_fire = (data & STAT_M1EN != 0) && (not_last_line || time_to_next_ly > 4 + 2 * ds);
+    // AGB silicon closes the last-line m1-enable fire window half an M-cycle
+    // earlier than CGB in single speed (mode1_disablestat_end captures, both
+    // cart modes: E2->E0 write-sweep transition one probe earlier on AGB);
+    // the double-speed sweep in the same capture matches CGB, so the term is
+    // SS-scoped.
+    let agb_ss = agb && !lc.ds;
+    let m1_fire = (data & STAT_M1EN != 0)
+        && (not_last_line || time_to_next_ly > 4 + 2 * ds + 2 * agb_ss as i64);
     !m1_blocked && (m1_fire || lyc_fire)
 }
 
@@ -491,6 +499,7 @@ pub(super) fn stat_change_triggers_cgb(
     cc: u64,
     m0_irq_time: u64,
     lyc_reg: u8,
+    agb: bool,
 ) -> bool {
     let newly_enabled = data & !old & (STAT_LYCEN | STAT_M2EN | STAT_M1EN | STAT_M0EN);
     let lyc_cmp = get_lyc_cmp_ly(lc, cc);
@@ -504,7 +513,7 @@ pub(super) fn stat_change_triggers_cgb(
     }
     let ly = lc.ly as i64;
     let time_to_next_ly = lc.time as i64 - cc as i64;
-    stat_change_triggers_m0lyc_or_m1_cgb(old, data, lycperiod, lc, cc, m0_irq_time)
+    stat_change_triggers_m0lyc_or_m1_cgb(old, data, lycperiod, lc, cc, m0_irq_time, agb)
         || stat_change_triggers_m2_cgb(old, data, ly, time_to_next_ly, lc.ds)
 }
 

@@ -6812,7 +6812,15 @@ impl Ppu {
         // line. Reproduce that so enabling m0 during mode 2/3 sees a future m0.
         let m0_for_trigger = self.m0_irq_time_for_trigger(mmio, &lc, cc);
         let triggers = if cgb {
-            stat_irq::stat_change_triggers_cgb(old, data, &lc, cc, m0_for_trigger, lyc_reg)
+            stat_irq::stat_change_triggers_cgb(
+                old,
+                data,
+                &lc,
+                cc,
+                m0_for_trigger,
+                lyc_reg,
+                mmio.is_agb(),
+            )
         } else {
             stat_irq::stat_change_triggers_dmg(old, &lc, cc, m0_for_trigger, lyc_reg)
         };

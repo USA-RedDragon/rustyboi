@@ -166,7 +166,7 @@ threshold() {
         magentests)         echo "11 -" ;;
         little_things_extra) echo "4 -" ;;
         sketchtests)        echo "6 120" ;;
-        gbc_hw_tests)       echo "229 800" ;;  # real-silicon SRAM captures (CGB+DMG+AGB columns); 800 frames = slow mode2/echo tests settle
+        gbc_hw_tests)       echo "230 800" ;;  # real-silicon SRAM captures (CGB+DMG+AGB columns); 800 frames = slow mode2/echo tests settle
         gambatte)           echo "5248 -" ;;  # gated on failed<=9 (GAMBATTE_MAX_FAIL)
         *)                  echo "" ;;
     esac
