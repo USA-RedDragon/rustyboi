@@ -121,13 +121,36 @@ const EXPECTED: &[Model] = &[
     Model { hw: Hardware::CGB,  bios: "cgb_boot.bin",  logo: Logo::At(0x42), cgb_flag: 0x80, div_gap: 3, io_exceptions: &[] },
     Model { hw: Hardware::CGBE, bios: "cgbE_boot.bin", logo: Logo::At(0x42), cgb_flag: 0x80, div_gap: 3, io_exceptions: &[] },
     Model { hw: Hardware::AGB,  bios: "agb_boot.bin",  logo: Logo::At(0x42), cgb_flag: 0x80, div_gap: 3, io_exceptions: &[] },
-    // …and DMG-compat cart: the boot ROM's longer compat path, -1 cc residual.
-    Model { hw: Hardware::CGB,  bios: "cgb_boot.bin",  logo: Logo::At(0x42), cgb_flag: 0x00, div_gap: -1, io_exceptions: &[] },
-    Model { hw: Hardware::CGBE, bios: "cgbE_boot.bin", logo: Logo::At(0x42), cgb_flag: 0x00, div_gap: -1, io_exceptions: &[] },
-    Model { hw: Hardware::AGB,  bios: "agb_boot.bin",  logo: Logo::At(0x42), cgb_flag: 0x00, div_gap: -1, io_exceptions: &[] },
+    // …and DMG-compat cart: the boot ROM's longer compat path. Same +3 cc
+    // residual as the CGB-cart rows above — the whole CGB family now sits at one
+    // uniform offset on both cart paths.
+    //
+    // This row read -1 until the HLE learned that the compat hand-off is
+    // CART-CONTENT dependent. Every one of these four boot ROM images carries,
+    // verbatim, `21 4B 01 / 7E / FE 33 / 20 0B` — ld hl,$014B; ld a,(hl); cp $33;
+    // jr nz — at 0x0579 (0x0573 on CGB0, whose image is shifted but not changed
+    // here). The taken branch costs 12 cc against 8 not taken, and the two arms
+    // it selects reconverge 4 cc apart, so a cart with $014B != $33 hands off
+    // exactly 4 cc later. Executing each image confirms it: hand-off moves
+    // 0x2881->0x2885 (CGB0), 0x2675->0x2679 (CGB/CGBE), 0x2679->0x267D (AGB)
+    // when only $014B changes.
+    //
+    // `cartridge_for` leaves $014B at 0x00, so these rows ride the != $33 arm
+    // while the HLE constants are pinned by mooneye's boot_div carts, which all
+    // carry $014B == $33. The old -1 was therefore not a residual at all: it was
+    // a $33-calibrated constant measured against a non-$33 run, i.e. it recorded
+    // the 4 cc the HLE was short by. -1 + 4 = +3 restores the family-wide offset.
+    // `licensee_branch_costs_four_cc_on_every_cgb_boot_rom` below pins the +4 to
+    // the images themselves so this can never silently drift back.
+    Model { hw: Hardware::CGB,  bios: "cgb_boot.bin",  logo: Logo::At(0x42), cgb_flag: 0x00, div_gap: 3, io_exceptions: &[] },
+    Model { hw: Hardware::CGBE, bios: "cgbE_boot.bin", logo: Logo::At(0x42), cgb_flag: 0x00, div_gap: 3, io_exceptions: &[] },
+    Model { hw: Hardware::AGB,  bios: "agb_boot.bin",  logo: Logo::At(0x42), cgb_flag: 0x00, div_gap: 3, io_exceptions: &[] },
 
-    // CGB0, DMG-compat cart — the path mooneye's cgb0 rows measure: -1 cc.
-    Model { hw: Hardware::CGB0, bios: "cgb0_boot.bin", logo: Logo::At(0x42), cgb_flag: 0x00, div_gap: -1, io_exceptions: CGB0_QUIRKS },
+    // CGB0, DMG-compat cart — the path mooneye's cgb0 rows measure. CGB0's boot
+    // ROM is NOT the CGB-A..E image (602 bytes differ, and the compat block sits
+    // 6 bytes lower), so the $014B branch above was confirmed present in
+    // cgb0_boot.bin specifically rather than inherited.
+    Model { hw: Hardware::CGB0, bios: "cgb0_boot.bin", logo: Logo::At(0x42), cgb_flag: 0x00, div_gap: 3, io_exceptions: CGB0_QUIRKS },
     // CGB0, full-CGB cart: `skip_bios` documents this counter as unpinned (CGB0
     // only ever runs the mooneye boot rows, all DMG-flagged carts, so the
     // 0x7D8 compat delta cannot be assumed). The real boot ROM says 0x20A9 —
@@ -324,6 +347,72 @@ fn cgb_family_hle_matches_real_boot_rom() {
             check(hw, flag);
         }
     }
+}
+
+/// Pin the DMG-compat hand-off's cart-content dependence to the boot ROM images
+/// themselves. `gb.rs` models a cart with $014B != $33 as booting 4 cc longer;
+/// the HLE side of that is unit-tested there, but only the real images can say
+/// whether 4 is the right number, and whether CGB0 — which ships a genuinely
+/// different boot ROM — shares the behaviour at all. It does: all four images
+/// carry the same `cp $33 / jr nz` at the head of the compat palette setup.
+///
+/// Note the branch is really three-way, and only the first arm is modelled. An
+/// old-licensee of $01 (or $33 with a "01" new-licensee at $0144) means Nintendo
+/// and sends the boot ROM into the title-hash palette lookup, which costs ~4.6k
+/// cc more — running these images with $014B = $01 hands off at 0x398D rather
+/// than 0x2885 on CGB0. `skip_bios` flattens that to one constant, as it always
+/// has. That is a pre-existing modelling gap, not a regression, and closing it
+/// needs a silicon oracle; it is recorded here so it is not rediscovered as new.
+#[test]
+fn licensee_branch_costs_four_cc_on_every_cgb_boot_rom() {
+    let mut checked = 0;
+    for m in EXPECTED {
+        if m.cgb_flag != 0x00 || !matches!(m.hw, Hardware::CGB0 | Hardware::CGB | Hardware::CGBE | Hardware::AGB) {
+            continue;
+        }
+        let Some(bios) = bios_bytes(m.bios) else { continue };
+
+        // The image must literally contain `ld hl,$014B; ld a,(hl); cp $33; jr nz`.
+        const SEQ: &[u8] = &[0x21, 0x4B, 0x01, 0x7E, 0xFE, 0x33, 0x20];
+        assert!(
+            bios.windows(SEQ.len()).any(|w| w == SEQ),
+            "{}: no `ld hl,$014B / cp $33 / jr nz` in the image — the compat \
+             boot-duration model in gb.rs does not apply to this revision",
+            m.bios
+        );
+
+        let handoff = |licensee: u8| {
+            let mut rom = cartridge_for(m, &bios);
+            rom[0x14B] = licensee;
+            let mut sum = 0u8;
+            for b in &rom[0x134..0x14D] {
+                sum = sum.wrapping_sub(*b).wrapping_sub(1);
+            }
+            rom[0x14D] = sum;
+            let mut gb = GB::new(m.hw);
+            gb.insert(Cartridge::from_bytes(&rom).expect("build cartridge"));
+            gb.load_bios_bytes(&bios).expect("load bios");
+            gb.run_boot_rom();
+            assert_eq!(gb.read_memory(0xFF50), 0xFF, "{}: never handed off", m.bios);
+            gb.timer_internal_counter()
+        };
+
+        // $A4 stands in for "any non-Nintendo licensee": it must behave exactly
+        // like the $00 the other rows use, since only the $33/$01 arms branch.
+        let anchored = handoff(0x33);
+        for other in [0x00u8, 0xA4] {
+            assert_eq!(
+                handoff(other).wrapping_sub(anchored),
+                4,
+                "{} ({:?}): $014B = 0x{other:02X} must hand off exactly 4 cc after \
+                 the $33 anchor",
+                m.bios,
+                m.hw
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked == 0 || checked == 4, "expected all four CGB-family compat rows, saw {checked}");
 }
 
 /// Guard the skip-if-absent escape hatch: when `bios/` *is* populated the suite
