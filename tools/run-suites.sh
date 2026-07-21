@@ -167,7 +167,7 @@ threshold() {
         magentests)         echo "11 -" ;;
         little_things_extra) echo "4 -" ;;
         sketchtests)        echo "6 120" ;;
-        gbc_hw_tests)       echo "334 800" ;;  # real-silicon SRAM captures (CGB+DMG+AGB columns); the sram path runs a FLAT budget with no done-marker, so the handful of ROMs that need longer carry a per-test frames= token instead of inflating the whole suite
+        gbc_hw_tests)       echo "336 800" ;;  # real-silicon SRAM captures (CGB+DMG+AGB columns); the sram path runs a FLAT budget with no done-marker, so the handful of ROMs that need longer carry a per-test frames= token instead of inflating the whole suite
         gambatte)           echo "5248 -" ;;  # gated on failed<=9 (GAMBATTE_MAX_FAIL)
         *)                  echo "" ;;
     esac
