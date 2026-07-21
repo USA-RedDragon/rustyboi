@@ -10546,7 +10546,17 @@ impl Ppu {
         if in_vblank_window {
             let agb_last_line =
                 (mmio.is_agb() && ly == (stat_irq::LCD_LINES_PER_FRAME - 1) as i64) as i64;
-            if frame_cycles >= 144 * cpl - 2 && frame_cycles < cpf - 4 + dsi + agb_last_line {
+            // CGB-D/E enters mode 1 one cc earlier than CGB-C, so on D/E the
+            // mode-1 lower bound coincides with `in_vblank_window`'s own bound
+            // instead of sitting 1cc inside it. The two oracles bracket this cc
+            // from opposite sides and disagree: AntonioND's real-CGB capture
+            // (gbc-hw-tests `mode1`, graded at cgbe) reads mode 1 on the entry
+            // probe of the vbl_mode1_lcdoff stream, while gambatte's cgb04c
+            // references (`lcd_offset/*lyc8fint_m1stat*`) read mode 0 at the same
+            // cc. That is the same C-vs-D/E stepping split already modelled for
+            // the mode-1 END below (age stat-mode M1E), so scope it the same way.
+            let m1_entry = 144 * cpl - 2 - mmio.is_cgb_de() as i64;
+            if frame_cycles >= m1_entry && frame_cycles < cpf - 4 + dsi + agb_last_line {
                 return Some(1);
             }
             // CGB-D/E: no mode-0 M-cycle at the END of mode 1 (age stat-mode M1E)
