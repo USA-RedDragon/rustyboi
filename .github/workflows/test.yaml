@@ -200,6 +200,10 @@ jobs:
       BIOS_PASSWORD: ${{ secrets.BIOS_PASSWORD }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ALSA + udev headers (rustyboi-platform → cpal/rodio)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev
       - name: Cache cargo + build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -209,6 +213,16 @@ jobs:
             target
           key: unit-tests-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: unit-tests-
+      # A second family of skip-if-absent tests (the acid2/rtc3test checks in
+      # gb.rs) reads gb-test-roms, which is fetched rather than vendored. Same
+      # cache key as the suite cells so this shares their entry.
+      - name: Cache ROM set
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: gb-test-roms
+          key: roms-linux-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a-gbchw631e600
+      - name: Fetch ROMs
+        run: make setup
       # Unlike the gallery sweep, sgb1/sgb2.sfc are NOT optional here: they are
       # the only inputs to the SGB border tests, which skip silently without
       # them. RB_REQUIRE_SGB_FIRMWARE=1 below makes that skip fatal, so a dump
