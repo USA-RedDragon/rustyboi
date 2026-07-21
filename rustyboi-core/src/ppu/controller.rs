@@ -10506,7 +10506,16 @@ impl Ppu {
     /// un-carried read grid, so subtract the carry from the offset (target carry=1 ->
     /// off 2->1 -> gap-3 mode-3 read; carry=0 want-mode-0 siblings keep off=2). The
     /// carry is 0 except on a post-mode-3-switch line, so this is inert elsewhere.
-    fn stat_read_off(&self, ds: bool, late_rev: bool) -> i64 {
+    ///
+    /// `halt_woken` marks a read issued by a HALT-woken CGB-native stream (see
+    /// `halt_woken_m3_read`). Those reads resolve the boundary one M-CYCLE below
+    /// the mode-0 time instead of the free-running 3 dots: 4 master cc at BOTH
+    /// speeds, which is 4 dots at single speed and 2 dots at double. That is why
+    /// the term has opposite signs per speed (+1 / -2) while naming one constant.
+    /// Passed `false` at the three `get_stat_mode_at_cc` sites: that resolver
+    /// carries its OWN halt-exit read bias (the OAMSearch `access_cc + 5`/`+ 1`),
+    /// so taking this one there would charge the same re-phasing twice.
+    fn stat_read_off(&self, ds: bool, late_rev: bool, halt_woken: bool) -> i64 {
         let base = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
         // Double speed on CPU-CGB-D/E and AGB: the mode-3 -> mode-0 read boundary
         // sits 3 DOTS below the mode-0 time, the same 3 dots the single-speed
@@ -10518,11 +10527,41 @@ impl Ppu {
         // there moves the boundary past the `_1`/`_2` bracket of 136 DS m3stat
         // rows.
         let base = base + if ds && late_rev { 4 } else { 0 };
-        if self.lytime_no_plus1 {
+        let base = if self.lytime_no_plus1 {
             base - self.render_carry_skew_cc
         } else {
             base
+        };
+        // One M-cycle (4 master cc) below the mode-0 time for a HALT-woken read:
+        // 3 -> 4 at single speed, 6 -> 4 at double. Applied AFTER the carry so the
+        // post-DS->SS carry line keeps its own correction unchanged.
+        base + if halt_woken {
+            if ds { -2 } else { 1 }
+        } else {
+            0
         }
+    }
+
+    /// True for an FF41 mode-3 read issued by a HALT-woken CGB-native stream on
+    /// CPU-CGB-D/E or AGB silicon.
+    ///
+    /// The CGB-native halt exit re-phases the CPU clock to the waking IRQ edge
+    /// (`halt_grid_quantized`), so the woken stream's reads land on the CPU's
+    /// M-cycle grid rather than the free-running dot grid the polling-train
+    /// captures establish. Both wake models are marked (`halt_wake_grid_cgb` for
+    /// the quantized exit, `halt_wakeup_skew` for the legacy event-snapped one)
+    /// because these streams cross into double speed and switch models mid-run.
+    ///
+    /// CPU-CGB-C is excluded, the same C-vs-post-C split the DS boundary above
+    /// already takes: gambatte's explicitly-cgb04c HDMA/GDMA/OAM-DMA rows regress
+    /// under an ungated term (failed 9 -> 15, and 9 -> 11 / 9 -> 13 for the two
+    /// halves separately), while AntonioND's CGB-D/E and GBA-SP captures require
+    /// it on both columns.
+    #[inline]
+    fn halt_woken_m3_read(mmio: &mmio::Mmio) -> bool {
+        (mmio.halt_wake_grid_cgb() || mmio.halt_wakeup_skew())
+            && mmio.is_cgb_features_enabled()
+            && Self::late_rev(mmio)
     }
 
     /// The hardware STAT resolve, mode-3 <-> mode-0, at the CPU's access cc.
@@ -10536,7 +10575,16 @@ impl Ppu {
     /// (now hardware-exact) persisted boundary at single speed and adds correct
     /// sub-dot resolution at double speed, where the CPU samples FF41 at an odd
     /// master cc that the per-dot renderer would otherwise round.
-    pub(crate) fn get_stat_mode3to0_at_cc(&self, access_cc: u64, ds: bool, late_rev: bool) -> Option<u8> {
+    ///
+    /// `halt_woken` moves the boundary to one M-cycle below the mode-0 time for a
+    /// HALT-woken CGB-native stream; see `stat_read_off`.
+    pub(crate) fn get_stat_mode3to0_at_cc(
+        &self,
+        access_cc: u64,
+        ds: bool,
+        late_rev: bool,
+        halt_woken: bool,
+    ) -> Option<u8> {
         if self.disabled || self.internal_ly_val >= 144 {
             return None;
         }
@@ -10553,7 +10601,7 @@ impl Ppu {
         // speed (and only when not in a post-DS->SS-switch line, where `lytime_no_plus1`
         // already drops it) it sits 1cc high for the STAT-resolve read specifically, so the
         // read boundary uses `+3` instead of `+2`.
-        let read_off = self.stat_read_off(ds, late_rev);
+        let read_off = self.stat_read_off(ds, late_rev, halt_woken);
         if (access_cc as i64) + read_off < m0t {
             Some(3)
         } else {
@@ -10819,7 +10867,7 @@ impl Ppu {
             if self.state != State::OAMSearch
                 && let Some(m0t) = self.m0_time_master
             {
-                let read_off: i64 = self.stat_read_off(ds, Self::late_rev(mmio));
+                let read_off: i64 = self.stat_read_off(ds, Self::late_rev(mmio), false);
                 if (access_cc as i64) + read_off < m0t as i64 {
                     return Some(3);
                 }
@@ -10851,7 +10899,7 @@ impl Ppu {
                     if (access_cc + 1) < self.display_enable_inactive_until {
                         return Some(0);
                     }
-                    let read_off: i64 = self.stat_read_off(ds, Self::late_rev(mmio));
+                    let read_off: i64 = self.stat_read_off(ds, Self::late_rev(mmio), false);
                     if (access_cc as i64) + read_off < m0t as i64 {
                         return Some(3);
                     }
@@ -10908,7 +10956,7 @@ impl Ppu {
             // enable; on steady lines it ended long ago. Gate the line-start-local
             // inactive suppression to the first line (using the global field there
             // would end the window one render dot late — see the comment above).
-            let read_off: i64 = self.stat_read_off(ds, Self::late_rev(mmio));
+            let read_off: i64 = self.stat_read_off(ds, Self::late_rev(mmio), false);
             if self.first_line_after_enable {
                 // `line_start` here (the raw the LY counter-derived line origin) sits one
                 // master-cc ABOVE the hardware enable cc anchor (it resets the LY counter to
@@ -10996,7 +11044,7 @@ impl Ppu {
         // the FF44 read path carries (see `uncharged_halt_exit`). FF41 and FF44 are
         // read by the SAME resumed instruction stream, so they share its phase.
         let access_cc = access_cc + Self::uncharged_halt_exit(mmio) as u64;
-        self.get_stat_mode3to0_at_cc(access_cc, ds, Self::late_rev(mmio))
+        self.get_stat_mode3to0_at_cc(access_cc, ds, Self::late_rev(mmio), Self::halt_woken_m3_read(mmio))
             .or_else(|| self.get_stat_mode_at_cc(mmio, access_cc))
     }
 
