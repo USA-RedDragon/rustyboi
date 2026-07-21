@@ -146,8 +146,14 @@ jobs:
           ./sweep run --roms "$LIB/GB" "$LIB/GBC" --out shard-out --bios-dir bios \
             --shard ${{ matrix.shard }}/${{ strategy.job-total }} $SWEEP_MEDIA_ARGS $bios_flag
           mv shard-out/manifest.jsonl shard-out/manifest-${{ matrix.shard }}.jsonl
+          # Both maps key per-ROM state that only THIS shard saw, so they must
+          # be renamed out of the way before upload-artifact's merge-multiple
+          # lets one shard's copy clobber the rest. (The assets they point at
+          # are content-hashed, so those merge safely on their own.)
           [ ! -f shard-out/audio/map.json ] || \
             mv shard-out/audio/map.json shard-out/audio/map-${{ matrix.shard }}.json
+          [ ! -f shard-out/screens/borders/map.json ] || \
+            mv shard-out/screens/borders/map.json shard-out/screens/borders/map-${{ matrix.shard }}.json
       - name: Upload shard
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -183,7 +189,7 @@ jobs:
           pattern: shard-*
           merge-multiple: true
           path: gathered
-      - name: Merge manifests + audio maps
+      - name: Merge manifests + audio/border maps
         shell: bash
         run: |
           chmod +x sweep
@@ -191,6 +197,29 @@ jobs:
           echo "merged $(ls gathered/manifest-*.jsonl | wc -l) shard manifests -> $(wc -l < gathered/merged.jsonl) rows"
           jq -s add gathered/audio/map-*.json > gathered/audio/map.json
           echo "audio: $(ls gathered/audio/*.rba | wc -l) unique streams, $(jq length gathered/audio/map.json) clip mappings"
+          # An unmerged border map silently costs the SGB tab its borders: the
+          # webp files are all still there, just unreferenced. Every ROM is
+          # swept by exactly one shard, so the per-shard maps have disjoint
+          # keys and the merge must preserve every entry -- any shortfall means
+          # a shard map was lost or clobbered.
+          if compgen -G 'gathered/screens/borders/map-*.json' > /dev/null; then
+            jq -s add gathered/screens/borders/map-*.json > gathered/screens/borders/map.json
+            mapped=$(jq length gathered/screens/borders/map.json)
+            want=$(jq -s 'map(length) | add' gathered/screens/borders/map-*.json)
+            bshards=$(ls gathered/screens/borders/map-*.json | wc -l)
+            mshards=$(ls gathered/manifest-*.jsonl | wc -l)
+            echo "borders: $(ls gathered/screens/borders/*.webp 2>/dev/null | wc -l) unique images, $mapped ROM mappings from $bshards/$mshards shards"
+            # Disjoint keys, so the merge must preserve every entry.
+            [ "$mapped" = "$want" ] || { echo "::error::border map merged to $mapped entries but the shards hold $want; keys collided"; exit 1; }
+            # A shard whose map never arrived cannot be seen in the merge
+            # arithmetic above -- it is only visible as a missing FILE. Not
+            # fatal (a shard with no SGB cart legitimately emits none), but it
+            # is how the SGB tab loses borders, so say so.
+            [ "$bshards" = "$mshards" ] || \
+              echo "::warning::only $bshards of $mshards shards produced a border map; SGB cards from the rest will have no border"
+          else
+            echo "::warning::no per-shard border maps found; SGB cards will have no borders"
+          fi
       - name: Compare against baseline (GATE)
         id: compare
         shell: bash
