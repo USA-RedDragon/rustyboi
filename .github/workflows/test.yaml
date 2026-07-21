@@ -147,7 +147,7 @@ jobs:
         shell: bash
         run: |
           # renovate: datasource=github-releases depName=bytecodealliance/wasmtime
-          WASMTIME_VERSION=v47.0.1
+          WASMTIME_VERSION=v47.0.2
           curl -fsSL -o wasmtime.tar.xz \
             "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz"
           mkdir -p "$HOME/wasmtime" && tar xf wasmtime.tar.xz -C "$HOME/wasmtime" --strip-components=1
