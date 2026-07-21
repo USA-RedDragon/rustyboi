@@ -1018,7 +1018,24 @@ impl<'a> Bus<'a> {
             // cc later than the snapshot was taken, so a bit raised in
             // `(if_pre_cc, if_pre_cc + residue]` IS visible to it. Zero-width
             // (the residue is 0) on every stream but a VBLANK-woken CGB-native one.
-            if if_pre_residue != 0 {
+            // The VBlank IF bit additionally latches 1cc INTO the read's M-cycle: a
+            // VBlank rise at `if_pre_cc + 1` is visible to this read even though the
+            // pre-tick snapshot missed it. VBlank reaches the IF latch straight off
+            // the LY=144 edge, while the STAT/Timer/Serial sources arrive through
+            // their own mode/LYC/enable mux, so this extra cc is VBlank-ONLY --
+            // widening it to the other three sources breaks the STAT-bit streams
+            // (gbmicrotest `hblank_int_scx*_if_b`, mooneye_wilbertpol
+            // `hblank_ly_scx_timing_variant_nops`, gambatte `m2int_m0irq` /
+            // `lyc99int_m2irq_count`), which all read their bit one cc too early.
+            //
+            // Bracketed from BOTH sides at exactly 1: gbc-hw-tests
+            // `mode1_disablestat_gbc_mode` / `mode1_disablevbl_gbc_mode` read the
+            // double-speed VBlank probe whose rise lands at +1 and MUST see it
+            // (floor), while gambatte's cgb04c `enable_display` / `m2int_m0irq`
+            // streams fail at 2 (ceiling). Not in Pan Docs; from test-ROM refs.
+            const VBL_LATCH_WIN_CC: u64 = 1;
+            let vbl_win = VBL_LATCH_WIN_CC;
+            if if_pre_residue != 0 || vbl_win != 0 {
                 use crate::cpu::registers::InterruptFlag;
                 for flag in [
                     InterruptFlag::VBlank,
@@ -1030,8 +1047,16 @@ impl<'a> Bus<'a> {
                     if if_pre_mask & bit == 0 {
                         continue;
                     }
+                    let win = if matches!(flag, InterruptFlag::VBlank) {
+                        if_pre_residue.max(vbl_win)
+                    } else {
+                        if_pre_residue
+                    };
+                    if win == 0 {
+                        continue;
+                    }
                     let rise = self.mmio.if_raise_cc_of(flag);
-                    if rise > if_pre_cc && rise <= if_pre_cc + if_pre_residue {
+                    if rise > if_pre_cc && rise <= if_pre_cc + win {
                         pre |= bit;
                     }
                 }
