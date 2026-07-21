@@ -252,7 +252,39 @@ def gen_blargg(roms: Path, out: Path) -> None:
         label = sub.split("/")[0]
         for rom in sorted((bl / sub).glob("*.gb")):
             singles.append(f"{label}/{rom.stem}|{mode}|{grading}|{rom}")
-    write_manifest(out, "blargg_singles", ["blargg per-subtest singles. Run: --frames 2000"], singles)
+
+    # cgb_sound re-run against real AGB silicon (CGB-compatibility mode). Real
+    # AGB fails 09 and 12 because of its documented wave-RAM lockout, and the
+    # `blargg_mem` oracle has no "expected failure" form to express a specific
+    # failure code -> those two are excluded rather than asserted (see header).
+    AGB_EXPECTED_FAIL = {"09-wave read while on", "12-wave"}
+    for rom in sorted((bl / "cgb_sound/rom_singles").glob("*.gb")):
+        if rom.stem in AGB_EXPECTED_FAIL:
+            continue
+        singles.append(f"cgb_sound-agb/{rom.stem}|cgb|blargg_mem|{rom}|rev=agb")
+
+    write_manifest(
+        out,
+        "blargg_singles",
+        [
+            "blargg per-subtest singles. Run: --frames 2000",
+            "",
+            "The `cgb_sound-agb/*` rows below pin blargg cgb_sound against real Game Boy",
+            "Advance silicon (CGB-compatibility mode). Two independently published runs on",
+            "real AGB hardware agree exactly on the outcome -- the gbdev.gg8.se wiki \"Test",
+            "ROMs\" page and the Emulation General Wiki both report that a real AGB passes",
+            "subtests 01-08, 10 and 11, and fails 09 (\"wave read while on\", code 09:01) and",
+            "12 (\"wave\", code 12:02).",
+            "",
+            "09 and 12 are DELIBERATELY EXCLUDED rather than missing: real AGB fails them",
+            "because of its documented wave-RAM lockout, so the correct expectation for",
+            "those two is a specific failure code, and the `blargg_mem` oracle has no",
+            "\"expected failure\" form to express that. rustyboi reproduces both failures",
+            "with the hardware-matching codes; adding them as ordinary rows would assert",
+            "the opposite of the hardware result.",
+        ],
+        singles,
+    )
 
 
 def gen_gbmicrotest(roms: Path, out: Path) -> None:
@@ -777,6 +809,15 @@ def gen_scribbltests(roms: Path, out: Path) -> None:
         ln.replace("scribbltests/scxly|cgb|png|", "scribbltests/scxly|cgb|png_layout|")
         for ln in lines
     ]
+    # statcount-auto self-advances through its subtests and leaves the LCD off
+    # on the result screen, so it needs the flat-budget grading (png_fixed) plus
+    # a budget that reaches the final screen -- ~270 frames.
+    lines = [
+        ln.replace("|png|", "|png_fixed|") + "|frames=270"
+        if ln.startswith("scribbltests/statcount-auto|")
+        else ln
+        for ln in lines
+    ]
     write_manifest(out, "scribbltests", ["scribbltests (PPU screenshots). statcount_auto needs ~270 frames."], lines)
 
 
@@ -800,9 +841,12 @@ def gen_little_things(roms: Path, out: Path) -> None:
     ltg = roms / "little-things-gb"
     lines = []
     if ltg.is_dir():
+        # firstwhite: the ROM settles into an enable-for-one-frame / disable /
+        # delay flash loop, so the grab point has to land inside that steady
+        # state (the initial continuous-LCD-on content period ends ~frame 26).
         for ref in sorted(ltg.glob("firstwhite-*.png")):
-            lines.append(f"little-things-gb/firstwhite|dmg|png_fixed|{ltg}/firstwhite.gb|{ref}")
-            lines.append(f"little-things-gb/firstwhite|cgb|png_fixed|{ltg}/firstwhite.gb|{ref}")
+            lines.append(f"little-things-gb/firstwhite|dmg|png_fixed|{ltg}/firstwhite.gb|{ref}|frames=60")
+            lines.append(f"little-things-gb/firstwhite|cgb|png_fixed|{ltg}/firstwhite.gb|{ref}|frames=60")
         if (ltg / "tellinglys.gb").is_file():
             for dev in ("cgb", "dmg"):
                 ref = ltg / f"tellinglys-{dev}.png"
@@ -817,8 +861,11 @@ def gen_little_things(roms: Path, out: Path) -> None:
             "little-things-gb PPU screenshots. tellinglys uses scripted button input",
             "(input= token): its joypad-IRQ entropy check needs all 8 keys pressed at",
             "distinct LY positions (>=5 bits of LY spread), hence the @<ly> targets.",
-            "firstwhite is input-less; it fails on the first-frame-after-LCD-enable",
-            "display blanking (hardware shows white; PPU presentation gap, see notes).",
+            "firstwhite is input-less; it exercises the first-frame-after-LCD-enable display",
+            "blanking (hardware shows white). The ROM settles into an enable-for-one-frame /",
+            "disable / delay flash loop; frames=60 lands the held-frame grab well inside that",
+            "steady state (the initial continuous-LCD-on content period ends ~frame 26), where",
+            "every enabled frame is a first-frame-after-enable and the panel stays blank.",
         ],
         lines,
     )
