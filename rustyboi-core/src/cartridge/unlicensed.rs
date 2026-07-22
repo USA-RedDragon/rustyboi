@@ -183,6 +183,16 @@ impl Cartridge {
             return UnlMapper::Bbd(BbdState::default());
         }
 
+        // GGB81 (Vast Fame family): keyed on the CRC32 of the 48-byte $0184
+        // secondary logo (mGBA `_detectUnlMBC`). Unlike LiCheng these carts
+        // wear a truthful MBC5-family header ($19/$1B), so there is no
+        // header/size guard -- the 48-byte CRC32 window is the whole gate and
+        // cannot match a licensed cart. mGBA applies no $7FFF "fixed dump"
+        // guard here either.
+        if GGB81_LOGO_CRC32.contains(&logo_crc32) {
+            return UnlMapper::Ggb81(0);
+        }
+
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
         // banked-size file) the publisher string in the ROM. The
         // string+type+size gate already implies the blank-header shape in
@@ -397,6 +407,24 @@ impl Cartridge {
             }
         }
     }
+    /// GGB81 $2000-$3FFF register write (mGBA `_GBGGB81`). A write with
+    /// `addr & 0xF0FF == 0x2001` also latches the 3-bit data-swap mode (carried
+    /// in the `UnlMapper::Ggb81` payload); the raw value still lands in the MBC5
+    /// low/high bank register, exactly as `_GBMBC5` would (mGBA falls through).
+    pub(super) fn ggb81_write(&mut self, addr: u16, value: u8) {
+        if let UnlMapper::Ggb81(ref mut mode) = self.unl_mapper
+            && (addr & 0xF0FF) == 0x2001
+        {
+            *mode = value & 0x07;
+        }
+        if let Mapper::Ggb81(m) = &mut self.mapper {
+            if addr <= 0x2FFF {
+                m.regs.rom_bank_low = value;
+            } else {
+                m.regs.rom_bank_high = value & 0x01;
+            }
+        }
+    }
 }
 
 // --- board struct + banking ---------------------------------------------
@@ -553,6 +581,29 @@ pub(super) struct Bbd {
 }
 
 impl Banking for Bbd {
+    fn rom_bankn(&self, g: Geom) -> usize {
+        let bank =
+            (self.regs.rom_bank_low as usize) | ((self.regs.rom_bank_high as usize & 0x01) << 8);
+        bank % g.rom_banks
+    }
+    fn rom_bank0(&self, _g: Geom) -> usize {
+        0
+    }
+    fn ram_bank(&self, g: Geom) -> usize {
+        (self.regs.ram_bank & 0x0F) as usize % g.ram_banks.max(1)
+    }
+}
+
+/// GGB81: electrically MBC5+RAM. The data-swap mode ($2001) and the
+/// $4000-$7FFF read reorder are applied around this board; the bank math is
+/// plain MBC5.
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct Ggb81 {
+    pub ram_enabled: bool,
+    pub regs: Mbc5State,
+}
+
+impl Banking for Ggb81 {
     fn rom_bankn(&self, g: Geom) -> usize {
         let bank =
             (self.regs.rom_bank_low as usize) | ((self.regs.rom_bank_high as usize & 0x01) << 8);

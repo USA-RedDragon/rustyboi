@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     camera::Camera, huc1::HuC1, huc3::HuC3, mbc1::Mbc1, mbc2::Mbc2, mbc3::Mbc3, mbc5::Mbc5,
     mbc7::Mbc7, nombc::NoMbc,
-    unlicensed::{Bbd, LiCheng, M161, NtOld, Rocket, Sachen, Vf001, WisdomTree},
+    unlicensed::{Bbd, Ggb81, LiCheng, M161, NtOld, Rocket, Sachen, Vf001, WisdomTree},
 };
 
 /// ROM/RAM geometry the bank math needs, passed by value (Copy).
@@ -128,6 +128,7 @@ pub(super) enum Mapper {
     Vf001(Vf001),
     LiCheng(LiCheng),
     Bbd(Bbd),
+    Ggb81(Ggb81),
 }
 
 impl Banking for Mapper {
@@ -198,6 +199,12 @@ impl Mapper {
             UnlMapper::Bbd(_) => {
                 return Mapper::Bbd(Bbd { ram_enabled: false, regs: Mbc5State::default() })
             }
+            // GGB81 wears a truthful MBC5-family header, but override to its own
+            // board so the read reorder / $2001 mode write have somewhere to
+            // hang; the bank registers are plain MBC5.
+            UnlMapper::Ggb81(_) => {
+                return Mapper::Ggb81(Ggb81 { ram_enabled: false, regs: Mbc5State::default() })
+            }
         }
         let mbc3 = |has_ram, timer| {
             Mapper::Mbc3(Mbc3 { ram_enabled: false, rom_bank_low: 1, ram_bank: 0, has_ram, timer })
@@ -263,6 +270,7 @@ impl Mapper {
             Mapper::Vf001(m) => f(m),
             Mapper::LiCheng(m) => f(m),
             Mapper::Bbd(m) => f(m),
+            Mapper::Ggb81(m) => f(m),
         }
     }
 }

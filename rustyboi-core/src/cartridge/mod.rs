@@ -105,6 +105,28 @@ const BBD_BANK_REORDERING: [[u8; 8]; 8] = [
     [0, 1, 2, 3, 4, 5, 6, 7], // 07 - unknown
 ];
 
+/// CRC32 (reflected IEEE) of the 48-byte secondary logo at $0184 on GGB81
+/// boards (Vast Fame family; the "DATA." and "TD-SOFT" runs). mGBA's
+/// `_detectUnlMBC` keys on exactly these values.
+const GGB81_LOGO_CRC32: [u32; 2] = [0x79F3_4594, 0x7E8C_539B];
+
+/// GGB81 data-line bit-reorder tables (mGBA `_ggb81DataReordering[8][8]`). The
+/// board is electrically MBC5; a write with `addr & 0xF0FF == 0x2001` latches a
+/// 3-bit swap mode, and every read from the $4000-$7FFF bank window returns the
+/// ROM byte with its data lines permuted through `table[mode]` (output bit i =
+/// input bit table[i]). Mode 0 is the identity, so reads are unscrambled until
+/// the boot code selects a mode.
+const GGB81_DATA_REORDERING: [[u8; 8]; 8] = [
+    [0, 1, 2, 3, 4, 5, 6, 7],
+    [0, 2, 1, 3, 4, 6, 5, 7],
+    [0, 6, 5, 3, 4, 2, 1, 7],
+    [0, 5, 1, 3, 4, 2, 6, 7],
+    [0, 5, 2, 3, 4, 1, 6, 7],
+    [0, 2, 6, 3, 4, 5, 1, 7],
+    [0, 1, 6, 3, 4, 2, 5, 7],
+    [0, 2, 5, 3, 4, 6, 1, 7],
+];
+
 // Lock-phase values shared by the Sachen and Rocket boot state machines
 // (the board powers up locked and unlocks in DMG -> CGB -> unlocked phases).
 const UNL_LOCKED_DMG: u8 = 0;
@@ -193,6 +215,15 @@ pub enum UnlMapper {
     /// `BBD_DATA_REORDERING`. Detected from the $0184 secondary-logo CRC32
     /// (gated on $7FFF != $01, which marks a cracked dump that runs plain).
     Bbd(BbdState),
+    /// GGB81 (Vast Fame family): electrically a plain MBC5 with a truthful
+    /// MBC5-family header, plus data-line scrambling. A write with
+    /// `addr & 0xF0FF == 0x2001` latches the 3-bit swap mode carried here;
+    /// reads from the $4000-$7FFF bank window return the ROM byte permuted
+    /// through `GGB81_DATA_REORDERING[mode]` (mGBA `_GBGGB81`). Detected from
+    /// the $0184 secondary-logo CRC32. The mode is volatile logic normalized
+    /// to 0 on power-on; it lives in the payload (not a `Cartridge` field) so
+    /// every other cart's bincode savestate layout stays byte-identical.
+    Ggb81(u8),
 }
 
 /// Bit-scramble mode state for `UnlMapper::Bbd`. Carried inside the enum
@@ -694,6 +725,9 @@ impl Cartridge {
             // BBD's swap-mode registers are volatile logic; power up at the
             // identity permutation so reset() matches a fresh load.
             UnlMapper::Bbd(_) => UnlMapper::Bbd(BbdState::default()),
+            // GGB81's data-swap mode is volatile; power up with the identity
+            // mode selected, exactly like a fresh load.
+            UnlMapper::Ggb81(_) => UnlMapper::Ggb81(0),
             other => other,
         };
         Cartridge {
@@ -881,6 +915,10 @@ impl Cartridge {
             UnlMapper::Bbd(_) => {
                 return CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
             }
+            // GGB81 wears a truthful MBC5-family header ($19 = MBC5, $1B =
+            // MBC5+RAM+BATTERY); only the $2001 mode write and the reorder on
+            // bank-window reads differ, so fall through to the header type.
+            UnlMapper::Ggb81(_) => {}
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -937,6 +975,7 @@ impl Cartridge {
             Mapper::Vf001(m) => m.ram_enabled,
             Mapper::LiCheng(m) => m.ram_enabled,
             Mapper::Bbd(m) => m.ram_enabled,
+            Mapper::Ggb81(m) => m.ram_enabled,
             _ => false,
         }
     }
@@ -1708,6 +1747,9 @@ impl memory::Addressable for Cartridge {
                     UnlMapper::Bbd(st) => {
                         Self::reorder_bits(byte, &BBD_DATA_REORDERING[st.data_swap_mode as usize])
                     }
+                    UnlMapper::Ggb81(mode) => {
+                        Self::reorder_bits(byte, &GGB81_DATA_REORDERING[usize::from(mode)])
+                    }
                     _ => byte,
                 }
             }
@@ -1800,6 +1842,16 @@ impl memory::Addressable for Cartridge {
                     // BBD is electrically MBC5+RAM; RAM reads are plain (only
                     // the ROM read path is descrambled).
                     Mapper::Bbd(m) => {
+                        if m.ram_enabled
+                            && let Some(offset) = self.banked_ram_offset(addr)
+                        {
+                            self.ram_data[offset]
+                        } else {
+                            0xFF
+                        }
+                    }
+                    // GGB81 is electrically MBC5+RAM; RAM reads are plain.
+                    Mapper::Ggb81(m) => {
                         if m.ram_enabled
                             && let Some(offset) = self.banked_ram_offset(addr)
                         {
@@ -1979,6 +2031,7 @@ impl memory::Addressable for Cartridge {
                 Mapper::Vf001(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 Mapper::LiCheng(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 Mapper::Bbd(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
+                Mapper::Ggb81(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 // MBC7 stage-1 unlock (stage 2 is 0x40 to 0x4000-0x5FFF).
                 Mapper::Mbc7(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 // HuC1 IR select: $0E maps the IR transceiver, else RAM (no disable).
@@ -2010,6 +2063,14 @@ impl memory::Addressable for Cartridge {
                 if matches!(self.unl_mapper, UnlMapper::Bbd(_)) =>
             {
                 self.bbd_write(addr, value);
+            }
+            // GGB81 (Vast Fame): a write with addr & 0xF0FF == 0x2001 latches
+            // the 3-bit data-swap mode, then the raw value latches into the
+            // MBC5 low/high bank register (mGBA `_GBGGB81`).
+            ROM_BANK_SELECT_START..=ROM_BANK_SELECT_END
+                if matches!(self.unl_mapper, UnlMapper::Ggb81(_)) =>
+            {
+                self.ggb81_write(addr, value);
             }
             // ROM Bank Number (0x2000-0x3FFF)
             ROM_BANK_SELECT_START..=ROM_BANK_SELECT_END => match &mut self.mapper {
@@ -2074,6 +2135,7 @@ impl memory::Addressable for Cartridge {
                     Mapper::Vf001(m) => m.regs.ram_bank = value,
                     Mapper::LiCheng(m) => m.regs.ram_bank = value,
                     Mapper::Bbd(m) => m.regs.ram_bank = value,
+                    Mapper::Ggb81(m) => m.regs.ram_bank = value,
                     // MBC7 stage-2 unlock: exactly 0x40 enables.
                     Mapper::Mbc7(m) => m.state.ram_enabled2 = value == 0x40,
                     Mapper::HuC1(m) => m.state.ram_bank = value,
@@ -2175,6 +2237,7 @@ impl memory::Addressable for Cartridge {
                     Mapper::Vf001(m) => Ext::Banked(m.ram_enabled),
                     Mapper::LiCheng(m) => Ext::Banked(m.ram_enabled),
                     Mapper::Bbd(m) => Ext::Banked(m.ram_enabled),
+                    Mapper::Ggb81(m) => Ext::Banked(m.ram_enabled),
                     Mapper::Mbc7(m) => Ext::Mbc7(m.ram_enabled && m.state.ram_enabled2),
                     Mapper::HuC1(m) => Ext::HuC1(m.state.ir_mode),
                     Mapper::Camera(m) => {
@@ -2501,6 +2564,69 @@ mod tests {
         let mut cracked = rom.clone();
         cracked[0x7FFF] = 0x01;
         assert_eq!(Cartridge::detect_unl_mapper(&cracked), UnlMapper::None);
+    }
+
+    // Clean-room 48-byte stand-in for the GGB81 secondary logo at $0184: a
+    // plain ASCII banner (44 bytes) plus a 4-byte suffix computed so the
+    // block's CRC32 equals GGB81_LOGO_CRC32[0] (0x79F3_4594, the mGBA "DATA."
+    // run). No copyrighted logo bytes; the same block is embedded in the
+    // ggb81_banking test ROM.
+    const GGB81_LOGO: [u8; 48] =
+        *b"RUSTYBOI GGB81 DATA CLEANROOM STANDIN SIGGB!\xBC\x5B\x9C\x21";
+
+    /// 512KB image carrying the GGB81 signature: a truthful MBC5+RAM+BATTERY
+    /// header ($1B), the $0184 logo whose CRC32 keys detection, and distinctive
+    /// bytes at bank 0 and bank 1 offset 0 so the read-path data-line reorder
+    /// is observable.
+    fn make_ggb81_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x80000]; // 32 banks
+        rom[CARTRIDGE_TYPE_OFFSET] = MBC5_RAM_BATTERY; // truthful $1B header
+        rom[ROM_SIZE_OFFSET] = 0x04; // 512KB
+        rom[RAM_SIZE_OFFSET] = 0x02; // 8KB
+        rom[0x184..0x1B4].copy_from_slice(&GGB81_LOGO);
+        rom[0x2500] = 0x0F; // bank 0 marker (reads here are never reordered)
+        rom[0x4000] = 0x0F; // bank 1 offset 0 (reordered on read)
+        rom
+    }
+
+    #[test]
+    fn ggb81_detects_and_reorders_data_lines() {
+        let rom = make_ggb81_rom();
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::Ggb81(0));
+
+        // Truthful MBC5+RAM+BATTERY header: decode falls through to it.
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(
+            cart.get_cartridge_type(),
+            CartridgeType::MBC5 { ram: true, battery: true, .. }
+        ));
+
+        // Select bank 1; default swap mode 0 is the identity, so the read of
+        // bank 1 offset 0 is unscrambled.
+        cart.write(0x2000, 0x01);
+        assert_eq!(cart.read(0x4000), 0x0F);
+
+        // A write with addr & 0xF0FF == 0x2001 latches mode = value & 7 (and,
+        // being an MBC5 low-bank write, also sets the bank to that value); the
+        // boot code re-selects the real bank via $2000 without disturbing the
+        // mode. Mode 2 reorders 0x0F -> 0x69.
+        cart.write(0x2001, 0x02); // mode 2 (also selects bank 2)
+        cart.write(0x2000, 0x01); // reselect bank 1; mode stays 2
+        assert_eq!(cart.read(0x4000), 0x69);
+
+        // Bank 0 reads ($0000-$3FFF) are never reordered, even with a mode set.
+        assert_eq!(cart.read(0x2500), 0x0F);
+
+        // Returning to mode 0 restores the identity read.
+        cart.write(0x2001, 0x00); // mode 0 (also selects bank 0)
+        cart.write(0x2000, 0x01); // reselect bank 1
+        assert_eq!(cart.read(0x4000), 0x0F);
+
+        // A one-byte perturbation of the $0184 block changes its CRC32 -> the
+        // rule no longer matches (detection is a 48-byte CRC32, not a sum).
+        let mut perturbed = rom.clone();
+        perturbed[0x184] ^= 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&perturbed), UnlMapper::None);
     }
 
     /// Write the correct boot-ROM header checksum into $014D.
