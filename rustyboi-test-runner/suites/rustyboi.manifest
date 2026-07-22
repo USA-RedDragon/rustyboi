@@ -32,6 +32,7 @@ cartridge-licheng_banking-cgb|cgb|mooneye|test-roms/build/cartridge/licheng_bank
 cartridge-pocketmon_mbc5_banking-dmg|dmg|mooneye|test-roms/build/cartridge/pocketmon_mbc5_banking.dmg.mooneye.gb
 cartridge-sintax_scramble-cgb|cgb|mooneye|test-roms/build/cartridge/sintax_scramble.cgb.mooneye.gbc
 cartridge-tama5_banking-dmg|dmg|mooneye|test-roms/build/cartridge/tama5_banking.dmg.mooneye.gb
+cartridge-undocumented_type_banking-dmg|dmg|mooneye|test-roms/build/cartridge/undocumented_type_banking.dmg.mooneye.gb
 cartridge-vf001_protection-cgb|cgb|mooneye|test-roms/build/cartridge/vf001_protection.cgb.mooneye.gbc
 cartridge-vf001gen_protection-cgb|cgb|mooneye|test-roms/build/cartridge/vf001gen_protection.cgb.mooneye.gbc
 dma-hdma_ff55_cancel_after_block-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_cancel_after_block.cgb.mooneye.gbc
