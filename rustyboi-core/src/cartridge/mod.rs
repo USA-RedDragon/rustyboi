@@ -1199,6 +1199,14 @@ impl Cartridge {
             }
             ROM_RAM => CartridgeType::NoMBC { battery: false },
             ROM_RAM_BATTERY => CartridgeType::NoMBC { battery: true },
+            // A type byte outside the Pan Docs table names no board, so it is
+            // not a claim of "bankless" - the field just holds garbage (title
+            // overrun, unfinalized header). On a >32KB ROM the same physical
+            // argument as above applies, so infer MBC1 rather than leave the
+            // upper banks unreachable behind a bankless board.
+            t if self.rom_banks > 2 && !is_documented_type(t) => {
+                CartridgeType::MBC1 { ram: self.ram_banks > 0, battery: false }
+            }
             _ => CartridgeType::NoMBC { battery: false },
         }
     }
@@ -3217,6 +3225,42 @@ mod tests {
         let cart = Cartridge::from_bytes(&make_rom(0x00, 0x00)).unwrap();
         assert_eq!(cart.mapper_name(), "ROM ONLY");
         assert!(matches!(cart.get_cartridge_type(), CartridgeType::NoMBC { .. }));
+    }
+
+    #[test]
+    fn oversized_undocumented_type_infers_mbc1() {
+        // Mofa Qiu - Magic Ball: 64KB, $0147 = $30, because its 23-character
+        // title overran the 16-byte title field ($30 is the '0' of "930920").
+        // $30 names no board, so it is not a bankless claim -- and >32KB rules
+        // bankless out physically -- so the decode infers MBC1.
+        let mut rom = make_sized_rom(0x30, 0x00, 0x10000); // type $30, 64KB
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert_eq!(cart.mapper_name(), "MBC1");
+        assert_eq!(cart.read(0x1000), 0);
+        assert_eq!(cart.read(0x5000), 1);
+        cart.write(0x2000, 0x03);
+        assert_eq!(cart.read(0x5000), 3);
+
+        // A 32KB ROM with the same garbage byte stays bankless: the physical
+        // argument that forces the inference does not apply there.
+        let cart = Cartridge::from_bytes(&make_rom(0x30, 0x00)).unwrap();
+        assert!(matches!(cart.get_cartridge_type(), CartridgeType::NoMBC { .. }));
+
+        // Documented-but-unimplemented types are NOT inferred, however large:
+        // the byte names a real board (MMM01/MBC6/TAMA5), so it is evidence
+        // about the cart rather than evidence the header is garbage.
+        for ty in [0x0B, 0x20, 0xFD] {
+            let mut rom = make_sized_rom(ty, 0x00, 0x10000);
+            rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+            let cart = Cartridge::from_bytes(&rom).unwrap();
+            assert!(
+                matches!(cart.get_cartridge_type(), CartridgeType::NoMBC { .. }),
+                "type {ty:#04x} must not be inferred"
+            );
+        }
     }
 
     #[test]

@@ -97,6 +97,24 @@ pub(super) const POCKET_CAMERA: u8 = 0xFC;
 // RAM+BATTERY+RTC. See `tama5.rs` for the protocol.
 pub(super) const TAMA5: u8 = 0xFD;
 
+/// Whether `$0147` holds a value the Pan Docs cartridge-type table defines,
+/// implemented or not (MMM01 $0B-$0D, MBC6 $20 and TAMA5 $FD are listed here
+/// even though rustyboi has no board for them — the byte still names a real
+/// board, so it is not evidence of a garbage header).
+///
+/// Anything outside this set is not a cartridge type at all: the header was
+/// never finalized, or game data/title text overran the field (the usual case
+/// on Taiwanese/HK unlicensed carts). Used to decide whether a >32KB ROM whose
+/// type byte cannot be honoured should be given an inferred mapper rather than
+/// a bankless board that leaves most of the chip unreachable.
+pub(super) fn is_documented_type(cartridge_type: u8) -> bool {
+    matches!(cartridge_type,
+        0x00 | 0x01 | 0x02 | 0x03 | 0x05 | 0x06 | 0x08 | 0x09
+        | 0x0B | 0x0C | 0x0D | 0x0F | 0x10 | 0x11 | 0x12 | 0x13
+        | 0x19 | 0x1A | 0x1B | 0x1C | 0x1D | 0x1E
+        | 0x20 | 0x22 | 0xFC | 0xFD | 0xFE | 0xFF)
+}
+
 /// Byte sum of the 48-byte Nintendo logo at its usual $0104 location. Also
 /// consulted by the unlicensed-board detection in the container module.
 pub(super) const LOGO_SUM_NINTENDO: u32 = 5446;

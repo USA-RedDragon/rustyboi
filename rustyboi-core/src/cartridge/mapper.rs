@@ -17,6 +17,7 @@ use super::mbc7::Mbc7State;
 use super::tama5::Tama5State;
 use super::unlicensed::{M161State, NtState, RocketState, SachenState};
 use super::UnlMapper;
+use super::header::is_documented_type;
 use super::{
     HUC1_RAM_BATTERY, HUC3, MBC1, MBC1_RAM, MBC1_RAM_BATTERY, MBC2, MBC2_BATTERY, MBC3, MBC3_RAM,
     MBC3_RAM_BATTERY, MBC3_TIMER_BATTERY, MBC3_TIMER_RAM_BATTERY, MBC5, MBC5_RAM, MBC5_RAM_BATTERY,
@@ -278,6 +279,10 @@ impl Mapper {
             POCKET_CAMERA => Mapper::Camera(Camera { ram_enabled: false, state: CameraState::default() }),
             ROM_RAM => Mapper::NoMbc(NoMbc { battery: false }),
             ROM_RAM_BATTERY => Mapper::NoMbc(NoMbc { battery: true }),
+            // Same inference for a type byte that names no board at all (see
+            // `decode_cartridge_type`): >32KB rules out bankless, so give it a
+            // live MBC1 instead of a board that hides three quarters of the ROM.
+            t if rom_banks > 2 && !is_documented_type(t) => mbc1(ram_banks > 0),
             // Unknown/unimplemented types fall through to a bankless board.
             _ => Mapper::NoMbc(NoMbc { battery: false }),
         }
