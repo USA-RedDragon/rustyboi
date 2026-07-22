@@ -6318,16 +6318,21 @@ mod hblank_dma_tests {
     // the SS->DS STOP synchronous fire, `on_stop_window_enter`) could then run a
     // SECOND block for a period whose block already ran.
     //
-    // The two SILICON-OBSERVABLE consequences of this internal root cause are
-    // covered end-to-end by first-party ROMs (per "regression checks as suite
-    // ROMs"), which replace their hand-staged Mmio unit tests:
-    //   - FF55=00 cancel after the block fired  -> test-roms .../dma/
-    //       hdma_ff55_cancel_after_block.cgb.mooneye.asm
-    //   - SS->DS STOP after the block fired      -> test-roms .../dma/
-    //       hdma_ff55_ssds_stop_after_block.cgb.mooneye.asm
-    // The two tests below stay host-side: the root-cause flag contract has no
-    // standalone silicon observable, and the LCD-off case is not reachable from a
-    // cold ROM (see its comment).
+    // The two SILICON-OBSERVABLE consequences of this internal root cause split
+    // between a ROM and host-side tests:
+    //   - FF55=00 cancel after the block fired: the FF55 read-back value ($AC,
+    //     the written low 7 bits with bit 7 latched) is host-side in
+    //     `ff55_cancel_after_block_reads_back_written_length_with_bit7`; the ROM
+    //     `hdma_ff55_cancel_after_block.cgb.mooneye.asm` keeps only its VRAM
+    //     sentinels (block0 copied, blocks 1/2 untouched — no spurious extra
+    //     block, no dropped disable).
+    //   - SS->DS STOP after the block fired: fully host-side in
+    //     `ssds_stop_after_block_fired_does_not_refire` (the ROM
+    //     `hdma_ff55_ssds_stop_after_block` was removed — the STOP speed-switch
+    //     window is not portable across the internal-suite runners).
+    // The remaining host-side tests below pin state with no standalone silicon
+    // observable: the root-cause flag contract, and the LCD-off case that is not
+    // reachable from a cold ROM (see its comment).
 
     /// A block fired via the normal fallback edge must mark this period's block
     /// as serviced — that is the flag's documented contract ("whether the HDMA
@@ -6381,6 +6386,77 @@ mod hblank_dma_tests {
             m.hdma.length, 3,
             "first post-enable HBlank block suppressed by a stale \
              hdma_block_fired_this_hblank (no reset on LCD disable/enable)"
+        );
+    }
+
+    // ---- Silicon-observable re-fire consequences (re-homed from ROMs) ----
+    //
+    // The two host-side tests below re-home the silicon observables of the
+    // double-fire root cause. `hdma_ff55_ssds_stop_after_block` is being deleted
+    // as a ROM (its observable is A3 here); `hdma_ff55_cancel_after_block` keeps
+    // only its VRAM sentinels as a ROM, and its $AC read-back (SameSuite-derived)
+    // moves to A4 here.
+
+    /// A single->double-speed STOP taken mid-HBlank AFTER this line's HBlank-DMA
+    /// block already fired must NOT re-fire the serviced block. The fired block
+    /// marks the period serviced, so the STOP captures the period as `High` (in
+    /// period, block done, no reflag), not `Requested` — the synchronous-fire
+    /// gate keys on `!block_done_this_period`. FF55 therefore still reads $01
+    /// (block1 pending), not $FF (completed a block early). Re-homed from the
+    /// deleted ROM `hdma_ff55_ssds_stop_after_block`.
+    #[test]
+    fn ssds_stop_after_block_fired_does_not_refire() {
+        let mut m = armed_at_hblank_edge();
+        m.hdma.length = 2; // blocks-1 => 3 blocks (FF55 reads $02)
+        // block0 fires through the single-speed STAT-3->0 fallback; the fix marks
+        // the period serviced.
+        m.step_hdma(None);
+        assert_eq!(m.hdma.length, 1, "block0 fired: 3 -> 2 blocks remaining");
+        assert!(m.hdma.block_done_this_period, "the fired block marked the period serviced");
+        assert_eq!(m.read(REG_HDMA5), 0x01, "FF55 shows block1 pending after block0");
+
+        // SS->DS STOP in the SAME HBlank: capture at entry, re-flag at unhalt.
+        m.on_stop_window_enter(true);
+        assert!(
+            matches!(m.halt.hdma_state, HaltHdmaState::High),
+            "an already-serviced in-period block must capture High, not Requested"
+        );
+        m.stop_window_exit_reflag(true);
+
+        // The serviced block was NOT re-fired: length/enable untouched.
+        assert_eq!(m.hdma.length, 1, "SS->DS STOP must not re-fire the serviced block");
+        assert!(m.hdma.enabled, "the transfer is still in progress");
+        assert!(!m.hdma.req_pending, "no re-fire was queued");
+        assert_eq!(
+            m.read(REG_HDMA5),
+            0x01,
+            "FF55 stays $01 (not $FF) right after the switch"
+        );
+    }
+
+    /// A mid-HBlank FF55=$00 cancel written as $2C (bit7=0), AFTER this line's
+    /// block already fired, stops the transfer and latches the WRITTEN low 7 bits
+    /// as the read-back length: FF55 reads back 0x80|$2C = $AC (NOT the preserved
+    /// remaining count, NOT $FF). The serviced-period cancel fires no spurious
+    /// extra block. Re-homed $AC read-back (SameSuite dma/hdma_lcd_off) from
+    /// `hdma_ff55_cancel_after_block`, whose ROM keeps only the VRAM sentinels.
+    #[test]
+    fn ff55_cancel_after_block_reads_back_written_length_with_bit7() {
+        let mut m = armed_at_hblank_edge();
+        // block fires through the fallback edge, marking the period serviced.
+        m.step_hdma(None);
+        assert!(m.hdma.block_done_this_period, "the fired block marked the period serviced");
+        assert!(m.hdma.enabled, "the transfer is still armed before the cancel");
+
+        // FF55 = $2C: bit7 clear cancels; the low 7 bits latch as the read-back.
+        m.write(REG_HDMA5, 0x2C);
+
+        assert!(!m.hdma.enabled, "FF55=00 cancels the transfer");
+        assert!(!m.hdma.req_pending, "a serviced-period cancel fires no spurious block");
+        assert_eq!(
+            m.read(REG_HDMA5),
+            0xAC,
+            "FF55 reads back 0x80 | written ($2C), not the remaining count"
         );
     }
 

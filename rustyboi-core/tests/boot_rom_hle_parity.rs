@@ -128,7 +128,7 @@ const EXPECTED: &[Model] = &[
     // This row read -1 until the HLE learned that the compat hand-off is
     // CART-CONTENT dependent. Every one of these four boot ROM images carries,
     // verbatim, `21 4B 01 / 7E / FE 33 / 20 0B` — ld hl,$014B; ld a,(hl); cp $33;
-    // jr nz — at 0x0579 (0x0573 on CGB0, whose image is shifted but not changed
+    // jr nz — at 0x0475 (0x046F on CGB0, whose image is shifted but not changed
     // here). The taken branch costs 12 cc against 8 not taken, and the two arms
     // it selects reconverge 4 cc apart, so a cart with $014B != $33 hands off
     // exactly 4 cc later. Executing each image confirms it: hand-off moves
@@ -306,7 +306,17 @@ fn check(hw: Hardware, cgb_flag: u8) {
         .iter()
         .find(|m| m.hw == hw && m.cgb_flag == cgb_flag)
         .expect("model row");
-    let Some(diffs) = diff_model(m) else { return };
+    // Loud, not fatal: a bios-less CI shard is legitimate (the ROMs are opt-in),
+    // but the omission must be visible in the log so a shard that never ran the
+    // real-image cross-check is never mistaken for one that passed it.
+    let Some(diffs) = diff_model(m) else {
+        eprintln!(
+            "SKIP boot-ROM A/B for {:?} (cart CGB flag 0x{:02X}): bios/{} absent — \
+             real-image cross-check NOT performed",
+            m.hw, m.cgb_flag, m.bios
+        );
+        return;
+    };
     assert!(
         diffs.is_empty(),
         "{:?} (cart CGB flag 0x{:02X}): HLE post-boot state diverges from {}:\n  {}",
@@ -515,6 +525,15 @@ fn compat_boot_cost_matches_every_cgb_boot_rom() {
         }
         checked += 1;
     }
+    // Loud, not fatal: `bios/` is legitimately absent on some CI shards, but the
+    // real-image cross-check then did NOT run, so make the omission visible
+    // rather than letting a silent zero-row pass look like a green cross-check.
+    if checked == 0 {
+        eprintln!(
+            "SKIP compat_boot_cost_matches_every_cgb_boot_rom: no bios/ CGB-family \
+             images present — real-image cross-check NOT performed"
+        );
+    }
     assert!(
         checked == 0 || checked == COMPAT_ROWS.len(),
         "expected all {} CGB-family compat rows, saw {checked}",
@@ -568,6 +587,15 @@ fn compat_boot_cost_matches_the_whole_checksum_table() {
         }
         assert_eq!(swept, 256 / stride, "{bios_name}: sweep did not run");
         checked += 1;
+    }
+    // Loud, not fatal: see `compat_boot_cost_matches_every_cgb_boot_rom` — a
+    // bios-less shard is allowed, but the skipped real-image sweep must be
+    // announced so it is never confused with a passed cross-check.
+    if checked == 0 {
+        eprintln!(
+            "SKIP compat_boot_cost_matches_the_whole_checksum_table: no bios/ \
+             CGB-family images present — real-image sweep NOT performed"
+        );
     }
     assert!(
         checked == 0 || checked == COMPAT_ROWS.len(),

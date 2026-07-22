@@ -2132,4 +2132,43 @@ mod tests {
              straight to digital 0's level with no fade"
         );
     }
+
+    /// NR52 power-cycle length state (re-homed from the trimmed sub-1 of
+    /// `apu/power_cycle_len_no_trigger`). The power-OFF handler zeroes every
+    /// length counter (gbdev "Power Control": always zero at power on; SameBoy
+    /// Core/apu.c memsets the APU state), and the power-ON `psg_reset` preserves
+    /// them — so a power cycle with NO NRx1 write in between leaves the counter at
+    /// 0 on BOTH DMG and CGB (the DMG monochrome exception only carries a
+    /// while-OFF NRx1 write, which is not present here). A counter left at 0 is
+    /// what makes a later trigger reload the full 64. Pins modeled behavior only.
+    #[test]
+    fn power_cycle_with_no_nrx1_write_zeros_the_length_counter() {
+        for cgb in [false, true] {
+            let mut audio = Audio::new();
+            audio.set_boot_cgb(cgb);
+            audio.sync_cc(0, 0, 0, false, cgb, false);
+            audio.sync_cc(0x400, 0, 0, false, cgb, false);
+
+            audio.write(NR52, 0x80); // power on
+            // Load a non-zero length so the power cycle's zeroing is observable.
+            audio.write(NR21, 0x30); // CH2 length load: counter = 64 - 0x30 = 16
+            assert_eq!(
+                audio.channel2.length_counter(),
+                16,
+                "NR21 load seeded the length counter"
+            );
+
+            // Power cycle: off, then on, with NO NRx1 write in between.
+            audio.write(NR52, 0x00);
+            audio.write(NR52, 0x80);
+
+            assert_eq!(
+                audio.channel2.length_counter(),
+                0,
+                "a power cycle with no NRx1 write leaves the length counter at 0 \
+                 ({} build)",
+                if cgb { "CGB" } else { "DMG" }
+            );
+        }
+    }
 }

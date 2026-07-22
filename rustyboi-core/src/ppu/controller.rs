@@ -12523,4 +12523,61 @@ mod tests {
         assert_ne!(ppu.lcdc & (LCDCFlags::BGDisplay as u8), 0);
         assert!(!ppu.cgb_tile_index_is_tile_data);
     }
+
+    // CGB panel-persistence decay (SameBoy `frame_repeat_countdown`). Re-homed
+    // from the dropped first-party ROM `ppu/lcd_enable_repeat_decay`: the skipped
+    // post-LCD-enable frame REPEATS the last displayed image while the panel's
+    // drive countdown is still live, but a LONG LCD-off (past the countdown) has
+    // decayed the panel to the "whiter than white" blank instead of repeating.
+    // The modeled boundary is `panel_recently_driven`'s window, 144*456 + 3640/2
+    // = 67484 cc at CGB single speed: an off of exactly that many cc from the last
+    // driven VBlank-line anchor still repeats, one cc more blanks. Pins the modeled
+    // boundary only (no hardware-portability claim).
+    #[test]
+    fn cgb_skipped_frame_repeats_within_window_then_blanks_after_long_off() {
+        const CGB_WINDOW: u64 = 144 * 456 + 3640 / 2; // 67484 cc, single speed
+
+        // The RGB byte the skipped frame presents for an off `diff` cc past the
+        // last driven anchor. 0x12 == the retained image (repeat), 0xFF == blank.
+        fn skipped_frame_fill(diff_from_anchor: u64) -> u8 {
+            let mut mmio = mmio::Mmio::new();
+            mmio.set_cgb_features_enabled(true);
+            // Park the master clock well past the window so the anchor never
+            // underflows, then anchor the last drive `diff` cc in the past.
+            let now = 4 * CGB_WINDOW;
+            mmio.bulk_advance_idle(now);
+
+            let mut ppu = Ppu::new();
+            ppu.color_fb_b.fill(0x12); // a distinctive, non-white retained image
+            ppu.panel_holds_image = true;
+            ppu.last_drive_cc = now - diff_from_anchor;
+            // The skipped post-enable frame: LCD on, but fewer than two frames
+            // displayed since the enable edge, so `blank_panel` takes the
+            // persistence path rather than the normal framebuffer.
+            ppu.disabled = false;
+            ppu.frames_since_enable = 1;
+
+            match ppu.get_frame(&mmio) {
+                RenderedFrame::Color(fb) => {
+                    let fill = fb[0];
+                    assert!(fb.iter().all(|&b| b == fill), "frame is not uniformly filled");
+                    fill
+                }
+                RenderedFrame::Monochrome(_) => panic!("CGB must render a color frame"),
+            }
+        }
+
+        // Short off: exactly at the countdown boundary -> repeat the last image.
+        assert_eq!(
+            skipped_frame_fill(CGB_WINDOW),
+            0x12,
+            "in-window skip must repeat the last image"
+        );
+        // Long off: one cc past the countdown -> the panel has decayed to blank.
+        assert_eq!(
+            skipped_frame_fill(CGB_WINDOW + 1),
+            0xFF,
+            "past-window skip must blank (CGB white)"
+        );
+    }
 }

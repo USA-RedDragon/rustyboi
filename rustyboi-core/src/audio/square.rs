@@ -973,6 +973,13 @@ impl SquareWave {
         self.enabled
     }
 
+    /// The hidden length counter (blocks-remaining before length expiry). Test
+    /// probe for the NR52 power-cycle length state.
+    #[cfg(test)]
+    pub(super) fn length_counter(&self) -> u16 {
+        self.length_counter
+    }
+
     /// Force the channel's active/length-running flag (NR52 status bit). Used by
     /// the SGB post-boot seed to hand off with channel 1 already stopped.
     pub(super) fn set_enabled(&mut self, enabled: bool) {
@@ -1080,5 +1087,55 @@ impl Addressable for SquareWave {
             }
             _ => self.write_nrx4(value),
         }
+    }
+}
+
+#[cfg(test)]
+mod zombie_tests {
+    //! NRx2 "zombie mode" revision fork (re-homed from the dropped first-party
+    //! ROMs `apu/nrx2_zombie.cgb` / `.cgbe`). An NRx2 write to a PLAYING square
+    //! channel drags the current volume through the envelope zombie transform.
+    //! SameBoy (Core/apu.c) forks on `model <= GB_MODEL_CGB_C`: DMG-class silicon
+    //! and CGB revisions 0/A/B/C run the transform TWICE (old -> $FF -> new),
+    //! CGB-D/E and AGB run it ONCE. Starting from CH1 volume 10 / CH2 volume 9
+    //! and the zombie write $10, the double side lands 5/6 and the single side
+    //! 6/7. The CGB-E single side is also covered by the samesuite_apu ROM suite;
+    //! the double (CGB-C) side has no public-ROM oracle, so it is pinned here.
+    //! Pins modeled behavior only (no hardware-portability claim).
+    use super::*;
+
+    /// Trigger a square channel with `trig_nr2` (volume in the high nibble,
+    /// envelope period 0, direction up), then apply the zombie write $10 and
+    /// return the transformed volume. `cgb_de` selects the CGB-D/E single-
+    /// application side; `false` is the CGB-C double-application side.
+    fn zombie_volume(channel1: bool, trig_nr2: u8, cgb_de: bool) -> u8 {
+        let mut sq = SquareWave::new(channel1);
+        // The zombie fork reads the silicon `cgb` flag (set by the per-dot
+        // step) plus the revision gate; a fresh, un-triggered channel steps
+        // to just the flag update (master is still off).
+        sq.step(true);
+        sq.set_cgb_de(cgb_de);
+
+        let (nr2, nr4) = if channel1 { (NR12, NR14) } else { (NR22, NR24) };
+        sq.write(nr2, trig_nr2); // volume + direction-up, period 0
+        sq.write(nr4, 0x87); // trigger, freq hi 7 -> channel playing
+        assert!(sq.is_active(), "channel must be playing before the zombie write");
+        sq.write(nr2, 0x10); // zombie NRx2 write on the playing channel
+        sq.volume & 0x0F
+    }
+
+    #[test]
+    fn cgb_c_applies_the_transform_twice() {
+        // CGB-C (model <= CGB_C): through an $FF intermediate. CH1 10 -> 11 -> 5,
+        // CH2 9 -> 10 -> 6.
+        assert_eq!(zombie_volume(true, 0xA8, false), 5, "CGB-C CH1 double application");
+        assert_eq!(zombie_volume(false, 0x98, false), 6, "CGB-C CH2 double application");
+    }
+
+    #[test]
+    fn cgb_de_applies_the_transform_once() {
+        // CGB-D/E: a single application. CH1 10 -> 6, CH2 9 -> 7.
+        assert_eq!(zombie_volume(true, 0xA8, true), 6, "CGB-D/E CH1 single application");
+        assert_eq!(zombie_volume(false, 0x98, true), 7, "CGB-D/E CH2 single application");
     }
 }
