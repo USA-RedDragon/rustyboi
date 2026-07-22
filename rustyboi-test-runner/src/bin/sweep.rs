@@ -1070,9 +1070,6 @@ struct MediaOut {
     /// `None` only on non-SGB hardware, or on SGB with neither source.
     /// Display-only; never touches the manifest.
     border: Option<ppu::SgbBorderLayers>,
-    frames: usize,
-    audio_samples: usize,
-    video_written: bool,
 }
 
 /// APU sink: `run_until_frame(true)` pushes generated samples here; the capture
@@ -1494,9 +1491,6 @@ fn capture_media(
         poster,
         hash_all,
         border,
-        frames: cfg.frames,
-        audio_samples,
-        video_written,
     })
 }
 
