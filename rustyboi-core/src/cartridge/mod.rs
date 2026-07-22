@@ -2149,7 +2149,7 @@ impl memory::Addressable for Cartridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::camera::{CAM_H, CAM_RAM_IMAGE_OFFSET, CAM_TILE_BYTES, CAM_W};
+    use super::camera::{CAM_H, CAM_TILE_BYTES, CAM_W};
     use crate::memory::Addressable;
 
     /// Minimal in-memory ROM image with the given type/RAM-size header bytes.
