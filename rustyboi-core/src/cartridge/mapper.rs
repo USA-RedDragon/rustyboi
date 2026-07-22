@@ -246,6 +246,12 @@ impl Mapper {
             // / RAM-bank / rumble registers. Falling through to the header type
             // gives exactly that (the one known cart declares $1C truthfully).
             UnlMapper::Vf8k(_) => {}
+            // "New GB Color" HK PCB: a stock MBC5 board (its header type is
+            // truthful) whose only addition is a read-side protection window,
+            // applied in the ROM-read intercept. Fall through to the header so
+            // it gets the real `Mapper::Mbc5` the intercept reads its bank
+            // register from.
+            UnlMapper::NewGbHk => {}
         }
         let mbc3 = |has_ram, timer| {
             Mapper::Mbc3(Mbc3 { ram_enabled: false, rom_bank_low: 1, ram_bank: 0, has_ram, timer })

@@ -260,6 +260,22 @@ impl Cartridge {
             return UnlMapper::Vf8k(Vf8kState::default());
         }
 
+        // "New GB Color" HK PCB (taizou hhugboy `MbcUnlNewGbHk`, CC0): keyed on
+        // the CRC32 of the 46-byte protection trampoline at $0091, in the dead
+        // space between the interrupt vectors and the header. Those bytes are
+        // protection-specific code -- they write the bank register with bit 7
+        // forced high and then read the resulting protection window -- so no
+        // licensed cart carries them, and a 46-byte CRC32 cannot collide. The
+        // MBC5-family header gate is belt-and-suspenders (the known cart
+        // declares $1B truthfully).
+        if crate::checksum::crc32(
+            &data[NEWGBHK_STUB_OFFSET..NEWGBHK_STUB_OFFSET + NEWGBHK_STUB_LEN],
+        ) == NEWGBHK_STUB_CRC32
+            && matches!(data[CARTRIDGE_TYPE_OFFSET], 0x19..=0x1E)
+        {
+            return UnlMapper::NewGbHk;
+        }
+
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
         // banked-size file) the publisher string in the ROM. The
         // string+type+size gate already implies the blank-header shape in
@@ -560,6 +576,55 @@ impl Cartridge {
         let pages = (self.rom_data.len() / VF8K_PAGE).max(1);
         let base = (page as usize % pages) * VF8K_PAGE;
         self.rom_data.get(base + (addr as usize & (VF8K_PAGE - 1))).copied().unwrap_or(0xFF)
+    }
+
+    /// "New GB Color" HK-PCB protection read (taizou's hhugboy
+    /// `MbcUnlNewGbHk`, CC0). While the MBC5 ROM-bank register holds a value of
+    /// $80 or more, the switchable window is the protection chip rather than
+    /// ROM: $5000-$7FFF reads back $FF, and $4000-$4FFF returns a byte from
+    /// the address bits A4-A11 (`digits`) by one of eight transforms, selected
+    /// by `digits & 7`. Returns `None` when the protection is not engaged so
+    /// the caller falls through to a normal MBC5 ROM read.
+    pub(super) fn newgbhk_read(&self, addr: u16) -> Option<u8> {
+        let Mapper::Mbc5(m) = &self.mapper else { return None };
+        let bank = u16::from(m.regs.rom_bank_low) | (u16::from(m.regs.rom_bank_high) << 8);
+        if bank < 0x80 || !(0x4000..0x8000).contains(&addr) {
+            return None;
+        }
+        if addr >= 0x5000 {
+            return Some(0xFF);
+        }
+        let digits = ((addr >> 4) & 0xFF) as u8;
+        // Pairs of bits of `digits` folded into a byte twice over: bits 7/5/3/1
+        // into both nibbles for `even`, bits 6/4/2/0 for `odd` (taizou's
+        // `evenBitsTwice`/`oddBitsTwice` tables, expressed here directly).
+        let spread = |first: u32| -> u8 {
+            let mut out = 0u8;
+            for i in 0..4 {
+                let bit = (digits >> (7 - (first + 2 * i))) & 1;
+                out |= bit << (7 - i);
+                out |= bit << (3 - i);
+            }
+            out
+        };
+        Some(match digits & 7 {
+            0 => digits,
+            1 => digits ^ 0xAA,
+            2 => digits ^ 0x55,
+            3 => digits.rotate_right(1),
+            4 => digits.rotate_left(1),
+            5 => digits.reverse_bits(),
+            // OR each bit pair into the high nibble, AND it into the low one.
+            6 => {
+                let (e, o) = (spread(0), spread(1));
+                ((e | o) & 0xF0) | (e & o & 0x0F)
+            }
+            // XNOR each bit pair into the high nibble, XOR it into the low one.
+            _ => {
+                let (e, o) = (spread(0), spread(1));
+                (!(e ^ o) & 0xF0) | ((e ^ o) & 0x0F)
+            }
+        })
     }
 
     /// BBD $2000-$3FFF register write (mGBA `_GBBBD`). Matched on `addr &

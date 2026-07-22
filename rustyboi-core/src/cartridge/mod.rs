@@ -88,6 +88,21 @@ const VF8K_BOOT_STUB: [u8; 6] = [0xF5, 0x3E, 0xAA, 0xEA, 0x00, 0x70];
 /// MBC1 to MBC5" bootleg-conversion technique.
 const POCKETMON_MBC5_LOGO_CRC32: u32 = 0x0864_AF13;
 
+/// Window and CRC32 (reflected IEEE) of the "New GB Color" HK-PCB protection
+/// trampoline (`UnlMapper::NewGbHk`). It lives in the dead space between the
+/// interrupt vectors and the header, and is 46 bytes of protection-specific
+/// code: it forces bit 7 of the bank register with `or $80`, reads two bytes
+/// out of the resulting protection window as a pointer, dereferences it to
+/// pick the bank holding the cart's CGB init, calls that, then reads two more
+/// protection bytes to restore the caller's bank. A licensed cart has no
+/// reason to contain any of it, and a 46-byte CRC32 window cannot collide with
+/// one — the same detection basis as the $0184 secondary-logo hashes below.
+/// Keyed on the hash rather than the bytes so the first-party regression ROM
+/// can carry a clean-room block instead of the cart's own code.
+const NEWGBHK_STUB_OFFSET: usize = 0x0091;
+const NEWGBHK_STUB_LEN: usize = 46;
+const NEWGBHK_STUB_CRC32: u32 = 0x53C0_8E9D;
+
 /// CRC32 (reflected IEEE) of the 48-byte Vast Fame secondary logo at $0184 on
 /// the general VF001 protection board (`UnlMapper::Vf001Gen`, taizou's hhugboy
 /// `MbcUnlVf001`). hhugboy auto-detects the family by the $0184 byte-sum:
@@ -398,6 +413,23 @@ pub enum UnlMapper {
     /// instruction fetch is still the real continuation. A single 16 KiB
     /// register would swap the code out from under the program counter.
     Vf8k(Vf8kState),
+    /// "New GB Color" HK-PCB protection board (taizou's hhugboy
+    /// `MbcUnlNewGbHk`, CC0), used by the HK0701/HK0819 cartridges — Monster
+    /// Go! Go! II (a CGB colourisation hack of Kirby's Dream Land 2 wearing a
+    /// `KIRBY2` header) and Pokemon Action Chapter. Electrically a plain
+    /// MBC5+RAM+BATTERY, plus one read-side protection: while the ROM-bank
+    /// register holds a value of $80 or more, the whole switchable window
+    /// stops being ROM and becomes the protection chip — $4000-$4FFF returns a
+    /// value derived from address bits A4-A11 by one of eight bit-manipulations
+    /// (selected by the low 3 bits of those same address bits), and
+    /// $5000-$7FFF returns $FF. The game's boot trampoline sets bit 7 with
+    /// `or $80`, reads two of those derived bytes as a pointer, and
+    /// dereferences it to get the bank holding its CGB init code; a plain MBC5
+    /// masks bit 7 away, serves ordinary ROM, and the cart lands on a `stop`
+    /// opcode. Stateless — the protection is a pure function of the bank
+    /// register the MBC5 board already stores, so the variant carries no
+    /// payload and no other cart's savestate layout shifts.
+    NewGbHk,
 }
 
 /// The two 8 KiB ROM-window registers of `UnlMapper::Vf8k`, carried inside the
@@ -1222,6 +1254,9 @@ impl Cartridge {
             // known cart declares $1C (MBC5+RUMBLE) truthfully, so derive the
             // RAM/battery/rumble flags from the header.
             UnlMapper::Vf8k(_) => {}
+            // "New GB Color" HK PCB: electrically a stock MBC5 and its header
+            // type ($1B) is truthful, so the header decode below is correct.
+            UnlMapper::NewGbHk => {}
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -2059,6 +2094,15 @@ impl memory::Addressable for Cartridge {
                 if (mmio::CARTRIDGE_BANK_START..=mmio::CARTRIDGE_BANK_END).contains(&addr) =>
             {
                 return self.vf8k_read(*st, addr);
+            }
+            // "New GB Color" HK PCB: while the bank register holds $80 or more
+            // the switchable window is the protection chip, not ROM.
+            UnlMapper::NewGbHk
+                if (mmio::CARTRIDGE_BANK_START..=mmio::CARTRIDGE_BANK_END).contains(&addr) =>
+            {
+                if let Some(byte) = self.newgbhk_read(addr) {
+                    return byte;
+                }
             }
             _ => {}
         }
@@ -3285,6 +3329,94 @@ mod tests {
         let mut mbc1 = rom.clone();
         mbc1[CARTRIDGE_TYPE_OFFSET] = 0x01;
         assert_eq!(Cartridge::detect_unl_mapper(&mbc1), UnlMapper::None);
+    }
+
+    /// Clean-room stand-in for the "New GB Color" HK-PCB protection trampoline
+    /// at $0091. Detection keys ONLY on the 46-byte CRC32, never the bytes, so
+    /// this is an ASCII banner plus a 4-byte suffix computed to hit
+    /// NEWGBHK_STUB_CRC32 -- the same block the first-party ROM carries, and no
+    /// cartridge code.
+    const NEWGBHK_SIG: [u8; 46] =
+        *b"RUSTYBOI NEWGBHK HK0701 CLEANROOM SIG!!!!!\x38\xCB\x84\x40";
+
+    /// 512KB image carrying the New GB HK signature: a truthful MBC5+RAM+BATTERY
+    /// header, the $0091 stub whose CRC32 keys detection, and bank-1 markers at
+    /// the addresses the protection also answers, so "ROM below $80, protection
+    /// at or above $80" is observable.
+    fn make_newgbhk_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x80000]; // 32 banks
+        rom[CARTRIDGE_TYPE_OFFSET] = MBC5_RAM_BATTERY;
+        rom[ROM_SIZE_OFFSET] = 0x04; // 512KB
+        rom[RAM_SIZE_OFFSET] = 0x02; // 8KB
+        rom[NEWGBHK_STUB_OFFSET..NEWGBHK_STUB_OFFSET + NEWGBHK_STUB_LEN]
+            .copy_from_slice(&NEWGBHK_SIG);
+        rom[0x0A00] = 0xC3; // bank-0 marker (never protected)
+        rom[0x4000] = 0x11; // bank-1 markers, all != their protection value
+        rom[0x4096] = 0x5A;
+        rom[0x5000] = 0x3C;
+        rom
+    }
+
+    #[test]
+    fn newgbhk_detects_and_serves_protection_window() {
+        let rom = make_newgbhk_rom();
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::NewGbHk);
+
+        // Truthful MBC5+RAM+BATTERY header: decode falls through to it.
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(
+            cart.get_cartridge_type(),
+            CartridgeType::MBC5 { ram: true, battery: true, .. }
+        ));
+
+        // Bank register below $80: the window is ordinary ROM.
+        cart.write(0x2000, 0x01);
+        assert_eq!(cart.read(0x4096), 0x5A);
+        assert_eq!(cart.read(0x5000), 0x3C);
+
+        // At or above $80: the window is the protection chip. One address per
+        // `digits & 7` transform, where digits = (addr >> 4) & $FF.
+        cart.write(0x2000, 0x81);
+        for &(addr, want) in &[
+            (0x4000u16, 0x00u8), // digits $00, case 0: identity
+            (0x4010, 0xAB),      // digits $01, case 1: XOR $AA
+            (0x4020, 0x57),      // digits $02, case 2: XOR $55
+            (0x4030, 0x81),      // digits $03, case 3: rotate right 1
+            (0x4040, 0x08),      // digits $04, case 4: rotate left 1
+            (0x4050, 0xA0),      // digits $05, case 5: bit reversal
+            (0x4060, 0x30),      // digits $06, case 6: OR/AND bit pairs
+            (0x4070, 0xD2),      // digits $07, case 7: XNOR/XOR bit pairs
+            (0x4096, 0xA3),      // the address the real cart reads
+            (0x4FF0, 0xF0),      // last protected address
+            (0x5000, 0xFF),      // $5000-$7FFF reads back $FF, not a transform
+            (0x7FFF, 0xFF),
+        ] {
+            assert_eq!(cart.read(addr), want, "protection read at ${addr:04X}");
+        }
+        // Bank 0 is never affected while the protection is engaged.
+        assert_eq!(cart.read(0x0A00), 0xC3);
+
+        // The gate is the 9-bit bank value, not bit 7 of the low byte: low $00
+        // with the high bit set is $100, still at or above $80.
+        cart.write(0x2000, 0x00);
+        cart.write(0x3000, 0x01);
+        assert_eq!(cart.read(0x4096), 0xA3);
+
+        // Dropping back below $80 restores ordinary ROM reads.
+        cart.write(0x3000, 0x00);
+        cart.write(0x2000, 0x01);
+        assert_eq!(cart.read(0x4096), 0x5A);
+
+        // A one-byte perturbation of the $0091 block changes its CRC32 -> no
+        // match, so an unrelated cart can never be routed here.
+        let mut perturbed = rom.clone();
+        perturbed[NEWGBHK_STUB_OFFSET] ^= 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&perturbed), UnlMapper::None);
+
+        // The header gate: a non-MBC5-family type is not this board.
+        let mut mbc1_header = rom.clone();
+        mbc1_header[CARTRIDGE_TYPE_OFFSET] = MBC1_RAM_BATTERY;
+        assert_eq!(Cartridge::detect_unl_mapper(&mbc1_header), UnlMapper::None);
     }
 
     /// Drives the general-VF001 config register file the way the boot code
