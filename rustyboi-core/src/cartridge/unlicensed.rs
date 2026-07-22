@@ -239,6 +239,27 @@ impl Cartridge {
             return UnlMapper::Vf001Gen;
         }
 
+        // Vast Fame 8 KiB dual-window board (Jieba Tianwang 4). There is no
+        // secondary logo at $0184 on this cart -- those bytes are game code --
+        // so detection keys on the board's own power-on handshake, which the
+        // cart executes out of the header itself:
+        //   $0100: nop / jp $0134          (entry jumps INTO the title field)
+        //   $0134: push af / ld a,$AA / ld ($7000),a / ...
+        // A licensed cart cannot match: its $0134-$0143 must hold the ASCII
+        // title, and no licensed entry point jumps into the title field. The
+        // header-type gate keeps this to the MBC5 family the board really is.
+        // (The `Super Color 26-in-1` multicart embeds this engine's far-call
+        // thunk but is a plain MBC5 with a $3FF0 entry, so it stays excluded --
+        // 8 KiB windows break it.)
+        if data[0x100] == 0x00
+            && data[0x101] == 0xC3
+            && (0x0134..=0x0143).contains(&(u16::from(data[0x102]) | (u16::from(data[0x103]) << 8)))
+            && data[0x134..0x134 + VF8K_BOOT_STUB.len()] == VF8K_BOOT_STUB
+            && matches!(data[CARTRIDGE_TYPE_OFFSET], 0x19..=0x1E)
+        {
+            return UnlMapper::Vf8k(Vf8kState::default());
+        }
+
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
         // banked-size file) the publisher string in the ROM. The
         // string+type+size gate already implies the blank-header shape in
@@ -514,6 +535,30 @@ impl Cartridge {
             return self.rom_data.get(base + addr as usize).copied().or(Some(0xFF));
         }
         None
+    }
+
+    /// Vast Fame 8 KiB dual-window ROM-bank write ($2000-$3FFF). A10 selects
+    /// which 8 KiB page of the switchable area the value programs: low picks
+    /// the $4000-$5FFF page, high the $6000-$7FFF page. There is no 16 KiB bank
+    /// register on this board, so nothing else is latched.
+    pub(super) fn vf8k_write(&mut self, addr: u16, value: u8) {
+        if let UnlMapper::Vf8k(ref mut st) = self.unl_mapper {
+            if addr & 0x0400 == 0 {
+                st.low = value;
+            } else {
+                st.high = value;
+            }
+        }
+    }
+
+    /// Vast Fame 8 KiB dual-window ROM read ($4000-$7FFF). Each half is served
+    /// from its own 8 KiB page register; out-of-range pages wrap to the image
+    /// like every other board here.
+    pub(super) fn vf8k_read(&self, st: Vf8kState, addr: u16) -> u8 {
+        let page = if addr < 0x6000 { st.low } else { st.high };
+        let pages = (self.rom_data.len() / VF8K_PAGE).max(1);
+        let base = (page as usize % pages) * VF8K_PAGE;
+        self.rom_data.get(base + (addr as usize & (VF8K_PAGE - 1))).copied().unwrap_or(0xFF)
     }
 
     /// BBD $2000-$3FFF register write (mGBA `_GBBBD`). Matched on `addr &

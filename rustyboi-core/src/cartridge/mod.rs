@@ -66,6 +66,15 @@ const LOGO_SUM_VF001_LOH: u32 = 4593;
 const VF001_STUB_OFFSET: usize = 0x32FC;
 const VF001_STUB: [u8; 6] = [0x11, 0x80, 0x70, 0x3E, 0x9A, 0x12];
 
+/// Page size of the `UnlMapper::Vf8k` switchable windows (8 KiB, half of a
+/// normal ROM bank).
+const VF8K_PAGE: usize = 0x2000;
+/// The `UnlMapper::Vf8k` power-on handshake, executed straight out of the
+/// header at $0134: `push af; ld a,$AA; ld ($7000),a`. Detection requires it
+/// together with an entry point that jumps into the title field, so no
+/// licensed cart (whose $0134-$0143 is the ASCII title) can match.
+const VF8K_BOOT_STUB: [u8; 6] = [0xF5, 0x3E, 0xAA, 0xEA, 0x00, 0x70];
+
 /// CRC32 (reflected IEEE) of the 48 bytes at $0184 on the Hong Kong
 /// "POCKETMON" Pokemon Red bootleg: a re-linked Pokemon that the bootlegger
 /// converted from MBC1 to MBC5-style linear banking (a full-width bank number
@@ -356,9 +365,51 @@ pub enum UnlMapper {
     /// `UnlMapper::Vf001` Legend-of-Heroes board above, so it is a separate
     /// variant. Unit variant (the config state lives in `Cartridge::vf001g`, as
     /// the byte-injection counter must advance on immutable reads); detected by
-    /// the $0184 CRC32. Cracks Zook Z, Nv Wang Gedou 2000, Koudai Guaishou,
-    /// Guaishou Go!Go!II, Jieba Tianwang 4, and the Soul Falchion pair.
+    /// the $0184 CRC32. Cracks Nv Wang Gedou 2000 and the Soul Falchion pair.
     Vf001Gen,
+    /// Vast Fame 8 KiB dual-window board (Jieba Tianwang 4). Electrically an
+    /// MBC5+RUMBLE except that the switchable ROM area is banked in 8 KiB
+    /// halves through two independent registers instead of one 16 KiB bank:
+    ///
+    ///   $2000-$3FFF with A10 low  -> 8 KiB bank mapped at $4000-$5FFF
+    ///   $2000-$3FFF with A10 high -> 8 KiB bank mapped at $6000-$7FFF
+    ///
+    /// $0000-$3FFF is fixed to bank 0 and every other register ($0000-$1FFF RAM
+    /// enable, $4000-$5FFF RAM bank / rumble) is plain MBC5.
+    ///
+    /// The game's far-call thunk makes the geometry explicit — it holds the
+    /// 16 KiB bank number in a variable, doubles it, and programs the pair:
+    ///     LD A,n / LD ($C242),A / SLA A / LD ($2000),A x2 / INC A
+    ///     / LD ($2400),A x2 / CALL $400c
+    /// so `$2000` gets 2n (the low half of 16 KiB bank n) and `$2400` gets 2n+1
+    /// (its high half). Treating those as one 16 KiB register leaves the last
+    /// value (2n+1) selecting 16 KiB bank (2n+1)&mask, which lands on one of the
+    /// ROM's 34 decoy banks — each is filled with `JP $0000`, so the cart
+    /// resets forever. The split is proven by the code that switches banks
+    /// *while executing from the switchable area*: at bank 1 $44F8 the routine
+    /// runs `LD A,$0A / LD ($242D),A / LD A,$00 / ...` from the $4000-$5FFF
+    /// half; $242D has A10 set, so only the $6000-$7FFF half moves and the next
+    /// instruction fetch is still the real continuation. A single 16 KiB
+    /// register would swap the code out from under the program counter.
+    Vf8k(Vf8kState),
+}
+
+/// The two 8 KiB ROM-window registers of `UnlMapper::Vf8k`, carried inside the
+/// enum variant (not as `Cartridge` fields) so every other cart's bincode
+/// savestate layout stays byte-identical. Power-on selects 8 KiB banks 2 and 3,
+/// i.e. exactly MBC5's power-on 16 KiB bank 1 across $4000-$7FFF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vf8kState {
+    /// 8 KiB bank mapped at $4000-$5FFF (written to $2000-$3FFF with A10 low).
+    low: u8,
+    /// 8 KiB bank mapped at $6000-$7FFF (written to $2000-$3FFF with A10 high).
+    high: u8,
+}
+
+impl Default for Vf8kState {
+    fn default() -> Self {
+        Self { low: 2, high: 3 }
+    }
 }
 
 /// Swap-mode latches for `UnlMapper::Hitek`, carried inside the enum variant
@@ -933,6 +984,8 @@ impl Cartridge {
             UnlMapper::Sintax(_) => UnlMapper::Sintax(SintaxState::default()),
             // HITEK's swap modes are volatile board logic; power up at 0.
             UnlMapper::Hitek(_) => UnlMapper::Hitek(HitekState::default()),
+            // The 8 KiB window registers are volatile; power up on bank 1.
+            UnlMapper::Vf8k(_) => UnlMapper::Vf8k(Vf8kState::default()),
             other => other,
         };
         Cartridge {
@@ -1162,6 +1215,10 @@ impl Cartridge {
                     _ => CartridgeType::MBC5 { ram: false, battery: false, rumble: false },
                 };
             }
+            // The 8 KiB dual-window board is otherwise a plain MBC5; the one
+            // known cart declares $1C (MBC5+RUMBLE) truthfully, so derive the
+            // RAM/battery/rumble flags from the header.
+            UnlMapper::Vf8k(_) => {}
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -1992,6 +2049,14 @@ impl memory::Addressable for Cartridge {
                     return byte;
                 }
             }
+            // 8 KiB dual-window banking: the switchable area is two independent
+            // 8 KiB pages, so it cannot go through the 16 KiB `rom_bank_bases`
+            // path at all.
+            UnlMapper::Vf8k(st)
+                if (mmio::CARTRIDGE_BANK_START..=mmio::CARTRIDGE_BANK_END).contains(&addr) =>
+            {
+                return self.vf8k_read(st, addr);
+            }
             _ => {}
         }
         match addr {
@@ -2348,6 +2413,15 @@ impl memory::Addressable for Cartridge {
                 if matches!(self.unl_mapper, UnlMapper::Hitek(_)) =>
             {
                 self.hitek_write(addr, value);
+            }
+            // Vast Fame 8 KiB dual-window: the whole ROM-bank register block
+            // programs the two 8 KiB page registers instead of one 16 KiB bank
+            // (A10 picks the page), so it is intercepted before the generic
+            // MBC5 arm. Every other window falls through unchanged.
+            ROM_BANK_SELECT_START..=ROM_BANK_SELECT_END
+                if matches!(self.unl_mapper, UnlMapper::Vf8k(_)) =>
+            {
+                self.vf8k_write(addr, value);
             }
             // RAM Enable (0x0000-0x1FFF)
             RAM_ENABLE_START..=RAM_ENABLE_END => match &mut self.mapper {
@@ -3116,6 +3190,73 @@ mod tests {
         let mut cracked = rom.clone();
         cracked[0x7FFF] = 0x01;
         assert_eq!(Cartridge::detect_unl_mapper(&cracked), UnlMapper::None);
+    }
+
+    /// A Vast Fame 8 KiB dual-window cart (Jieba Tianwang 4's shape): the entry
+    /// point jumps into the title field, which holds the board's power-on
+    /// handshake. 64KB = 4 banks = 8 pages of 8 KiB, each marked at its start.
+    fn make_vf8k_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x10000]; // 4 banks / 8 pages
+        rom[0x100] = 0x00;
+        rom[0x101] = 0xC3;
+        rom[0x102] = 0x34; // jp $0134 -- into the title field
+        rom[0x103] = 0x01;
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+        rom[0x134..0x13A].copy_from_slice(&VF8K_BOOT_STUB);
+        rom[CARTRIDGE_TYPE_OFFSET] = 0x1C; // MBC5+RUMBLE (truthful)
+        rom[ROM_SIZE_OFFSET] = 0x01; // 64KB / 4 banks
+        rom[RAM_SIZE_OFFSET] = 0x00;
+        for page in 0..8usize {
+            rom[page * VF8K_PAGE] = 0xF0 | page as u8;
+        }
+        rom
+    }
+
+    #[test]
+    fn vf8k_detects_and_banks_two_8k_windows() {
+        let rom = make_vf8k_rom();
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::Vf8k(Vf8kState::default())
+        );
+
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        // Electrically MBC5 (+rumble, from the truthful header byte).
+        assert!(matches!(cart.get_cartridge_type(), CartridgeType::MBC5 { rumble: true, .. }));
+
+        // Power-on: pages 2 and 3, i.e. exactly MBC5's power-on 16 KiB bank 1.
+        assert_eq!(cart.read(0x4000), 0xF2);
+        assert_eq!(cart.read(0x6000), 0xF3);
+
+        // A10 low programs the $4000-$5FFF page, A10 high the $6000-$7FFF page.
+        // Pages 5 and 6 are NOT a (2n, 2n+1) pair, so no single 16 KiB bank
+        // register can produce this map.
+        cart.write(0x2000, 0x05);
+        cart.write(0x2400, 0x06);
+        assert_eq!(cart.read(0x4000), 0xF5);
+        assert_eq!(cart.read(0x6000), 0xF6);
+
+        // The windows are independent: moving the high one leaves the low one.
+        cart.write(0x2400, 0x04);
+        assert_eq!(cart.read(0x4000), 0xF5);
+        assert_eq!(cart.read(0x6000), 0xF4);
+
+        // $0000-$3FFF is always bank 0.
+        assert_eq!(cart.read(0x0000), 0xF0);
+        assert_eq!(cart.read(0x2000), 0xF1);
+
+        // Detection is the entry-into-header + handshake pair. Break either and
+        // the cart falls back to its (truthful) MBC5 header.
+        let mut no_stub = rom.clone();
+        no_stub[0x136] ^= 0xFF; // corrupt the $AA of `ld a,$AA`
+        assert_eq!(Cartridge::detect_unl_mapper(&no_stub), UnlMapper::None);
+        let mut no_jump = rom.clone();
+        no_jump[0x102] = 0x50; // entry targets $0150, not the title field
+        assert_eq!(Cartridge::detect_unl_mapper(&no_jump), UnlMapper::None);
+        // ...and the header-family gate keeps it off non-MBC5 carts.
+        let mut mbc1 = rom.clone();
+        mbc1[CARTRIDGE_TYPE_OFFSET] = 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&mbc1), UnlMapper::None);
     }
 
     /// Write the correct boot-ROM header checksum into $014D.

@@ -240,6 +240,12 @@ impl Mapper {
             UnlMapper::Vf001Gen => {
                 return Mapper::Vf001(Vf001 { ram_enabled: false, regs: Mbc5State::default() })
             }
+            // The 8 KiB dual-window board keeps its two page registers in the
+            // UnlMapper::Vf8k payload and serves $4000-$7FFF from the read
+            // intercept, so the board here only needs the plain MBC5 RAM-enable
+            // / RAM-bank / rumble registers. Falling through to the header type
+            // gives exactly that (the one known cart declares $1C truthfully).
+            UnlMapper::Vf8k(_) => {}
         }
         let mbc3 = |has_ram, timer| {
             Mapper::Mbc3(Mbc3 { ram_enabled: false, rom_bank_low: 1, ram_bank: 0, has_ram, timer })
