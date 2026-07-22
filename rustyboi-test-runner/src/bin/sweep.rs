@@ -999,7 +999,7 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
     let mut checkpoints = Vec::with_capacity(checkpoint_at.len());
     let mut first_hash = None;
     let mut changed = false;
-    let mut boot_ok = false;
+    let mut ever_nonblank = false;
     let mut final_rgb = None;
     let mut timer = None;
     let started = Instant::now();
@@ -1020,17 +1020,22 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
             Some(fh) if fh != h => changed = true,
             _ => {}
         }
-        // Classify + screenshot on the last non-blank frame of the final 120
-        // (a run ending mid fade-to-black is not a boot failure).
-        if f + 120 >= cfg.frames {
-            if frame_is_non_blank(&gb, &frame) {
-                boot_ok = true;
-                if cfg.screens_dir.is_some() {
-                    final_rgb = Some(frame_rgb(&frame));
-                }
-            } else if f + 1 == cfg.frames && final_rgb.is_none() && cfg.screens_dir.is_some() {
-                final_rgb = Some(frame_rgb(&frame));
-            }
+        // Boot classification is monotonic over the WHOLE run: a game that ever
+        // rendered a non-blank frame booted, even if it is mid screen-transition
+        // (blank for >120 frames) when the run ends.
+        let non_blank = frame_is_non_blank(&gb, &frame);
+        if non_blank {
+            ever_nonblank = true;
+        }
+        // The final-120 window governs poster selection ONLY: screenshot the last
+        // non-blank frame there (a run ending mid fade-to-black is not a boot
+        // failure, and should not be the poster). Fall back to the very last
+        // frame if the whole window stayed blank.
+        if f + 120 >= cfg.frames
+            && cfg.screens_dir.is_some()
+            && (non_blank || (f + 1 == cfg.frames && final_rgb.is_none()))
+        {
+            final_rgb = Some(frame_rgb(&frame));
         }
         if f % 256 == 0 && started.elapsed().as_secs() > cfg.timeout_secs {
             return Err(format!("timeout after {} frames", f + 1));
@@ -1043,7 +1048,7 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
         hardware: format!("{hardware:?}"),
         hash_all,
         checkpoints,
-        boot_ok,
+        boot_ok: ever_nonblank,
         changed,
         fps: measured / elapsed.as_secs_f64(),
         ns_per_frame: elapsed.as_nanos() as f64 / measured,
