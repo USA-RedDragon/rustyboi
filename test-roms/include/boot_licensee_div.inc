@@ -24,7 +24,7 @@
 ;   FE 33      cp $33
 ;   20 0B      jr nz, +$0B
 ;
-; at image offset 0x0579 (0x0573 on CGB0, whose image is shifted but carries the
+; at image offset 0x0475 (0x046F on CGB0, whose image is shifted but carries the
 ; identical sequence).
 ;
 ; WHY THIS IS OBSERVABLE AT ALL

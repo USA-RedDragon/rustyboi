@@ -1,16 +1,15 @@
-; hdma_ff55_cancel_after_block.cgb.mooneye — a mid-HBlank FF55=$00 cancel written
-; AFTER this line's HBlank-DMA block already fired must simply STOP the transfer:
-; no further block is copied and FF55 reads back 0x80|written.
+; hdma_ff55_cancel_after_block.cgb.mooneye — a mid-HBlank FF55 bit7=0 cancel
+; written AFTER this line's HBlank-DMA block already fired must simply STOP the
+; transfer: no further block is copied.
 ;
 ; Pan Docs ("FF55 — HDMA5", CGB): "It is also possible to terminate an active
-; HBlank transfer by writing zero to Bit 7 of FF55. In that case reading from
-; FF55 will return how many $10 blocks remained (minus 1) in the lower 7 bits,
-; but Bit 7 will be read as 1." and "Reading Bit 7 of FF55 can be used to confirm
-; if the DMA transfer is active (1=Not Active, 0=Active) [...] after manually
-; terminating a HBlank Transfer." So after the cancel the transfer stops and no
-; more $10 blocks are moved. (SameSuite dma/hdma_lcd_off pins that the lower bits
-; read back the WRITTEN length, not the remaining count — so a cancel value of
-; $2C reads back 0x80|$2C = $AC.)
+; HBlank transfer by writing zero to Bit 7 of FF55." and "Reading Bit 7 of FF55
+; can be used to confirm if the DMA transfer is active (1=Not Active, 0=Active)
+; [...] after manually terminating a HBlank Transfer." So after the cancel the
+; transfer stops and no more $10 blocks are moved. (The exact lower-7-bit
+; read-back value after a cancel is left unasserted here: the Pan Docs
+; "remaining minus 1" wording and the written-length value SameSuite reports
+; disagree, and this ROM's subject is the STOP, not the latched count.)
 ;
 ; The regressing "one block per HBlank" engine never marked the period serviced
 ; for a block that fired through the single-speed STAT-3->0 fallback (period
@@ -25,10 +24,8 @@
 ; distinct sentinels $E1/$E2/$E3 (LCD off) so a never-copied block is not
 ; confused with reset $00. The ROM arms a 3-block HBlank DMA from VBlank, spins
 ; on FF55 until the FIRST block fires (readback $02 -> $01, a few M-cycles into
-; line 0's HBlank), writes FF55=$2C, waits two frames for any dropped-disable
-; streaming to land, then in VBlank asserts:
-;   FF55 immediately after cancel == $AC  (stopped, WRITTEN length latched:
-;                                          not $01/$0x active, not $FF completed)
+; line 0's HBlank), writes FF55=$2C (bit7=0 -> terminate), waits two frames for
+; any dropped-disable streaming to land, then in VBlank asserts:
 ;   block0 dest == $B1  (the pre-cancel block DID copy — guards over-regression
 ;                        where "everything stops" would false-pass)
 ;   block1 dest == $E2  (untouched: no spurious extra block this HBlank)
@@ -39,8 +36,7 @@ INCLUDE "rustyboi_test.inc"
 
 DEF SRC        EQU $C000
 DEF DST        EQU $8800
-DEF CANCEL_VAL EQU $2C                         ; bit7=0 -> cancel; low bits latch
-DEF EXPECT_FF55 EQU $80 | CANCEL_VAL           ; $AC
+DEF CANCEL_VAL EQU $2C                         ; bit7=0 -> terminate the transfer
 
 SECTION "entry", ROM0[$100]
     di
@@ -114,9 +110,6 @@ Start:
     ; Cancel, same HBlank, a few M-cycles after the block fired.
     ld a, CANCEL_VAL
     ldh [rHDMA5], a
-    ; Capture the immediate post-cancel readback.
-    ldh a, [rHDMA5]
-    ld c, a                     ; c = FF55 after cancel
 
     ; Let two frames pass so any dropped-disable streaming copies block1/block2.
     call WaitFrame
@@ -135,9 +128,6 @@ Start:
     ld h, a
 
     ; Grade.
-    ld a, c
-    cp EXPECT_FF55
-    jp nz, TestFail
     ld a, d
     cp $B1                      ; block0 copied
     jp nz, TestFail

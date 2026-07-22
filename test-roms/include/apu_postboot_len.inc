@@ -41,10 +41,13 @@
 ; was NOT the power-on 0 — the 1 a stray NRx1 length load leaves — dies at the
 ; first or second tick and is rejected by every window here.
 ;
-; CH1 is the control cell: the boot ROM's NR11 = $80 loads 64 (length bits
-; $80 & $3F = 0 -> 64 - 0), and post-boot NR14 = $BF leaves length DISABLED, so
-; nothing has clocked it down between hand-off and this ROM. It must read the
-; same 64 as CH2 and CH4 despite being the one channel the boot ROM did write.
+; CH1 is a pipeline/sanity cell, NOT a boot-preservation discriminator. It runs
+; the identical trigger-with-length-off sequence as the other channels, so its
+; step-2 trigger reloads the counter to the full 64 regardless of whatever the
+; boot ROM's NR11 = $80 left in it — the reload overwrites the boot value either
+; way. So it only confirms the measurement path reads back the full 64 on the
+; one channel the boot ROM did write; it cannot tell a preserved boot length
+; from any other value.
 
 IF !DEF(APU_POSTBOOT_LEN_INC)
 DEF APU_POSTBOOT_LEN_INC EQU 1

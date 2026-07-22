@@ -14,6 +14,13 @@
 ; On a plain MBC5 (protection layer absent/wrong) the config writes are inert
 ; and the $Axxx reads return open-bus / RAM instead of the transform values, so
 ; every assertion fails — the ROM PASSES only with the VF001 mapper active.
+;
+; PROVENANCE: this is a GAME-BOOT-ANCHORED regression pin, not a silicon-bench
+; oracle. The served values are the reverse-engineered op table the real Legend
+; of Heroes (Unl) cart drives through these exact three boot gates on hardware —
+; the game boots iff the mapper reproduces them — but they have not been
+; independently confirmed on a logic-analyser bench. Treat it as a guard that
+; the game keeps booting, not as a first-principles hardware truth.
 
 INCLUDE "hardware.inc"
 INCLUDE "rustyboi_test.inc"

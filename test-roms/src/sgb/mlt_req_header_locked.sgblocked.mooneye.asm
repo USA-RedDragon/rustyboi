@@ -20,9 +20,13 @@
 ;
 ; Note the negative form is unavoidable here: the gate's whole observable effect
 ; is the absence of SGB behaviour. What keeps it honest is the sibling ROM —
-; mlt_req_player_cycle.sgb is the same hardware, same packets, same read
-; sequence, differing only in the two header bytes, and it demands the opposite
-; answer.
+; mlt_req_player_cycle.sgb runs the same hardware and, in its SUBTEST 1, the
+; identical four-player MLT_REQ packet followed by the identical six-read sweep
+; this ROM's subtest 1 uses. That sibling is a four-subtest program and this is
+; a bespoke two-subtest one, so they are NOT the same ROM minus two header
+; bytes; the shared element is exactly that packet + sweep, and on it the
+; unlocked sibling demands the opposite answer — the enumeration
+; $F,$E,$D,$C,$F,$E where this locked build must stay pinned to player 1.
 
 INCLUDE "hardware.inc"
 INCLUDE "rustyboi_test.inc"

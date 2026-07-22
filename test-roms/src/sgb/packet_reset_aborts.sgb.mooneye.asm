@@ -21,9 +21,11 @@
 ; ignores MLT_REQ altogether.
 ;
 ; Grounding note: the mid-transfer case is an application of the documented
-; "reset and start" wording rather than a separately documented behaviour. It is
-; corroborated by the public sgb-ext-test protocol stress ROM, whose real-SGB
-; reference screenshot shows $10->$00 and $20->$00 aborting a packet in flight.
+; "reset and start" wording rather than a separately documented behaviour, but
+; it is strongly defensible — corroborated on real SGB silicon by the sgb-ext-
+; test protocol stress ROM in the GBEmulatorShootout suite (cpp/sgb-ext-test),
+; whose real-hardware reference capture shows a both-lines-LOW pulse ($10->$00
+; and $20->$00) aborting a packet already in flight.
 
 INCLUDE "hardware.inc"
 INCLUDE "rustyboi_test.inc"
