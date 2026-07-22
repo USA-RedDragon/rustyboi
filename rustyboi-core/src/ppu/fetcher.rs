@@ -147,19 +147,16 @@ pub(super) struct Fetcher {
     // stale tile number at this fetch's live tile row -- so the row that
     // reaches the FIFO is the previous scanline's last tile number drawn at the
     // CURRENT window row. The window tile column still advances.
-    // Kept out of the savestate wire format in this commit so the golden
-    // fixtures stay byte-exact; promoted in the follow-up that unskips the
-    // PPU's other transients and regenerates them once.
-    #[serde(skip)]
+    #[serde(default)]
     wx0_glitch_fetches: u8,
     // The tile number / attributes the glitched fetch reuses: the PREVIOUS
     // scanline's last completed fetch. Snapshotted by `reset()` (mode-3 start)
     // rather than tracked live, because hardware aborts this line's first
     // background fetch before its tile-map read while rustyboi's pipeline has
     // already run it.
-    #[serde(skip)]
+    #[serde(default)]
     glitch_tile_num: u8,
-    #[serde(skip)]
+    #[serde(default)]
     glitch_attrs: u8,
 }
 

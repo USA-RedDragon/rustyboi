@@ -1517,9 +1517,7 @@ pub struct Ppu {
     // shortfall outlives the disable, so the mode-3 end still has to let the
     // renderer run on (image-only) to x==160 instead of cutting the line off
     // at the closed-form mode-0 boundary. Cleared per line.
-    //
-    // Per-line transient, deliberately OUT of the savestate wire format.
-    #[serde(skip)]
+    #[serde(default)]
     win_weoff_deferred_tail: bool,
     // Dot (within-line `ticks`) at which the window began drawing this line.
     // The StartWindowDraw mode-3 penalty becomes non-refundable once the
@@ -1895,9 +1893,7 @@ pub struct Ppu {
     // WY value that is only briefly equal to the current line still arms the
     // window. DISABLED when none; never armed once the latch is already set.
     //
-    // At most a few dots of pending work, deliberately OUT of the savestate
-    // wire format.
-    #[serde(skip, default = "wy2_disabled")]
+    #[serde(default = "wy2_disabled")]
     wy_recheck_cc: u64,
     #[serde(default)]
     wy1_pending: u8,
@@ -2188,10 +2184,7 @@ pub struct Ppu {
     // model (bg_anchor_cc is DMG-only). The BG fetch grid reaches display
     // column C at `bg_anchor_dot + 8 + C`; the CGB WE-off revert column
     // resolves against that grid. Cleared at each mode-3 arm.
-    //
-    // Per-line transient, deliberately OUT of the savestate wire format: it is
-    // re-derived at the next mode-3 arm, i.e. within one scanline.
-    #[serde(skip)]
+    #[serde(default)]
     bg_anchor_dot: Option<u128>,
     // DMG mid-mode-3 SCY write journal: (transition_cc, old, new) — the abs_cc
     // at which the new map-row / tile-line address bits reach the VRAM bus.
