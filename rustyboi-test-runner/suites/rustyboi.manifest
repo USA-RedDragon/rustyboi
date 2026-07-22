@@ -29,6 +29,7 @@ cartridge-bbd_banking-cgb|cgb|mooneye|test-roms/build/cartridge/bbd_banking.cgb.
 cartridge-ggb81_banking-cgb|cgb|mooneye|test-roms/build/cartridge/ggb81_banking.cgb.mooneye.gbc
 cartridge-hitek_banking-cgb|cgb|mooneye|test-roms/build/cartridge/hitek_banking.cgb.mooneye.gbc
 cartridge-licheng_banking-cgb|cgb|mooneye|test-roms/build/cartridge/licheng_banking.cgb.mooneye.gbc
+cartridge-newgbhk_protection-cgb|cgb|mooneye|test-roms/build/cartridge/newgbhk_protection.cgb.mooneye.gbc
 cartridge-pocketmon_mbc5_banking-dmg|dmg|mooneye|test-roms/build/cartridge/pocketmon_mbc5_banking.dmg.mooneye.gb
 cartridge-sintax_scramble-cgb|cgb|mooneye|test-roms/build/cartridge/sintax_scramble.cgb.mooneye.gbc
 cartridge-tama5_banking-dmg|dmg|mooneye|test-roms/build/cartridge/tama5_banking.dmg.mooneye.gb
