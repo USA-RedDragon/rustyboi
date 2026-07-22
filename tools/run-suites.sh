@@ -175,12 +175,14 @@ threshold() {
         # self-screenshot, graded png + `--scan-frames` (docboy's
         # screen-ever-matches semantics). Regression tripwire vs docboy
         # screenshots -- NOT a hardware oracle; ratchets up, lower DELIBERATELY
-        # when a fix correctly diverges from a docboy screenshot bug. CGB floors
-        # are PROVISIONAL pending SameBoy adjudication. The DMG references
-        # adjudicated DOCBOY-WRONG are already dropped in docboy_transcode.py.
+        # when a fix correctly diverges from a docboy screenshot bug. DMG and CGB
+        # are both adjudicated now: references proven DOCBOY-WRONG (rustyboi ==
+        # SameBoy-from-source at the steady frame) are dropped in
+        # docboy_transcode.py (DOCBOY_WRONG / DOCBOY_WRONG_CGB), so a floor's
+        # denominator is already the honest, artifact-free reference set.
         docboy_diff_dmg)          echo "512 15" ;;  # 512/531; 46 docboy-wrong refs excluded
-        docboy_diff_cgb)          echo "46 15" ;;   # PROVISIONAL (unadjudicated)
-        docboy_diff_cgb_dmg_mode) echo "283 15" ;;  # PROVISIONAL (unadjudicated)
+        docboy_diff_cgb)          echo "46 15" ;;   # 46/96; 17 docboy-wrong refs excluded (SameBoy CGB-C+E)
+        docboy_diff_cgb_dmg_mode) echo "283 15" ;;  # 283/444; 6 docboy-wrong refs excluded
         *)                  echo "" ;;
     esac
 }

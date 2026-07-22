@@ -202,6 +202,50 @@ DOCBOY_WRONG = frozenset({
     "window_turn_off_nops23_sprite_x3_variation_b",
 })
 
+# CGB diff references that are DOCBOY-WRONG: the CGB analogue of DOCBOY_WRONG,
+# now that the CGB corpus is adjudicated too. Each is a docboy F12 self-
+# screenshot that rustyboi disagrees with AND is adjudicated hardware-correct:
+# byte-identical to SameBoy-from-source at BOTH CGB-C and CGB-E (color-correction
+# disabled, 0xF8-masked palette compare, screen-ever-matches frame align) at the
+# steady frame -- docboy is the sole outlier carrying a spurious artifact.
+# Families: LCD-off / PPU-off / STOP-ppu-off / mid-frame turn_off+on panel-clear
+# (docboy fills the retained framebuffer differently than both hardware-anchored
+# emulators), plus a handful of m3_lcdc_win / mealybug window-glitch frames where
+# docboy adds spurious window pixels on an otherwise-exact match. Unlike the DMG
+# set this is keyed on the REFERENCE-PNG stem, not the ROM basename: a docboy ROM
+# can carry several reference frames and only the wrong one is dropped (e.g.
+# stop_ly42_during_hblank keeps its correct _b, drops only docboy-wrong _a).
+# CGB-E revision artifacts (change_bgp_or_bug_checksum_d1*) are NOT here -- those
+# are a legit C-vs-E divergence, not a docboy bug, so both sides stay. See the
+# docboy-differential memory note; the transcoder self-checks that all fire.
+DOCBOY_WRONG_CGB = frozenset({
+    # native cgb (17)
+    "speed_switch_to_double_stop_ppu_off",
+    "halt_ppu_off",
+    "stop_ly42_during_hblank_a",
+    "stop_ppu_off",
+    "turn_off_y42_turn_on_y148_round1_a",
+    "turn_off_y42_turn_on_y148_round2_a",
+    "turn_off_y42_turn_on_y52_wait144_a",
+    "turn_off_y42_turn_on_y52_wait150_a",
+    "turn_off_y48_skip_y16_stall_nops50",
+    "turn_off_y48_skip_y16_stall_nops51",
+    "turn_off_y50_skip_y16_stall_nops100",
+    "turn_off_y50_skip_y16_stall_nops50",
+    "turn_off_y50_skip_y16_stall_nops51",
+    "turn_off_y50_skip_y16_stall_nops99",
+    "turn_off_y50_stall_nops50",
+    "turn_off_y50_stall_nops51",
+    "window_bg_reprise_wx25",
+    # cgb_dmg_mode (6)
+    "change_bg_tile_data_glitch_mealybug_var42",
+    "enable_win_during_pixel_transfer_round1",
+    "m3_lcdc_win_en_change_multiple_wx_bg_0000_win_0000",
+    "m3_lcdc_win_en_change_multiple_wx_bg_ffff_win_ffff",
+    "m3_lcdc_win_en_change_multiple_wx_ly10_second_tile_source",
+    "m3_lcdc_win_en_change_multiple_wx_ly10_second_tile_source_both_bytes",
+})
+
 
 def die(msg):
     sys.exit(f"error: {msg}")
@@ -308,6 +352,15 @@ def classify(model, cat, entry, stats):
     if model == "dmg" and stem in DOCBOY_WRONG:
         stats["docboy_wrong_dropped"].add(stem)
         return None
+
+    # CGB analogue, keyed on the REFERENCE-PNG stem (a docboy ROM may carry
+    # several reference frames; only the docboy-wrong one is dropped). Scoped to
+    # the two adjudicated CGB models; cgb_dmg_ext_mode is untouched.
+    if model in ("cgb", "cgb_dmg_mode") and "framebuffer" in entry:
+        ref_stem = os.path.splitext(os.path.basename(entry["framebuffer"]))[0]
+        if ref_stem in DOCBOY_WRONG_CGB:
+            stats["docboy_wrong_cgb_dropped"].add(ref_stem)
+            return None
 
     disabled = entry.get("enabled") is False
 
@@ -438,11 +491,12 @@ def main():
         report["pin"] = open(sha).read().strip()
 
     grand = defaultdict(int)
+    cgb_wrong_seen = set()  # accumulates across cgb + cgb_dmg_mode passes
     for model in MODELS:
         cfg = load_config(model)
         buckets = {"anchored": [], "diff": [], "deferred": []}
         stats = {"dmg_palette_skips": {}, "cgb_ref_skips": {},
-                 "docboy_wrong_dropped": set()}
+                 "docboy_wrong_dropped": set(), "docboy_wrong_cgb_dropped": set()}
         oracle_counts = Counter()
         anchored_authors = Counter()
         deferred_reasons = Counter()
@@ -469,6 +523,7 @@ def main():
             extra = sorted(stats["docboy_wrong_dropped"] - DOCBOY_WRONG)
             die(f"DOCBOY_WRONG mismatch: {len(missed)} name(s) never matched a "
                 f"DMG ROM {missed}; {len(extra)} unexpected {extra}")
+        cgb_wrong_seen |= stats["docboy_wrong_cgb_dropped"]
 
         for bucket, rows in buckets.items():
             path = os.path.join(MANIFEST_DIR, f"docboy_{bucket}_{model}.manifest")
@@ -496,9 +551,20 @@ def main():
             "dmg_palette_skips": stats["dmg_palette_skips"],
             "cgb_ref_skips": stats["cgb_ref_skips"],
             "docboy_wrong_excluded": sorted(stats["docboy_wrong_dropped"]),
+            "docboy_wrong_cgb_excluded": sorted(stats["docboy_wrong_cgb_dropped"]),
         }
         for k in ("anchored", "diff", "deferred"):
             grand[k] += len(buckets[k])
+
+    # CGB drift guard (checked after the loop: DOCBOY_WRONG_CGB spans the cgb and
+    # cgb_dmg_mode passes, so no single model sees the whole set). A re-pinned
+    # corpus that renamed/removed a ref aborts here instead of silently under- or
+    # over-excluding and quietly moving a docboy floor.
+    if cgb_wrong_seen != DOCBOY_WRONG_CGB:
+        missed = sorted(DOCBOY_WRONG_CGB - cgb_wrong_seen)
+        extra = sorted(cgb_wrong_seen - DOCBOY_WRONG_CGB)
+        die(f"DOCBOY_WRONG_CGB mismatch: {len(missed)} name(s) never matched a "
+            f"CGB ref {missed}; {len(extra)} unexpected {extra}")
 
     report["totals"] = dict(grand)
     os.makedirs(GEN_DIR, exist_ok=True)
