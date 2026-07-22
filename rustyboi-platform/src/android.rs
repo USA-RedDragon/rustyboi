@@ -217,11 +217,6 @@ fn android_main(app: AndroidApp) {
             .with_tag("rustyboi"),
     );
     raw_log("android_main: android_logger initialized");
-    // Force backtraces on so panic hook output is useful in logcat.
-    // SAFETY: single-threaded at this point — android_main has just begun.
-    unsafe {
-        std::env::set_var("RUST_BACKTRACE", "1");
-    }
     // Route Rust panics into logcat so we don't lose the message under
     // a bare tombstone. Capture a backtrace alongside the panic info.
     std::panic::set_hook(Box::new(|info| {

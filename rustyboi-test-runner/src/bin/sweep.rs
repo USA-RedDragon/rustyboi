@@ -299,9 +299,6 @@ const FPS_DEN: u64 = 70_224;
 /// Cache dir for the auto-fetched No-Intro DATs. Override with RB_NOINTRO_DIR
 /// (e.g. to point at DATs fetched offline via tools/fetch-nointro-dats.sh).
 fn nointro_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("RB_NOINTRO_DIR") {
-        return PathBuf::from(d);
-    }
     if let Ok(x) = std::env::var("XDG_CACHE_HOME") {
         return PathBuf::from(x).join("rustyboi/nointro");
     }
@@ -953,14 +950,6 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
                     // the game's own, else the SGB firmware's system border.
                     if let Some(layers) = m.border.as_ref() {
                         write_border(cfg, &row.rom_sha, layers);
-                    }
-                    if std::env::var_os("RB_SWEEP_MEDIA_LOG").is_some() {
-                        let vdur = m.frames as f64 * FPS_DEN as f64 / FPS_NUM as f64;
-                        let adur = m.audio_samples as f64 / AUDIO_RATE as f64;
-                        eprintln!(
-                            "media {} [{tag}] frames={} audio_samples={} v={vdur:.2}s a={adur:.2}s drift={:.3}s video={}",
-                            row.rom_sha, m.frames, m.audio_samples, adur - vdur, m.video_written
-                        );
                     }
                 }
                 Ok(Err(e)) => eprintln!("sweep: media {} [{tag}] failed: {e}", row.rom_sha),

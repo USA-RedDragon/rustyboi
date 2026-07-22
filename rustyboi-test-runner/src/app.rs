@@ -258,25 +258,11 @@ fn parse_hex_u16(v: &str) -> Result<u16, String> {
     u16::from_str_radix(v.trim_start_matches("0x"), 16).map_err(|e| e.to_string())
 }
 
-/// Resolve the worker count: --jobs, else cores-1.
-/// Trace/diagnostic modes and --fail-fast force 1 (streamed stderr output
-/// would interleave; fail-fast must stop at the first failure in case order).
-/// `RB_SRAM_TRACE` streams `SRAM_WRITE`/`SRAM_MAP`/`SRAM_BLAME` the same way, so
-/// it joins the list; it is read from the env rather than a flag, matching
-/// `RB_SRAM_VERBOSE` next to which it is meant to be used.
 fn resolve_jobs(args: &Args) -> usize {
-    let sram_trace = std::env::var_os("RB_SRAM_TRACE").is_some_and(|value| !value.is_empty());
-    resolve_jobs_with(args, sram_trace)
-}
-
-/// The env-free half of [`resolve_jobs`], so tests can exercise the
-/// `RB_SRAM_TRACE` branch without mutating process-global state (which would
-/// race the other tests in this binary).
-fn resolve_jobs_with(args: &Args, sram_trace: bool) -> usize {
-    if args.trace_rom.is_some() || args.fail_fast || args.ss_dump.is_some() || sram_trace {
+    if args.trace_rom.is_some() || args.fail_fast || args.ss_dump.is_some() {
         if args.jobs.is_some_and(|jobs| jobs > 1) {
             eprintln!(
-                "note: --jobs forced to 1 (--trace-rom / --fail-fast / --ss-dump / RB_SRAM_TRACE)"
+                "note: --jobs forced to 1 (--trace-rom / --fail-fast / --ss-dump)"
             );
         }
         return 1;
@@ -510,10 +496,5 @@ mod tests {
             set(&mut a);
             assert_eq!(resolve_jobs(&a), 1);
         }
-        // RB_SRAM_TRACE streams the same way, so it must also force serial.
-        let mut a = args();
-        a.jobs = Some(8);
-        assert_eq!(resolve_jobs_with(&a, true), 1);
-        assert_eq!(resolve_jobs_with(&a, false), 8);
     }
 }

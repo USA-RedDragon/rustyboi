@@ -19,7 +19,6 @@
 mod expectation;
 mod frame;
 mod report;
-mod sramtrace;
 
 pub mod app;
 pub mod cli;
