@@ -258,9 +258,9 @@ class RustyboiActivity : GameActivity() {
 
     /**
      * CRC32 of a ROM file, matching No-Intro's checksum of the raw ROM image.
-     * For a `.zip`, hashes the first contained ROM entry (No-Intro CRCs are of
-     * the uncompressed ROM, not the archive). Returns 0 on any error. The
-     * zip/raw CRC logic lives in [RomScan.crcOfRomStream].
+     * For a `.zip`, hashes whichever entry the Rust loader would extract (No-Intro
+     * CRCs are of the uncompressed ROM, not the archive). Returns 0 on any error.
+     * The zip/raw CRC logic lives in [RomScan.crcOfRomStream].
      */
     private fun computeCrc32(uri: Uri, name: String): Long {
         return try {

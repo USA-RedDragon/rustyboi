@@ -126,11 +126,59 @@ class RomScanTest {
     }
 
     @Test
-    fun crcOfRomBytes_zipWithNoRomEntryIsZero() {
+    fun crcOfRomBytes_zipPicksRomEntryCaseInsensitively() {
+        val romData = ByteArray(64) { (it + 9).toByte() }
+        val zip = buildZip(
+            "data.bin" to ByteArray(4096),  // larger, but the ROM extension wins
+            "GAME.GBC" to romData,
+        )
+        val expected = CRC32().apply { update(romData) }.value
+        assertEquals(expected, RomScan.crcOfRomBytes(zip, "bundle.zip"))
+    }
+
+    // ---- crcOfRomBytes: largest-entry fallback ------------------------------
+    // These mirror the Rust tests in rustyboi-session/src/rom_zip.rs; with no
+    // ROM-extension entry the Rust loader plays the largest entry, so the CRC
+    // must be of that entry (0 here would break No-Intro matching for a zip
+    // that plays perfectly well).
+
+    @Test
+    fun crcOfRomBytes_zipWithNoRomEntryFallsBackToLargest() {
+        val big = ByteArray(4096) { (it xor 0x33).toByte() }
         val zip = buildZip(
             "readme.txt" to "nothing here".toByteArray(),
             "cover.png" to ByteArray(8),
+            "rom.bin" to big,
         )
+        val expected = CRC32().apply { update(big) }.value
+        assertEquals(expected, RomScan.crcOfRomBytes(zip, "bundle.zip"))
+    }
+
+    @Test
+    fun crcOfRomBytes_largestFallbackBreaksTiesTowardEarlierEntry() {
+        val first = ByteArray(1024) { 0x11 }
+        val second = ByteArray(1024) { 0x22 } // same size, later → loses
+        val zip = buildZip("a.bin" to first, "b.bin" to second)
+        val expected = CRC32().apply { update(first) }.value
+        assertEquals(expected, RomScan.crcOfRomBytes(zip, "bundle.zip"))
+    }
+
+    @Test
+    fun crcOfRomBytes_largestFallbackIgnoresDirectoryEntries() {
+        val data = ByteArray(64) { (it * 7).toByte() }
+        val zip = buildZip(
+            "a-very-long-directory-name/" to null,
+            "a-very-long-directory-name/x.bin" to data,
+        )
+        val expected = CRC32().apply { update(data) }.value
+        assertEquals(expected, RomScan.crcOfRomBytes(zip, "bundle.zip"))
+    }
+
+    @Test
+    fun crcOfRomBytes_zipWithOnlyEmptyEntriesIsZero() {
+        // Nothing to extract: Rust hands the raw archive to the cartridge
+        // loader, which rejects it, so there is no ROM to identify.
+        val zip = buildZip("empty.dat" to ByteArray(0), "sub/" to null)
         assertEquals(0L, RomScan.crcOfRomBytes(zip, "bundle.zip"))
     }
 

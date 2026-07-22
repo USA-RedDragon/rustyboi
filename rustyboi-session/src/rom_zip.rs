@@ -8,10 +8,24 @@
 
 use std::io::{Cursor, Read};
 
+/// ROM-image extensions, lowercase, matched as name suffixes.
+///
+/// KEEP IN SYNC with `RomScan.ROM_EXTS` in
+/// `android/romscan/src/main/kotlin/dev/mcswain/rustyboi/RomScan.kt` (the list
+/// cannot be shared across the language boundary).
+const EXTS: [&str; 3] = [".gb", ".gbc", ".sgb"];
+
 /// If `bytes` is a zip, return the contained ROM (a `.gb`/`.gbc`/`.sgb` entry, or
 /// else the largest file); otherwise return `bytes` unchanged. A malformed or
 /// unsupported archive falls back to the raw bytes so the cartridge loader
 /// surfaces the error.
+///
+/// KEEP IN SYNC with `RomScan.crcOfRomStream` in
+/// `android/romscan/src/main/kotlin/dev/mcswain/rustyboi/RomScan.kt`: the Android
+/// library scanner must CRC exactly the entry this function extracts, or zipped
+/// games get a CRC that matches nothing in the No-Intro database. The selection
+/// rule is stated on [`extract_from_zip`] and pinned by the tests below; the
+/// Kotlin unit tests mirror them on the same synthetic archives.
 pub(crate) fn extract_rom(bytes: &[u8]) -> Vec<u8> {
     if bytes.len() < 4 || &bytes[..4] != b"PK\x03\x04" {
         return bytes.to_vec();
@@ -19,9 +33,16 @@ pub(crate) fn extract_rom(bytes: &[u8]) -> Vec<u8> {
     extract_from_zip(bytes).unwrap_or_else(|| bytes.to_vec())
 }
 
+/// Selection rule (the cross-language contract — mirror any change in
+/// `RomScan.kt`, see [`extract_rom`]):
+/// 1. entries are visited in archive order; directory entries are skipped;
+/// 2. the first entry whose lowercased name ends in [`EXTS`] wins outright;
+/// 3. with no such entry, the largest by uncompressed size wins, ties going to
+///    the earlier entry;
+/// 4. if the winner is empty (or the archive is unreadable/has no entries),
+///    nothing is extracted and the raw archive bytes pass through.
 fn extract_from_zip(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
-    const EXTS: [&str; 3] = [".gb", ".gbc", ".sgb"];
     let mut pick: Option<usize> = None;
     let mut largest = (0usize, 0u64);
     for i in 0..archive.len() {
@@ -104,6 +125,32 @@ mod tests {
         let second = vec![0x55u8; 0x900]; // larger, but later — extension match still wins
         let zip = make_zip(&[("a.gbc", &first), ("b.gb", &second)]);
         assert_eq!(extract_rom(&zip), first);
+    }
+
+    #[test]
+    fn extension_match_is_case_insensitive() {
+        let rom = vec![0x77u8; 0x100];
+        let big = vec![0x88u8; 0x900];
+        let zip = make_zip(&[("data.bin", &big), ("GAME.GBC", &rom)]);
+        assert_eq!(extract_rom(&zip), rom);
+    }
+
+    #[test]
+    fn largest_fallback_breaks_ties_toward_the_earlier_entry() {
+        let first = vec![0x99u8; 0x400];
+        let second = vec![0xAAu8; 0x400]; // same size, later → loses
+        let zip = make_zip(&[("a.bin", &first), ("b.bin", &second)]);
+        assert_eq!(extract_rom(&zip), first);
+    }
+
+    #[test]
+    fn largest_fallback_ignores_directory_entries() {
+        let rom = vec![0xBBu8; 0x40];
+        let zip = make_zip(&[
+            ("a-very-long-directory-name/", b""),
+            ("a-very-long-directory-name/x.bin", &rom),
+        ]);
+        assert_eq!(extract_rom(&zip), rom);
     }
 
     #[test]
