@@ -79,6 +79,22 @@ const VF001_STUB: [u8; 6] = [0x11, 0x80, 0x70, 0x3E, 0x9A, 0x12];
 const POCKETMON_MBC5_LOGO_CRC32: u32 = 0x0864_AF13;
 
 /// CRC32 (reflected IEEE) of the 48-byte Vast Fame secondary logo at $0184 on
+/// the general VF001 protection board (`UnlMapper::Vf001Gen`, taizou's hhugboy
+/// `MbcUnlVf001`). hhugboy auto-detects the family by the $0184 byte-sum:
+/// 4844 = "V.fame" (Nv Wang Gedou 2000 and the MBC1-header Zook Z, same logo),
+/// 6127 = "SOUL" (the Gedou Jian Shen / Soul Falchion pair). Keyed on the CRC32
+/// of the same 48-byte window (mGBA-style, strictly more selective than the
+/// sum) so the collision-free hash alone gates detection — no licensed cart can
+/// match a 48-byte CRC32. Only the MBC5-header carts of this pair (Nv Wang, the
+/// Soul Falchion pair) are proven to boot under the current protection model;
+/// the detection is gated to MBC5-family headers so the byte-identical-logo but
+/// still-blank MBC1-header Zook Z is left on its plain-MBC1 path for now.
+const VF001G_LOGO_CRC32: [u32; 2] = [
+    0x42B7_73B8, // "V.fame" — Nv Wang Gedou 2000 (shared with Zook Z)
+    0x906C_2263, // "SOUL"   — Gedou Jian Shen (Soul Falchion) + KF
+];
+
+/// CRC32 (reflected IEEE) of the 48-byte Vast Fame secondary logo at $0184 on
 /// LiCheng / Niutoude boards. mGBA's `_detectUnlMBC` keys on these values and
 /// has shipped them with no licensed-cart false positives; a 48-byte CRC32
 /// window cannot collide with licensed header code in practice.
@@ -326,6 +342,22 @@ pub enum UnlMapper {
     /// payload so no other cart's savestate layout shifts. Detected from the
     /// $0184 secondary-logo CRC32.
     Hitek(HitekState),
+    /// General Vast Fame VF001 protection board (taizou's hhugboy
+    /// `MbcUnlVf001`, CC0). Electrically MBC5; the $6000-$7FFF config register
+    /// file (decoded `addr & 0xF00F`) is driven by a rotate-right + XOR running
+    /// accumulator the boot code seeds by writing $96 to $7000. Two protection
+    /// effects hang off the latched config: (1) a byte-sequence injection — a
+    /// read of a configured (bank,address) makes the next 1-4 ROM reads return
+    /// programmed bytes (an in-place code patch); (2) a bank-0 partial
+    /// replacement — reads of bank 0 from a configured address on are served
+    /// from a configured high bank (overlaying the real entry onto the decoy
+    /// header region). This is a distinct, later protocol from the
+    /// `UnlMapper::Vf001` Legend-of-Heroes board above, so it is a separate
+    /// variant. Unit variant (the config state lives in `Cartridge::vf001g`, as
+    /// the byte-injection counter must advance on immutable reads); detected by
+    /// the $0184 CRC32. Cracks Zook Z, Nv Wang Gedou 2000, Koudai Guaishou,
+    /// Guaishou Go!Go!II, Jieba Tianwang 4, and the Soul Falchion pair.
+    Vf001Gen,
 }
 
 /// Swap-mode latches for `UnlMapper::Hitek`, carried inside the enum variant
@@ -388,6 +420,41 @@ pub struct Vf001State {
     cmd: [u8; 3],
     /// Most recent byte written to any select port (ports 1-3).
     select: u8,
+}
+
+/// Config register file + protection state for `UnlMapper::Vf001Gen` (taizou's
+/// hhugboy `MbcUnlVf001`). Lives on `Cartridge` rather than in the enum payload
+/// because the byte-injection counter (`seq_bytes_left`) must advance on
+/// immutable ROM reads (`Cell`), and to keep `UnlMapper` small + `Copy`. All
+/// fields are volatile logic: `power_on` rebuilds this to `default()`, so a
+/// `reset` powers the protection up clean exactly like a fresh load.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Vf001gState {
+    /// Config mode gate: opened by writing $96 to $7000, closed by $96 to $700F.
+    config_mode: bool,
+    /// Rotate-right-then-XOR running accumulator applied to every known config
+    /// write while `config_mode`. Seeded from the per-cart config byte (0 for
+    /// the auto-detected VF001 carts) on each enable.
+    running_value: u8,
+    /// Latched accumulator for the $6000 port (bank-0 replacement source bank).
+    cur6000: u8,
+    /// Latched accumulator per $700x port ($7000-$700E).
+    cur700x: [u8; 15],
+    /// Byte-injection: trigger (bank, address), length (1-4), and the up-to-4
+    /// bytes returned once triggered.
+    seq_start_bank: u8,
+    seq_start_addr: u16,
+    seq_len: u8,
+    sequence: [u8; 4],
+    /// Bytes remaining to inject; advances on ROM reads, so `Cell` (not part of
+    /// the persisted set — a savestate mid-injection is not a real scenario).
+    #[serde(skip, default)]
+    seq_bytes_left: std::cell::Cell<u8>,
+    /// Bank-0 partial replacement: when enabled, reads of bank 0 from
+    /// `replace_start_addr` on come from `replace_source_bank`.
+    should_replace: bool,
+    replace_start_addr: u16,
+    replace_source_bank: u8,
 }
 
 // MBC1 register ranges
@@ -579,6 +646,12 @@ pub struct Cartridge {
     // manifest `cart=lazy_sram_cs` token; not a savestate property.
     #[serde(skip, default)]
     sram_cs_lazy: bool,
+
+    // General Vast Fame VF001 (`UnlMapper::Vf001Gen`) protection register file +
+    // latched effects. Default (all-zero, config gate closed) for every other
+    // board; volatile logic, rebuilt by `power_on` so `reset` powers up clean.
+    #[serde(default)]
+    vf001g: Vf001gState,
 }
 
 /// The ROM-derived identity of a cartridge: the expanded/padded image plus
@@ -637,6 +710,7 @@ impl Clone for Cartridge {
             rtc_memory_synced: self.rtc_memory_synced.clone(),
             rtc_file: None, // Don't clone file handles
             host_managed_saves: self.host_managed_saves,
+            vf001g: self.vf001g.clone(),
         }
     }
 }
@@ -884,6 +958,7 @@ impl Cartridge {
             rtc_memory_synced: Vec::new(),
             rtc_file: None,
             host_managed_saves: false,
+            vf001g: Vf001gState::default(),
         }
     }
 
@@ -1057,6 +1132,27 @@ impl Cartridge {
             // the mapper is independent of the header byte.
             UnlMapper::Hitek(_) => {
                 return CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
+            }
+            // General VF001 is electrically MBC5; the header type is truthful
+            // for the MBC5-family carts ($19-$1E) and a lie only on Zook Z's
+            // MBC1 header, which decodes as a bare MBC5 (its header declares no
+            // RAM). Derive RAM/battery/rumble from the (truthful-where-present)
+            // header so saves and rumble match the real board.
+            UnlMapper::Vf001Gen => {
+                return match self.cartridge_type {
+                    MBC5_RAM => CartridgeType::MBC5 { ram: true, battery: false, rumble: false },
+                    MBC5_RAM_BATTERY => {
+                        CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
+                    }
+                    MBC5_RUMBLE => CartridgeType::MBC5 { ram: false, battery: false, rumble: true },
+                    MBC5_RUMBLE_RAM => {
+                        CartridgeType::MBC5 { ram: true, battery: false, rumble: true }
+                    }
+                    MBC5_RUMBLE_RAM_BATTERY => {
+                        CartridgeType::MBC5 { ram: true, battery: true, rumble: true }
+                    }
+                    _ => CartridgeType::MBC5 { ram: false, battery: false, rumble: false },
+                };
             }
         }
         match self.cartridge_type {
@@ -1859,6 +1955,14 @@ impl memory::Addressable for Cartridge {
                     return byte;
                 }
             }
+            // General VF001: byte-sequence injection + bank-0 partial
+            // replacement, applied to ROM reads ($0000-$7FFF). Returns the
+            // protection byte when active, else falls through to a normal read.
+            UnlMapper::Vf001Gen if addr < 0x8000 => {
+                if let Some(byte) = self.vf001g_read(addr) {
+                    return byte;
+                }
+            }
             _ => {}
         }
         match addr {
@@ -2384,6 +2488,13 @@ impl memory::Addressable for Cartridge {
                 if matches!(self.unl_mapper, UnlMapper::Vf001(_)) =>
             {
                 self.vf001_write(addr, value);
+            }
+            // General VF001 config register file: the $6000-$7FFF accumulator +
+            // sequence/replacement activation (taizou `MbcUnlVf001::writeMemory`).
+            BANKING_MODE_START..=BANKING_MODE_END
+                if matches!(self.unl_mapper, UnlMapper::Vf001Gen) =>
+            {
+                self.vf001g_write(addr, value);
             }
             // Banking Mode Select (0x6000-0x7FFF)
             BANKING_MODE_START..=BANKING_MODE_END => {

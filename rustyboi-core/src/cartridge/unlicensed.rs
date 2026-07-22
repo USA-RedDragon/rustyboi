@@ -223,6 +223,22 @@ impl Cartridge {
             return UnlMapper::Hitek(HitekState::default());
         }
 
+        // General VF001 protection board (taizou hhugboy `MbcUnlVf001`, CC0):
+        // keyed on the CRC32 of the 48-byte $0184 secondary logo. hhugboy applies
+        // no $7FFF "fixed dump" guard to this family, and the collision-free
+        // 48-byte CRC32 window is the whole gate — no licensed cart can match.
+        // The MBC5-family header gate is conservative: the carts proven to boot
+        // under this protection model (Nv Wang Gedou 2000, the Soul Falchion
+        // pair) all declare a truthful MBC5 header ($19-$1E), while Zook Z shares
+        // the byte-identical "V.fame" logo behind a spoofed MBC1 header ($01) and
+        // does not yet render, so it is left on its plain-MBC1 path. Widen this
+        // gate when the MBC1-header variant is cracked.
+        if super::VF001G_LOGO_CRC32.contains(&logo_crc32)
+            && matches!(data[CARTRIDGE_TYPE_OFFSET], 0x19..=0x1E)
+        {
+            return UnlMapper::Vf001Gen;
+        }
+
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
         // banked-size file) the publisher string in the ROM. The
         // string+type+size gate already implies the blank-header shape in
@@ -401,6 +417,105 @@ impl Cartridge {
             _ => None,
         }
     }
+
+    /// General VF001 config-register write ($6000-$7FFF), a faithful port of
+    /// taizou's hhugboy `MbcUnlVf001::writeMemory`. The port is decoded
+    /// `addr & 0xF00F`. Writing $96 to $7000 opens config mode (seeding the
+    /// running accumulator from the per-cart config byte -- 0 for every
+    /// auto-detected VF001 cart), $96 to $700F closes it. While open, each known
+    /// config write folds the data into a rotate-right-then-XOR running value
+    /// latched per port; a $7000 or $7008 write then activates the byte-injection
+    /// or bank-0-replacement effect from the latched ports.
+    pub(super) fn vf001g_write(&mut self, addr: u16, data: u8) {
+        let st = &mut self.vf001g;
+        let eff = addr & 0xF00F;
+        if eff == 0x7000 && data == 0x96 {
+            st.config_mode = true;
+            st.running_value = 0; // config seed 0 (0x10 is the VF001A variant)
+            return;
+        }
+        if eff == 0x700F && data == 0x96 {
+            st.config_mode = false;
+            return;
+        }
+        if !st.config_mode {
+            return;
+        }
+        // Only $6000 and $7000-$700A are known config ports; ignore the rest
+        // (taizou leaves these unverified, so they are inert).
+        if eff >= 0x700B || (eff < 0x7000 && eff > 0x6000) {
+            return;
+        }
+        // Running accumulator: rotate right one bit, then XOR the written data.
+        st.running_value =
+            (if st.running_value & 1 != 0 { 0x80 } else { 0 }) + (st.running_value >> 1);
+        st.running_value ^= data;
+        if eff >= 0x7000 {
+            st.cur700x[(eff & 0xF) as usize] = st.running_value;
+        } else if eff == 0x6000 {
+            st.cur6000 = st.running_value;
+        }
+        // Byte-injection activation ($7000): $7001-2 start address, $7003 start
+        // bank, $7004-7 the up-to-4 bytes, and $7000's low 3 bits the length
+        // (cmd 4->1 .. 7->4 bytes).
+        if eff == 0x7000 {
+            st.seq_start_bank = st.cur700x[3];
+            st.seq_start_addr = (u16::from(st.cur700x[2]) << 8) + u16::from(st.cur700x[1]);
+            st.sequence = [st.cur700x[4], st.cur700x[5], st.cur700x[6], st.cur700x[7]];
+            st.seq_len = match st.cur700x[0] & 7 {
+                4 => 1,
+                5 => 2,
+                6 => 3,
+                7 => 4,
+                _ => 0,
+            };
+        }
+        // Bank-0 replacement activation ($7008): $7009-a start address, $6000 the
+        // source bank, and $7008's low nibble $F the enable.
+        if eff == 0x7008 {
+            st.replace_start_addr = (u16::from(st.cur700x[10]) << 8) + u16::from(st.cur700x[9]);
+            st.replace_source_bank = st.cur6000;
+            st.should_replace = (st.cur700x[8] & 0xF) == 0xF;
+        }
+    }
+
+    /// General VF001 protection ROM read ($0000-$7FFF), a faithful port of
+    /// taizou's hhugboy `MbcUnlVf001::readMemory`. Returns the injected or
+    /// replaced byte when a protection effect is live, else `None` so the caller
+    /// falls through to a normal ROM read.
+    pub(super) fn vf001g_read(&self, addr: u16) -> Option<u8> {
+        let st = &self.vf001g;
+        // (1) Byte-sequence injection. A read of the configured (bank, address)
+        // arms the sequence; the next `seq_len` ROM reads then return the
+        // programmed bytes in turn (taizou consumes one per ROM read < $8000, so
+        // an injected multi-byte instruction's operand fetches consume it too).
+        // The `>= 4000` literal is taizou's own (decimal): for a switchable-bank
+        // trigger the CPU address is already in $4000-$7FFF, so it is always
+        // satisfied -- the address equality is the real gate.
+        if st.seq_len > 0 {
+            let bank_matches = (st.seq_start_bank == 0 && addr < 0x3FFF)
+                || (u16::from(st.seq_start_bank) == self.get_rom_bank() as u16 && addr >= 4000);
+            if bank_matches && addr == st.seq_start_addr && st.seq_bytes_left.get() == 0 {
+                st.seq_bytes_left.set(st.seq_len);
+            }
+        }
+        if st.seq_bytes_left.get() > 0 {
+            let left = st.seq_bytes_left.get() - 1;
+            st.seq_bytes_left.set(left);
+            let current = st.seq_len - left; // 1-based index into the sequence
+            return Some(st.sequence[usize::from(current - 1)]);
+        }
+        // (2) Bank-0 partial replacement: reads of bank 0 from the configured
+        // address on are served from the configured source bank (overlaying the
+        // real entry onto the decoy header region).
+        if st.should_replace && addr >= st.replace_start_addr && addr < 0x4000 {
+            let base = (usize::from(st.replace_source_bank) << 14)
+                & self.rom_data.len().wrapping_sub(1);
+            return self.rom_data.get(base + addr as usize).copied().or(Some(0xFF));
+        }
+        None
+    }
+
     /// BBD $2000-$3FFF register write (mGBA `_GBBBD`). Matched on `addr &
     /// 0xF0FF`: $2001 latches the data swap mode, $2080 the bank swap mode, and
     /// $2000 reorders the written bank number through the current bank table.

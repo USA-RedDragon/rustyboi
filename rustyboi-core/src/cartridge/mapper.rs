@@ -230,6 +230,13 @@ impl Mapper {
             UnlMapper::Hitek(_) => {
                 return Mapper::Hitek(Hitek { ram_enabled: false, regs: Mbc5State::default() })
             }
+            // General VF001 is electrically MBC5; reuse the already-wired Vf001
+            // board (plain MBC5 bank/RAM registers). The protection lives in the
+            // Cartridge::vf001g register file, applied by the $6000-$7FFF write
+            // and ROM-read intercepts — the board itself just banks.
+            UnlMapper::Vf001Gen => {
+                return Mapper::Vf001(Vf001 { ram_enabled: false, regs: Mbc5State::default() })
+            }
         }
         let mbc3 = |has_ram, timer| {
             Mapper::Mbc3(Mbc3 { ram_enabled: false, rom_bank_low: 1, ram_bank: 0, has_ram, timer })
