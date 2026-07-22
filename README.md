@@ -68,9 +68,9 @@ provisioned automatically by `tools/run-suites.sh setup`, gated by
 | Tripwire (docboy diff, non-gating) | Matching | Total |
 | :--- | ---: | ---: |
 | docboy_diff_dmg | 518 | 531 |
-| docboy_diff_cgb | 62 | 96 |
+| docboy_diff_cgb | 73 | 96 |
 | docboy_diff_cgb_dmg_mode | 283 | 444 |
-| **Tripwire total** | **863** | **1071** |
+| **Tripwire total** | **874** | **1071** |
 <!-- DOCBOY-TRIPWIRE:END -->
 
 ## RetroArch / libretro core

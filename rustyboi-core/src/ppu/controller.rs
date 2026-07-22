@@ -1508,6 +1508,15 @@ pub struct Ppu {
     win_draw_started: bool,
     window_y_triggered: bool,   // Whether WY condition was met this frame
     window_started_this_line: bool, // Whether window started rendering on current scanline
+    // A CGB mid-line WE-off cleared `window_started_this_line` on a line that
+    // HAD already restarted the fetcher in window mode. The restart's FIFO
+    // shortfall outlives the disable, so the mode-3 end still has to let the
+    // renderer run on (image-only) to x==160 instead of cutting the line off
+    // at the closed-form mode-0 boundary. Cleared per line.
+    //
+    // Per-line transient, deliberately OUT of the savestate wire format.
+    #[serde(skip)]
+    win_weoff_deferred_tail: bool,
     // Dot (within-line `ticks`) at which the window began drawing this line.
     // The StartWindowDraw mode-3 penalty becomes non-refundable once the
     // pipeline advances WIN_M3_PENALTY dots past this; used by the late_disable
@@ -2161,6 +2170,15 @@ pub struct Ppu {
     // BG. Cleared at each mode-3 arm.
     #[serde(default)]
     bg_anchor_cc: Option<u64>,
+    // The same origin in line-relative dots (`ticks`), recorded on every
+    // model (bg_anchor_cc is DMG-only). The BG fetch grid reaches display
+    // column C at `bg_anchor_dot + 8 + C`; the CGB WE-off revert column
+    // resolves against that grid. Cleared at each mode-3 arm.
+    //
+    // Per-line transient, deliberately OUT of the savestate wire format: it is
+    // re-derived at the next mode-3 arm, i.e. within one scanline.
+    #[serde(skip)]
+    bg_anchor_dot: Option<u128>,
     // DMG mid-mode-3 SCY write journal: (transition_cc, old, new) — the abs_cc
     // at which the new map-row / tile-line address bits reach the VRAM bus.
     // BG fetch reads resolve SCY against it at their reconstructed hardware
@@ -2348,6 +2366,7 @@ impl Ppu {
             win_wx_penalty_resolved: false,
             win_wx_enable_resolved: false,
             window_started_this_line: false,
+            win_weoff_deferred_tail: false,
             previous_stat_interrupt_line: false,
             mode2_irq_pretriggered_for_next_line: false,
             first_line_after_enable: false,
@@ -2472,6 +2491,7 @@ impl Ppu {
             wg_anchor_cc: None,
             wg_dpre: 0,
             bg_anchor_cc: None,
+            bg_anchor_dot: None,
             bg_scy_hist: Vec::new(),
             bg_scx_hist: Vec::new(),
             we_win_bit_exact: None,
@@ -4646,35 +4666,46 @@ impl Ppu {
                     // window stops here and the next tile fetch reverts to BG
                     // (the hardware window-tile fetch gates on `window-draw-state & win_draw_started`).
                     if self.fetcher.is_fetching_window() {
-                        // The hardware tile-fetch f0 stage commits each window tile's window-vs-BG
-                        // choice at the tile boundary (`xpos == endx`, where the
-                        // window-tile grid is `(xpos + wscx) % tile_len == 0`). A
-                        // WE-off that lands EXACTLY on a window-tile boundary reverts
-                        // to BG at the next tile; one that lands MID-tile lets the
-                        // already-committed in-progress tile finish first (one extra
-                        // window tile). Mapping the hardware `(xpos + wscx) % 8` into
-                        // rustyboi's integer fetcher geometry (xpos == display x +
-                        // (26 - win_x_start), wscx == 256 - win_x_start) gives the
-                        // boundary test `(x + 2 - 2*win_x_start) % 8 == 0`. This is
-                        // the byte-exact discriminator between wx17 (mid-tile -> +1
-                        // tile) and weon_wx18 (boundary -> +0), which share an
-                        // identical fetch-grid cc phase but differ in absolute
-                        // display-x / window alignment.
-                        // Scoped to CGB: the hardware mid-tile boundary completion
-                        // for a WE-off lives in StartWindowDraw::inc behind an
-                        // explicit `&& p.cgb` gate, and the (26 - win_x_start) /
-                        // (256 - win_x_start) xpos/wscx mapping is the CGB
-                        // fetcher geometry. On DMG the revert is NOT latched at
-                        // the write at all: the fetcher re-samples the WE bit at
-                        // each TileNumber step (the tile-number fetch-step kill,
-                        // see we_dot_hist) — a pulse that misses every TileNumber
-                        // leaves the window running.
+                        // The hardware tile-fetch f0 stage commits each window
+                        // tile's window-vs-BG choice against the fetch grid's
+                        // DISPLAY-COLUMN counter (`xpos`), with the WE bit
+                        // sampled one dot late — not against the write's dot
+                        // directly. The BG fetch grid reaches display column C
+                        // at `bg_anchor_dot + 8 + C` (its first TileNumber
+                        // leads its own column by 8), so a WE-off written on
+                        // dot D keeps every window tile whose column satisfies
+                        //     bg_anchor_dot + 8 + C <= D + 1,
+                        // i.e. C <= D - bg_anchor_dot - 7, and reverts to BG
+                        // from the first window-tile column past it.
+                        //
+                        // The columns are the window's own grid: the fetcher is
+                        // currently filling column `x + fifo_size` (what the
+                        // renderer has drawn plus what is still queued), and
+                        // the following window tiles sit every 8 columns after
+                        // it. `stop_window_with_extra` counts TileNumber steps,
+                        // and the in-flight tile only has one left to run when
+                        // it has not reached TileNumber yet, hence the substep
+                        // correction.
+                        //
+                        // Not in Pan Docs, TCAGBD or GBCTR: fitted to
+                        // SameBoy CGB-C/CGB-E on docboy's window_bg_reprise
+                        // family swept over both the window column (WX 8..25)
+                        // and the write dot (the WE-off store moved through the
+                        // line in 4-dot steps), 38/38 exact.
+                        //
+                        // Scoped to CGB: the hardware mid-tile boundary
+                        // completion for a WE-off lives in StartWindowDraw::inc
+                        // behind an explicit `&& p.cgb` gate. On DMG the revert
+                        // is NOT latched at the write at all: the fetcher
+                        // re-samples the WE bit at each TileNumber step (the
+                        // tile-number fetch-step kill, see we_dot_hist) — a
+                        // pulse that misses every TileNumber leaves the window
+                        // running.
                         if cgb_features_enabled {
-                            let wxs = self.fetcher.window_x_start_dbg() as i32;
-                            let phase = (self.x as i32 + 2 - 2 * wxs).rem_euclid(8);
-                            let extra = if phase == 0 { 0u8 } else { 1u8 };
+                            let extra = self.cgb_weoff_extra_tiles();
                             self.fetcher.stop_window_with_extra(extra);
                             self.window_started_this_line = false;
+                            self.win_weoff_deferred_tail = true;
                         } else if at_line_end {
                             // DMG at line end (the wxA6 xpos-166 dance): no
                             // TileNumber will run again this line, so the
@@ -4695,6 +4726,36 @@ impl Ppu {
             }
         }
         self.lcdc = value;
+    }
+
+    /// How many further window TileNumber steps a mid-line CGB WE-off write
+    /// leaves armed (`stop_window_with_extra`'s argument).
+    ///
+    /// The revert lands at the first window-tile column the fetch grid has not
+    /// reached by one dot after the write; see the call site for the grid
+    /// arithmetic. Falls back to the pre-grid boundary heuristic on a line with
+    /// no BG fetch-grid anchor (a window that took over before the line's first
+    /// BG TileNumber), which is the only case the anchor cannot describe.
+    fn cgb_weoff_extra_tiles(&self) -> u8 {
+        let substep_ran_tile_number = self.fetcher.fetch_substep() != 0;
+        let Some(anchor) = self.bg_anchor_dot else {
+            let wxs = self.fetcher.window_x_start_dbg() as i32;
+            let phase = (self.x as i32 + 2 - 2 * wxs).rem_euclid(8);
+            return if phase == 0 { 0 } else { 1 };
+        };
+        // Last display column the grid resolves as window (see call site).
+        let last_col = self.ticks as i64 - anchor as i64 - 7;
+        // The column the fetcher is filling right now: drawn + still queued.
+        let cur_col = self.x as i64 + self.fetcher.pixel_fifo.size() as i64;
+        // Window tiles left, counting the in-flight one: cur_col, +8, +16, ...
+        let left = if cur_col > last_col {
+            0
+        } else {
+            ((last_col - cur_col) / 8 + 1) as u8
+        };
+        // The in-flight tile has already consumed its TileNumber unless the
+        // fetcher is still sitting on it.
+        left.saturating_sub(u8::from(substep_ran_tile_number))
     }
 
     /// Current PPU master clock (`abs_cc`). Used by the interrupt-service LCD
@@ -6138,6 +6199,7 @@ impl Ppu {
         self.win_draw_start = false;
         self.window_y_triggered = false;
         self.window_started_this_line = false;
+        self.win_weoff_deferred_tail = false;
         self.first_line_after_enable = false;
         self.line_153_ly_zeroed = false;
         self.m3_pixels_discarded = 0;
@@ -7246,6 +7308,7 @@ impl Ppu {
             // mode-3-start window-checkpoint semantics.
             // Reset window line flag for new scanline
             self.window_started_this_line = false;
+            self.win_weoff_deferred_tail = false;
             self.win_start_dot = None;
             self.predicted_win_start_dot = None;
             self.win_wx_penalty_resolved = false;
@@ -7477,6 +7540,7 @@ impl Ppu {
             self.wg_anchor_cc = None;
             self.wg_dpre = 0;
             self.bg_anchor_cc = None;
+            self.bg_anchor_dot = None;
             self.bg_scy_hist.clear();
             self.bg_scx_hist.clear();
             // CGB-compat journal flavor (see the CGBWG_* consts): DMG cart on
@@ -8793,7 +8857,9 @@ impl Ppu {
                 // until x==160 so the final window pixel is drawn, then enter
                 // HBlank via the x==160 fallback below. For all other lines
                 // the flush completed the line, so end mode 3 now.
-                if !(self.window_started_this_line && self.x < 160) {
+                if !((self.window_started_this_line || self.win_weoff_deferred_tail)
+                    && self.x < 160)
+                {
                     // DMG wx==166 pixel output-at-xpos166 (mode-3 end). See
                     // apply_dmg_wxa6_lineend_windraw.
                     self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
@@ -9050,13 +9116,20 @@ impl Ppu {
         // DMG BG fetch-grid origin (see bg_wg_apply): the line's first
         // BG TileNumber read runs on this dot, before any sprite stall.
         if cadence_even
-            && !mmio.is_cgb_features_enabled()
             && self.bg_anchor_cc.is_none()
+            && self.bg_anchor_dot.is_none()
             && !self.fetcher.is_fetching_window()
             && self.fetcher.fetch_state_is_tile_number()
             && self.fetcher.get_tile_index() == 0
         {
-            self.bg_anchor_cc = Some(self.abs_cc);
+            // Line-relative twin of bg_anchor_cc, recorded on every model:
+            // the CGB WE-off revert column (see handle_lcdc_write) resolves
+            // the fetch grid in dots-since-line-start, so it needs `ticks`,
+            // not the master clock.
+            self.bg_anchor_dot = Some(self.ticks);
+            if !mmio.is_cgb_features_enabled() {
+                self.bg_anchor_cc = Some(self.abs_cc);
+            }
         }
         let fetcher_lcdc_state =
             self.bg_wg_apply(self.wg_apply(self.fetcher_lcdc_state()), mmio.read(LY));
@@ -9295,7 +9368,9 @@ impl Ppu {
             // is driven off master_cc above and the renderer never reaches
             // this x==160 fallback before that boundary, so we must NOT end
             // mode 3 early here on ordinary (non-window) lines.
-            let window_deferred = self.window_started_this_line && self.mode0_reported_this_line;
+            let window_deferred = (self.window_started_this_line
+                || self.win_weoff_deferred_tail)
+                && self.mode0_reported_this_line;
             if self.m0_time_master.is_none() {
                 self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
                 self.resolve_bgp_spikes(mmio);
