@@ -244,7 +244,11 @@ const NT_OLD2_REORDER: [u8; 8] = [1, 2, 0, 3, 4, 5, 6, 7];
 /// Unlicensed mapper families detected from ROM content at load time. The
 /// header type byte is unreliable on these boards, so this override wins over
 /// `cartridge_type` in `get_cartridge_type`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// Not `Copy`: `Vf001Gen` carries a boxed register file (the one payload too
+/// large to copy on every bus access), so the dispatch matches borrow
+/// `self.unl_mapper` instead of copying it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UnlMapper {
     #[default]
     None,
@@ -363,10 +367,12 @@ pub enum UnlMapper {
     /// from a configured high bank (overlaying the real entry onto the decoy
     /// header region). This is a distinct, later protocol from the
     /// `UnlMapper::Vf001` Legend-of-Heroes board above, so it is a separate
-    /// variant. Unit variant (the config state lives in `Cartridge::vf001g`, as
-    /// the byte-injection counter must advance on immutable reads); detected by
-    /// the $0184 CRC32. Cracks Nv Wang Gedou 2000 and the Soul Falchion pair.
-    Vf001Gen,
+    /// variant. The config state rides in the payload (boxed: it is an order of
+    /// magnitude larger than every other payload, and boxing keeps the enum —
+    /// matched on every bus access — pointer-sized), so no other cart pays for
+    /// it in memory or in the bincode savestate. Detected by the $0184 CRC32.
+    /// Cracks Nv Wang Gedou 2000 and the Soul Falchion pair.
+    Vf001Gen(Box<Vf001gState>),
     /// Vast Fame 8 KiB dual-window board (Jieba Tianwang 4). Electrically an
     /// MBC5+RUMBLE except that the switchable ROM area is banked in 8 KiB
     /// halves through two independent registers instead of one 16 KiB bank:
@@ -475,11 +481,13 @@ pub struct Vf001State {
 }
 
 /// Config register file + protection state for `UnlMapper::Vf001Gen` (taizou's
-/// hhugboy `MbcUnlVf001`). Lives on `Cartridge` rather than in the enum payload
-/// because the byte-injection counter (`seq_bytes_left`) must advance on
-/// immutable ROM reads (`Cell`), and to keep `UnlMapper` small + `Copy`. All
-/// fields are volatile logic: `power_on` rebuilds this to `default()`, so a
-/// `reset` powers the protection up clean exactly like a fresh load.
+/// hhugboy `MbcUnlVf001`). Carried boxed inside the enum variant (not as a
+/// `Cartridge` field) so the bincode savestate layout of every other cart stays
+/// byte-identical — this is the largest of the unlicensed payloads, so it is
+/// the one that must not be paid for by non-users. The byte-injection counter
+/// advances on immutable ROM reads, hence `Cell`. All fields are volatile
+/// logic: `power_on` rebuilds this to `default()`, so a `reset` powers the
+/// protection up clean exactly like a fresh load.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Vf001gState {
     /// Config mode gate: opened by writing $96 to $7000, closed by $96 to $700F.
@@ -582,8 +590,8 @@ pub struct Cartridge {
     // every external-RAM access derived two or three times over (the mapper
     // match, then again inside `get_ram_bank`, then `is_mbc30` on MBC3). Both
     // inputs are fixed at construction: nothing assigns `cartridge_type`, and
-    // the only runtime write to `unl_mapper` (`vf001_write`) mutates the
-    // Vf001 PAYLOAD, never the variant — and the decode ignores that payload.
+    // every runtime write to `unl_mapper` mutates a variant PAYLOAD, never the
+    // variant itself — and the decode ignores all payloads.
     // So unlike `rom_bank_cache` this never needs invalidating. `serde(skip)`
     // deserializes to None = recompute, so it is correct even if consulted
     // before `attach_rom`.
@@ -700,12 +708,6 @@ pub struct Cartridge {
     // manifest `cart=lazy_sram_cs` token; not a savestate property.
     #[serde(skip, default)]
     sram_cs_lazy: bool,
-
-    // General Vast Fame VF001 (`UnlMapper::Vf001Gen`) protection register file +
-    // latched effects. Default (all-zero, config gate closed) for every other
-    // board; volatile logic, rebuilt by `power_on` so `reset` powers up clean.
-    #[serde(default)]
-    vf001g: Vf001gState,
 }
 
 /// The ROM-derived identity of a cartridge: the expanded/padded image plus
@@ -757,14 +759,13 @@ impl Clone for Cartridge {
             mbc7_sensor_y: self.mbc7_sensor_y,
             huc3_rtc: self.huc3_rtc.clone(),
             cam_image: self.cam_image.clone(),
-            unl_mapper: self.unl_mapper,
+            unl_mapper: self.unl_mapper.clone(),
             rocket_boot_logo: self.rocket_boot_logo,
             cgb_support: self.cgb_support.clone(),
             rtc_memory: self.rtc_memory.clone(),
             rtc_memory_synced: self.rtc_memory_synced.clone(),
             rtc_file: None, // Don't clone file handles
             host_managed_saves: self.host_managed_saves,
-            vf001g: self.vf001g.clone(),
         }
     }
 }
@@ -852,8 +853,8 @@ impl Cartridge {
 
 
     /// The detected unlicensed mapper family (None for licensed carts).
-    pub fn unl_mapper(&self) -> UnlMapper {
-        self.unl_mapper
+    pub fn unl_mapper(&self) -> &UnlMapper {
+        &self.unl_mapper
     }
 
     pub fn load(path: &str) -> Result<Self, io::Error> {
@@ -986,6 +987,9 @@ impl Cartridge {
             UnlMapper::Hitek(_) => UnlMapper::Hitek(HitekState::default()),
             // The 8 KiB window registers are volatile; power up on bank 1.
             UnlMapper::Vf8k(_) => UnlMapper::Vf8k(Vf8kState::default()),
+            // General VF001's config register file + latched protection
+            // effects are volatile; power up with the config gate closed.
+            UnlMapper::Vf001Gen(_) => UnlMapper::Vf001Gen(Box::default()),
             other => other,
         };
         Cartridge {
@@ -998,7 +1002,7 @@ impl Cartridge {
             ram_banks,
             rom_path: None,
             save_file: None,
-            mapper: Mapper::from_header(unl_mapper, cartridge_type, mbc1_multicart, rom_banks, ram_banks),
+            mapper: Mapper::from_header(&unl_mapper, cartridge_type, mbc1_multicart, rom_banks, ram_banks),
             mbc1_multicart,
             sram_cs_lazy: false,
             mbc2_ram: vec![0xFF; MBC2_RAM_SIZE],
@@ -1019,7 +1023,6 @@ impl Cartridge {
             rtc_memory_synced: Vec::new(),
             rtc_file: None,
             host_managed_saves: false,
-            vf001g: Vf001gState::default(),
         }
     }
 
@@ -1147,7 +1150,7 @@ impl Cartridge {
     fn decode_cartridge_type(&self) -> CartridgeType {
         // Content-detected unlicensed boards override the (spoofed) header
         // type byte.
-        match self.unl_mapper {
+        match &self.unl_mapper {
             UnlMapper::None => {}
             UnlMapper::WisdomTree => return CartridgeType::WisdomTree,
             UnlMapper::Rocket => return CartridgeType::Rocket,
@@ -1199,7 +1202,7 @@ impl Cartridge {
             // MBC1 header, which decodes as a bare MBC5 (its header declares no
             // RAM). Derive RAM/battery/rumble from the (truthful-where-present)
             // header so saves and rumble match the real board.
-            UnlMapper::Vf001Gen => {
+            UnlMapper::Vf001Gen(_) => {
                 return match self.cartridge_type {
                     MBC5_RAM => CartridgeType::MBC5 { ram: true, battery: false, rumble: false },
                     MBC5_RAM_BATTERY => {
@@ -1946,7 +1949,7 @@ impl Cartridge {
                 cartridge_type: self.cartridge_type,
                 rom_banks: self.rom_banks,
                 ram_banks: self.ram_banks,
-                unl_mapper: self.unl_mapper,
+                unl_mapper: std::mem::take(&mut self.unl_mapper),
                 cgb_support: self.cgb_support.clone(),
                 mbc1_multicart: self.mbc1_multicart,
             },
@@ -2018,7 +2021,7 @@ impl memory::Addressable for Cartridge {
         // descramble, Rocket boot lock + logo window. Licensed carts
         // (UnlMapper::None) skip this entirely.
         let mut addr = addr;
-        match self.unl_mapper {
+        match &self.unl_mapper {
             UnlMapper::SachenMmc1 if addr < 0x8000 => {
                 addr = self.sachen_read_addr(addr, false);
             }
@@ -2037,15 +2040,15 @@ impl memory::Addressable for Cartridge {
             {
                 // Protection value readback through the cart-RAM window;
                 // unmatched reads fall through to normal MBC5 RAM.
-                if let Some(byte) = Self::vf001_protection_read(st, addr) {
+                if let Some(byte) = Self::vf001_protection_read(*st, addr) {
                     return byte;
                 }
             }
             // General VF001: byte-sequence injection + bank-0 partial
             // replacement, applied to ROM reads ($0000-$7FFF). Returns the
             // protection byte when active, else falls through to a normal read.
-            UnlMapper::Vf001Gen if addr < 0x8000 => {
-                if let Some(byte) = self.vf001g_read(addr) {
+            UnlMapper::Vf001Gen(st) if addr < 0x8000 => {
+                if let Some(byte) = self.vf001g_read(st, addr) {
                     return byte;
                 }
             }
@@ -2055,7 +2058,7 @@ impl memory::Addressable for Cartridge {
             UnlMapper::Vf8k(st)
                 if (mmio::CARTRIDGE_BANK_START..=mmio::CARTRIDGE_BANK_END).contains(&addr) =>
             {
-                return self.vf8k_read(st, addr);
+                return self.vf8k_read(*st, addr);
             }
             _ => {}
         }
@@ -2082,12 +2085,12 @@ impl memory::Addressable for Cartridge {
                 // Vast Fame boards descramble the switchable $4000-$7FFF window
                 // on read (mGBA `_GB*Read`); bank 0 (the fixed arm above) is
                 // never scrambled.
-                match self.unl_mapper {
+                match &self.unl_mapper {
                     UnlMapper::Bbd(st) => {
                         Self::reorder_bits(byte, &BBD_DATA_REORDERING[st.data_swap_mode as usize])
                     }
                     UnlMapper::Ggb81(mode) => {
-                        Self::reorder_bits(byte, &GGB81_DATA_REORDERING[usize::from(mode)])
+                        Self::reorder_bits(byte, &GGB81_DATA_REORDERING[usize::from(*mode)])
                     }
                     // Sintax XORs the switchable window with the active per-bank
                     // key (mGBA `_GBSintaxRead`).
@@ -2597,7 +2600,7 @@ impl memory::Addressable for Cartridge {
             // General VF001 config register file: the $6000-$7FFF accumulator +
             // sequence/replacement activation (taizou `MbcUnlVf001::writeMemory`).
             BANKING_MODE_START..=BANKING_MODE_END
-                if matches!(self.unl_mapper, UnlMapper::Vf001Gen) =>
+                if matches!(self.unl_mapper, UnlMapper::Vf001Gen(_)) =>
             {
                 self.vf001g_write(addr, value);
             }
@@ -3212,6 +3215,31 @@ mod tests {
         rom
     }
 
+    // Clean-room 48-byte stand-in for the general-VF001 secondary logo: a plain
+    // ASCII banner (44 bytes) plus a 4-byte suffix computed so the block's
+    // CRC32 equals VF001G_LOGO_CRC32[0] (0x42B7_73B8). No copyrighted logo
+    // bytes.
+    const VF001G_LOGO: [u8; 48] =
+        *b"RUSTYBOI VF001 GENERAL CLEANROOM STANDIN!!!!\x82\xF7\xF9\x01";
+
+    /// 128KB image carrying the general-VF001 signature: a truthful
+    /// MBC5+RAM+BATTERY header ($1B, inside the $19-$1E detection gate), the
+    /// $0184 logo whose CRC32 keys detection, a real Nintendo logo, and a
+    /// per-bank marker byte at each bank's offset 0 and at offset $2000.
+    fn make_vf001g_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x20000]; // 8 banks
+        rom[CARTRIDGE_TYPE_OFFSET] = 0x1B; // MBC5+RAM+BATTERY (truthful)
+        rom[ROM_SIZE_OFFSET] = 0x02; // 128KB / 8 banks
+        rom[RAM_SIZE_OFFSET] = 0x03; // 32KB
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+        rom[0x184..0x1B4].copy_from_slice(&VF001G_LOGO);
+        for bank in 0..8usize {
+            rom[bank * 0x4000] = 0xB0 + bank as u8;
+            rom[bank * 0x4000 + 0x2000] = 0xC0 + bank as u8;
+        }
+        rom
+    }
+
     #[test]
     fn vf8k_detects_and_banks_two_8k_windows() {
         let rom = make_vf8k_rom();
@@ -3257,6 +3285,157 @@ mod tests {
         let mut mbc1 = rom.clone();
         mbc1[CARTRIDGE_TYPE_OFFSET] = 0x01;
         assert_eq!(Cartridge::detect_unl_mapper(&mbc1), UnlMapper::None);
+    }
+
+    /// Drives the general-VF001 config register file the way the boot code
+    /// does: every config write folds its data into a rotate-right-then-XOR
+    /// running accumulator that is then latched into the addressed port, so
+    /// latching a WANTED byte means writing `ror1(running) ^ wanted`.
+    struct Vf001gProgrammer {
+        running: u8,
+    }
+
+    impl Vf001gProgrammer {
+        /// Opens config mode ($96 to $7000), which also zeroes the accumulator.
+        fn open(cart: &mut Cartridge) -> Self {
+            cart.write(0x7000, 0x96);
+            Self { running: 0 }
+        }
+
+        /// Latch `want` into the port at `addr` ($6000 or $7000-$700A).
+        fn latch(&mut self, cart: &mut Cartridge, addr: u16, want: u8) {
+            let rotated = (if self.running & 1 != 0 { 0x80 } else { 0 }) + (self.running >> 1);
+            let data = rotated ^ want;
+            assert!(
+                !(addr & 0xF00F == 0x7000 && data == 0x96),
+                "this write would re-open config mode instead of latching"
+            );
+            self.running = want;
+            cart.write(addr, data);
+        }
+    }
+
+    /// Program the byte-injection effect: a read of (`bank`, `addr`) makes the
+    /// next reads return `bytes` in turn. The $7000 write both latches the
+    /// command port and activates the sequence, so it goes last.
+    fn vf001g_arm_injection(cart: &mut Cartridge, bank: u8, addr: u16, bytes: &[u8; 4], len: u8) {
+        let mut p = Vf001gProgrammer::open(cart);
+        p.latch(cart, 0x7001, (addr & 0xFF) as u8);
+        p.latch(cart, 0x7002, (addr >> 8) as u8);
+        p.latch(cart, 0x7003, bank);
+        for (i, b) in bytes.iter().enumerate() {
+            p.latch(cart, 0x7004 + i as u16, *b);
+        }
+        p.latch(cart, 0x7000, 0x03 + len); // low 3 bits 4..7 => 1..4 bytes
+    }
+
+    /// Program the bank-0 partial replacement: reads of bank 0 from `from` on
+    /// are served out of `source_bank`. The $7008 write activates it, so it
+    /// goes last.
+    fn vf001g_arm_replacement(cart: &mut Cartridge, from: u16, source_bank: u8) {
+        let mut p = Vf001gProgrammer::open(cart);
+        p.latch(cart, 0x6000, source_bank);
+        p.latch(cart, 0x7009, (from & 0xFF) as u8);
+        p.latch(cart, 0x700A, (from >> 8) as u8);
+        p.latch(cart, 0x7008, 0x0F); // low nibble $F = enable
+    }
+
+    #[test]
+    fn vf001g_detects_and_serves_both_protection_effects() {
+        let rom = make_vf001g_rom();
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::Vf001Gen(Box::default())
+        );
+
+        // Electrically MBC5; the truthful $1B header supplies RAM + battery.
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(
+            cart.get_cartridge_type(),
+            CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
+        ));
+
+        // Unprogrammed, the board is a plain MBC5: bank 0 and the switchable
+        // window read their own markers.
+        assert_eq!(cart.read(0x0000), 0xB0);
+        cart.write(0x2000, 0x03);
+        assert_eq!(cart.read(0x4000), 0xB3);
+
+        // (1) Bank-0 partial replacement: reads of bank 0 from $2000 on come
+        // from bank 5 ($C5), while lower bank-0 addresses stay real ($B0).
+        vf001g_arm_replacement(&mut cart, 0x2000, 5);
+        assert_eq!(cart.read(0x2000), 0xC5);
+        assert_eq!(cart.read(0x0000), 0xB0);
+
+        // (2) Byte-sequence injection: a read of bank 0 / $0100 returns the
+        // four programmed bytes in turn, then falls back to real ROM.
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        vf001g_arm_injection(&mut cart, 0, 0x0100, &[0x11, 0x22, 0x33, 0x44], 4);
+        assert_eq!(cart.read(0x0100), 0x11);
+        assert_eq!(cart.read(0x0101), 0x22);
+        assert_eq!(cart.read(0x0102), 0x33);
+        assert_eq!(cart.read(0x0103), 0x44);
+        assert_eq!(cart.read(0x0000), 0xB0, "sequence exhausted -> real ROM");
+    }
+
+    /// The protection register file lives in the `UnlMapper::Vf001Gen` payload,
+    /// so it must survive a savestate round-trip: a restored cart has to serve
+    /// the same latched injection and replacement as the live one.
+    #[test]
+    fn vf001g_protection_state_round_trips_through_a_savestate() {
+        let rom = make_vf001g_rom();
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        vf001g_arm_replacement(&mut cart, 0x2000, 5);
+        vf001g_arm_injection(&mut cart, 0, 0x0100, &[0x11, 0x22, 0x33, 0x44], 4);
+        cart.write(0x2000, 0x03);
+
+        let bytes = bincode::serialize(&cart).unwrap();
+        let mut restored: Cartridge = bincode::deserialize(&bytes).unwrap();
+        restored.attach_rom(rom.clone());
+
+        assert_eq!(
+            restored.unl_mapper(),
+            cart.unl_mapper(),
+            "the whole VF001 register file must serialize"
+        );
+        assert_eq!(restored.read(0x0100), 0x11);
+        assert_eq!(restored.read(0x0101), 0x22);
+        assert_eq!(restored.read(0x0102), 0x33);
+        assert_eq!(restored.read(0x0103), 0x44);
+        assert_eq!(restored.read(0x2000), 0xC5, "replacement still armed");
+        assert_eq!(restored.read(0x4000), 0xB3, "bank register survived too");
+    }
+
+    /// No other board may pay for the VF001 register file: it is inside the
+    /// variant payload, so every other `UnlMapper` serializes to the bare
+    /// variant index.
+    #[test]
+    fn vf001g_register_file_costs_non_users_nothing() {
+        let none = bincode::serialize(&UnlMapper::None).unwrap().len();
+        let vf = bincode::serialize(&UnlMapper::Vf001Gen(Box::default())).unwrap().len();
+        assert_eq!(
+            vf - none,
+            30,
+            "the 30-byte register file must be paid for by VF001 carts alone"
+        );
+    }
+
+    /// The register file is volatile board logic: a reset must power the
+    /// protection up clean (config gate closed, no effect armed), exactly like
+    /// a fresh load — the payload move must not smuggle it into the carried
+    /// domain.
+    #[test]
+    fn vf001g_protection_state_is_volatile_across_reset() {
+        let rom = make_vf001g_rom();
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        vf001g_arm_replacement(&mut cart, 0x2000, 5);
+        vf001g_arm_injection(&mut cart, 0, 0x0100, &[0x11, 0x22, 0x33, 0x44], 4);
+        assert_eq!(cart.read(0x2000), 0xC5);
+
+        cart.reset();
+        assert_eq!(cart.unl_mapper(), &UnlMapper::Vf001Gen(Box::default()));
+        assert_eq!(cart.read(0x0100), rom[0x0100], "injection disarmed");
+        assert_eq!(cart.read(0x2000), 0xC0, "replacement disarmed");
     }
 
     /// Write the correct boot-ROM header checksum into $014D.
@@ -4583,6 +4762,7 @@ mod tests {
             make_rom(POCKET_CAMERA, 0x03),
             make_trimmed_mbc1m(),
             make_vf001_rom(),
+            make_vf001g_rom(),
         ];
         for rom in roms {
             let mut cart = Cartridge::from_bytes(&rom).unwrap();

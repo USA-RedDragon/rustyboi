@@ -159,7 +159,7 @@ impl Mapper {
     /// `rom_banks`/`ram_banks` are the decoded geometry, needed only to infer
     /// MBC1 for an oversized bankless header (see the `ROM_ONLY` arm below).
     pub(super) fn from_header(
-        unl: UnlMapper,
+        unl: &UnlMapper,
         cartridge_type: u8,
         multicart: bool,
         rom_banks: usize,
@@ -235,9 +235,9 @@ impl Mapper {
             }
             // General VF001 is electrically MBC5; reuse the already-wired Vf001
             // board (plain MBC5 bank/RAM registers). The protection lives in the
-            // Cartridge::vf001g register file, applied by the $6000-$7FFF write
-            // and ROM-read intercepts — the board itself just banks.
-            UnlMapper::Vf001Gen => {
+            // UnlMapper::Vf001Gen payload's register file, applied by the
+            // $6000-$7FFF write and ROM-read intercepts — the board just banks.
+            UnlMapper::Vf001Gen(_) => {
                 return Mapper::Vf001(Vf001 { ram_enabled: false, regs: Mbc5State::default() })
             }
             // The 8 KiB dual-window board keeps its two page registers in the

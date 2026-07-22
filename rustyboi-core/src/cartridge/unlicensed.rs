@@ -236,7 +236,7 @@ impl Cartridge {
         if super::VF001G_LOGO_CRC32.contains(&logo_crc32)
             && matches!(data[CARTRIDGE_TYPE_OFFSET], 0x19..=0x1E)
         {
-            return UnlMapper::Vf001Gen;
+            return UnlMapper::Vf001Gen(Box::default());
         }
 
         // Vast Fame 8 KiB dual-window board (Jieba Tianwang 4). There is no
@@ -448,7 +448,9 @@ impl Cartridge {
     /// latched per port; a $7000 or $7008 write then activates the byte-injection
     /// or bank-0-replacement effect from the latched ports.
     pub(super) fn vf001g_write(&mut self, addr: u16, data: u8) {
-        let st = &mut self.vf001g;
+        let UnlMapper::Vf001Gen(ref mut st) = self.unl_mapper else {
+            return;
+        };
         let eff = addr & 0xF00F;
         if eff == 0x7000 && data == 0x96 {
             st.config_mode = true;
@@ -504,8 +506,7 @@ impl Cartridge {
     /// taizou's hhugboy `MbcUnlVf001::readMemory`. Returns the injected or
     /// replaced byte when a protection effect is live, else `None` so the caller
     /// falls through to a normal ROM read.
-    pub(super) fn vf001g_read(&self, addr: u16) -> Option<u8> {
-        let st = &self.vf001g;
+    pub(super) fn vf001g_read(&self, st: &Vf001gState, addr: u16) -> Option<u8> {
         // (1) Byte-sequence injection. A read of the configured (bank, address)
         // arms the sequence; the next `seq_len` ROM reads then return the
         // programmed bytes in turn (taizou consumes one per ROM read < $8000, so
