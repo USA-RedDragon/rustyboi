@@ -659,6 +659,11 @@ fn wy2_disabled() -> u64 { u64::MAX }
 // Dots into a line before which the window-Y comparator's line input is not
 // yet valid, so a scheduled re-check cannot match (see `run_wy_recheck`).
 const WY_RECHECK_LY_VALID_DOT: u128 = 3;
+
+// Line-tail dot from which a CGB PPU's raw line counter -- the window-Y
+// comparator's line input in single speed -- already reads the NEXT line (see
+// `wy_comparator_ly`).
+const CGB_WY_RAW_LY_INC_DOT: u128 = 450;
 fn pnow_disabled() -> u64 { u64::MAX }
 fn win_y_pos_init() -> u8 { 0xFF }
 
@@ -4738,7 +4743,7 @@ impl Ppu {
         // a WY store does, so a window-enable that is only briefly set while
         // WY == LY still arms the window for the rest of the frame.
         let cc = self.write_cc(ds);
-        self.arm_wy_recheck(cc, ds, cgb_features_enabled);
+        self.arm_wy_recheck(cc, ds);
         self.stat_sched_touched();
     }
 
@@ -5602,7 +5607,7 @@ impl Ppu {
         }
         if self.wy_recheck_cc != wy2_disabled() && self.wy_recheck_cc <= cc {
             self.wy_recheck_cc = wy2_disabled();
-            self.run_wy_recheck();
+            self.run_wy_recheck(mmio.is_cgb(), mmio.is_cgb_features_enabled(), ds);
         }
         if self.scy_apply_cc != wy2_disabled() && self.scy_apply_cc <= cc {
             self.scy_delayed = self.scy_pending;
@@ -6274,7 +6279,7 @@ impl Ppu {
         let delay = (base - ds as i64).max(0) as u64;
         self.wy2_pending = value;
         self.wy2_apply_cc = cc + delay;
-        self.arm_wy_recheck(cc, ds, mmio.is_cgb_features_enabled());
+        self.arm_wy_recheck(cc, ds);
         self.stat_sched_touched();
     }
 
@@ -6285,13 +6290,8 @@ impl Ppu {
     /// line for only a couple of M-cycles still arms the window for the rest
     /// of the frame. Skipped once the latch is set (the comparison is sticky,
     /// so a re-run can only ever set it again).
-    fn arm_wy_recheck(&mut self, cc: u64, ds: bool, cgb_features: bool) {
-        // Pre-CGB only. The comparator's line input is the raw line counter,
-        // whose phase at the line tail differs between the two cores; on CGB
-        // rustyboi's `internal_ly` does not reproduce it, and re-running the
-        // comparison there latches a line early against gambatte's cgb04c
-        // late_wy oracles (real silicon). The DMG phase is the one this models.
-        if self.disabled || self.window_y_triggered || cgb_features {
+    fn arm_wy_recheck(&mut self, cc: u64, ds: bool) {
+        if self.disabled || self.window_y_triggered {
             return;
         }
         // 4 dots (8 cc at double speed) after the store, quantized onto the
@@ -6301,7 +6301,16 @@ impl Ppu {
     }
 
     /// Run a scheduled window-Y comparison (see `arm_wy_recheck`).
-    fn run_wy_recheck(&mut self) {
+    fn run_wy_recheck(&mut self, cgb_hw: bool, cgb_features: bool, ds: bool) {
+        // Double speed re-phases the comparison onto a different sub-dot of
+        // the fetch grid (SameBoy quantizes it with `wy_check_modulo + 6`
+        // there against `+ 0` in CGB single speed), and rustyboi's CGB
+        // double-speed write-vs-LCD phase at the line tail sits several dots
+        // off SameBoy's, so the store dot itself is not adjudicable. Left
+        // unmodelled rather than approximated (gambatte late_wy_*_ds_*).
+        if cgb_hw && ds {
+            return;
+        }
         if self.disabled
             || self.window_y_triggered
             || !self.lcdc_has(LCDCFlags::WindowDisplayEnable)
@@ -6314,9 +6323,77 @@ impl Ppu {
         if self.ticks < WY_RECHECK_LY_VALID_DOT {
             return;
         }
-        if self.wy1 == self.internal_ly() {
+        // A CGB single-speed store whose scheduled comparison lands AFTER the
+        // window's start column has already been fetched does not arm the
+        // window at all: on real cgb04c the mid-frame comparator has no later
+        // checkpoint this frame, so the window never appears (gambatte
+        // late_wy_* `_2`/`_3`, real silicon). SameBoy's model arms it sticky
+        // and would show the window on the next line, which cgb04c does not --
+        // this suppression tracks the silicon, not SameBoy. The boundary is the
+        // window's fetch-start dot: a WX>=7 window draws from x = WX-7 after the
+        // first BG tile fill (`warmup + 8 + (WX-7)` past the mode-3 arm); a WX<7
+        // window takes the stream over at x == 0 with no BG-fill (`warmup`). The
+        // SCX fine-scroll discard is consumed WITHIN the first fetch step, so --
+        // unlike the window-ENABLE commit dot in `set_lcdc_visible`, compared
+        // against the raw write dot -- it does not shift this grid-quantized
+        // boundary for scx&7 <= 4 (the 4-dot-quantized recheck dot already
+        // absorbs the sub-tile offset). scx&7 == 5 is the exception: its
+        // window-tile fetch runs a dot later in the mode-3 dispatch AND its
+        // whole recheck grid lands one 4-dot step later, so the arm/suppress
+        // boundary tracks it a full step out. Derived from the cgb04c
+        // late_wy_FFto2_ly2_scx{2,3,5} oracles (real silicon): scx2/3 suppress
+        // from the same dot as scx0, scx5 one grid step later.
+        if cgb_hw && self.state == State::PixelTransfer {
+            let wx = self.m3_scheduled_wx as i64;
+            let warmup = if cgb_features {
+                CGB_PIXEL_TRANSFER_WARMUP as i64
+            } else {
+                DMG_PIXEL_TRANSFER_WARMUP as i64
+            };
+            let scx5_step = if wx <= 7 && (self.m3_arm_scx & 7) == 5 { 4 } else { 0 };
+            let commit_dot = self.m3_arm_dot as i64
+                + warmup
+                + if wx >= 7 { 8 + (wx - 7) } else { 0 }
+                + scx5_step
+                - 1;
+            if (self.ticks as i64) >= commit_dot {
+                return;
+            }
+        }
+        // The scheduled comparison reads the value the store itself wrote --
+        // it is that store that schedules it, and the comparator is fed WY
+        // directly. `wy1`'s couple-of-cc apply delay governs only the periodic
+        // checkpoints, and a store landing late on the 4-dot grid gets its
+        // re-check before that delay has elapsed.
+        let wy = if self.wy1_apply_cc != wy2_disabled() { self.wy1_pending } else { self.wy1 };
+        if wy == self.wy_comparator_ly(cgb_hw, ds) {
             self.window_y_triggered = true;
         }
+    }
+
+    /// Line value the window-Y comparator sees right now.
+    ///
+    /// A CGB PPU in single speed feeds the comparator the RAW line counter,
+    /// which has already advanced across the line tail; every other
+    /// configuration (pre-CGB, and a CGB in double speed) feeds it the same
+    /// lagging LY-compare value the LYC comparator uses, which still holds the
+    /// previous line's number there. SameBoy `Core/display.c` `wy_check`:
+    /// `comparison = current_line`, overridden by `ly_for_comparison` only
+    /// when `(!GB_is_cgb(gb) || gb->cgb_double_speed)`.
+    ///
+    /// The two line-tail checkpoints in `update_window_y_latch` bracket the
+    /// DMG advance (450 compares `ly`, 454 compares `ly + 1`); the CGB advance
+    /// is one M-cycle earlier, at 450. Adjudicated against SameBoy CGB-C/DMG
+    /// with the WY store swept through the line tail an M-cycle at a time:
+    /// both cores stop arming one step apart, and at the step in between
+    /// SameBoy reports `current_line = ly + 1` while `ly_for_comparison` is
+    /// still `ly` (gambatte late_wy_* `_2` variants, real cgb04c/dmg08).
+    fn wy_comparator_ly(&self, cgb_hw: bool, ds: bool) -> u8 {
+        let ly = self.internal_ly();
+        if !cgb_hw || ds || self.ticks < CGB_WY_RAW_LY_INC_DOT {
+            return ly;
+        }
+        if ly as u32 + 1 >= stat_irq::LCD_LINES_PER_FRAME { 0 } else { ly + 1 }
     }
 
     /// FF47 (BGP) write hook. The CPU readback is immediate (handled by mmio), but
