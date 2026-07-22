@@ -189,6 +189,17 @@ impl Mapper {
                 return Mapper::NtOld(NtOld { state: NtState::default(), v2: true, ram_enabled: false })
             }
             UnlMapper::ForceMbc1 => return mbc1(false),
+            // Header-liar re-linked to MBC5 banking (POCKETMON bootleg): plain
+            // MBC5+RAM registers, no protection intercepts.
+            UnlMapper::ForceMbc5 => {
+                return Mapper::Mbc5(Mbc5 {
+                    ram_enabled: false,
+                    regs: Mbc5State::default(),
+                    has_ram: true,
+                    rumble: false,
+                    rumble_motor: false,
+                })
+            }
             UnlMapper::M161 => return Mapper::M161(M161 { state: M161State::default() }),
             UnlMapper::Vf001(_) => {
                 return Mapper::Vf001(Vf001 { ram_enabled: false, regs: Mbc5State::default() })

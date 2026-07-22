@@ -65,6 +65,19 @@ const LOGO_SUM_VF001_LOH: u32 = 4593;
 const VF001_STUB_OFFSET: usize = 0x32FC;
 const VF001_STUB: [u8; 6] = [0x11, 0x80, 0x70, 0x3E, 0x9A, 0x12];
 
+/// CRC32 (reflected IEEE) of the 48 bytes at $0184 on the Hong Kong
+/// "POCKETMON" Pokemon Red bootleg: a re-linked Pokemon that the bootlegger
+/// converted from MBC1 to MBC5-style linear banking (a full-width bank number
+/// written to $2000-$2FFF) while leaving an MBC1+RAM+BATTERY header ($03) in
+/// place. On a real 5-bit MBC1 the game's `ld a,$21 / ld ($2000),a` folds bank
+/// 33 down to bank 1, whose relocated code is illegal (0xF4 at $4004) and the
+/// cart dies; presenting the full byte selects the intended bank (physical
+/// bank 33 byte-matches Pocket Monsters Aka bank 1 $4672, only the relinked
+/// jump targets differ). A 48-byte CRC32 window plus the MBC1 header guard
+/// cannot collide with a licensed cart. See the GBAtemp "Patch a game from
+/// MBC1 to MBC5" bootleg-conversion technique.
+const POCKETMON_MBC5_LOGO_CRC32: u32 = 0x0864_AF13;
+
 /// CRC32 (reflected IEEE) of the 48-byte Vast Fame secondary logo at $0184 on
 /// LiCheng / Niutoude boards. mGBA's `_detectUnlMBC` keys on these values and
 /// has shipped them with no licensed-cart false positives; a 48-byte CRC32
@@ -234,6 +247,13 @@ pub enum UnlMapper {
     /// Knick-Knack (Sachen dump with a Tetris header), Pocket Monsters
     /// GO!GO!GO! 256KB dumps. Routed as MBC1 with no RAM.
     ForceMbc1,
+    /// Header-liar that is electrically a plain MBC5+RAM+BATTERY behind an
+    /// MBC1+RAM+BATTERY header: the Hong Kong "POCKETMON" Pokemon Red bootleg,
+    /// re-linked from MBC1 to MBC5-style linear banking (the game writes a
+    /// full-width bank number to $2000-$2FFF; a 5-bit MBC1 mask would fold it
+    /// and crash). No scramble/protection — just wider bank lines. Detected by
+    /// the $0184 CRC32 signature plus the MBC1 header guard.
+    ForceMbc5,
     /// M161 (Mani 4 in 1, DMG-601): a one-shot latch that maps one of eight
     /// whole-32KB banks. The header spoofs MBC3+RAM+BAT ($10), so it is
     /// content-detected (256KB + title "TETRIS SET").
@@ -1001,6 +1021,11 @@ impl Cartridge {
             UnlMapper::NtOld2 => return CartridgeType::NtOld { v2: true },
             UnlMapper::ForceMbc1 => {
                 return CartridgeType::MBC1 { ram: false, battery: false }
+            }
+            // POCKETMON bootleg: electrically MBC5+RAM+BATTERY behind the MBC1
+            // header. The declared RAM (header $03 = 32KB) is kept for saves.
+            UnlMapper::ForceMbc5 => {
+                return CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
             }
             UnlMapper::M161 => return CartridgeType::M161,
             // VF001 is electrically a normal MBC5+RAM+BATTERY (header $1B is

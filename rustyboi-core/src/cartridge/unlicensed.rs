@@ -165,6 +165,18 @@ impl Cartridge {
         // (All known LiCheng dumps carry the $01 header, so this passes on
         // type alone; the size clause is the belt-and-suspenders half.)
         let logo_crc32 = crate::checksum::crc32(&data[0x184..0x1B4]);
+
+        // Hong Kong "POCKETMON" Pokemon Red bootleg: an MBC1+RAM+BATTERY header
+        // over a game re-linked to MBC5-style full-width banking. Keyed on the
+        // 48-byte $0184 CRC32 signature, gated on the MBC1-family header byte so
+        // the (impossible-to-collide) CRC alone never touches a licensed cart.
+        // Electrically a plain MBC5+RAM+BATTERY with no scramble.
+        if logo_crc32 == super::POCKETMON_MBC5_LOGO_CRC32
+            && matches!(data[CARTRIDGE_TYPE_OFFSET], 0x01..=0x03)
+        {
+            return UnlMapper::ForceMbc5;
+        }
+
         let claimed_size = 0x8000usize.checked_shl(u32::from(rom_size_code)).unwrap_or(0);
         if LICHENG_LOGO_CRC32.contains(&logo_crc32)
             && (data[CARTRIDGE_TYPE_OFFSET] == 0x01 || data.len() != claimed_size)
