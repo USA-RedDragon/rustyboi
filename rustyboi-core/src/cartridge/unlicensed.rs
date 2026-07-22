@@ -203,6 +203,14 @@ impl Cartridge {
             return UnlMapper::Sintax(SintaxState::default());
         }
 
+        // HITEK (Vast Fame family): keyed on the CRC32 of the 48-byte $0184
+        // secondary logo (mGBA `_detectUnlMBC`). The $7FFF != $01 guard mirrors
+        // mGBA/hhugboy: a matching $01 there marks a cracked/decrypted dump that
+        // already runs as plain MBC5, so the descrambler must NOT be applied.
+        if logo_crc32 == HITEK_LOGO_CRC32 && data[0x7FFF] != 0x01 {
+            return UnlMapper::Hitek(HitekState::default());
+        }
+
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
         // banked-size file) the publisher string in the ROM. The
         // string+type+size gate already implies the blank-header shape in
@@ -505,6 +513,54 @@ impl Cartridge {
         }
         self.unl_mapper = UnlMapper::Sintax(st);
     }
+    /// HITEK write dispatch (mGBA `_GBHitek`): the two swap-mode ports layered
+    /// over plain MBC5 write semantics. The register is selected by
+    /// `addr & 0xF0FF`, so it fires regardless of the middle address nibble the
+    /// game happens to spray. HitekState is Copy, so the swap modes are edited
+    /// on a local and written back once (no split borrow). mGBA also lists a
+    /// `case 0x300`, but `addr & 0xF0FF` can never be 0x300 (bits 8-9 are
+    /// cleared by the mask), so that branch is dead on hardware and omitted.
+    pub(super) fn hitek_write(&mut self, addr: u16, value: u8) {
+        let UnlMapper::Hitek(mut st) = self.unl_mapper else {
+            return;
+        };
+        let mut value = value;
+        match addr & 0xF0FF {
+            // Bank-select: the written bank number is bit-reordered before it
+            // reaches the MBC5 low-bank register.
+            0x2000 => {
+                value =
+                    Self::reorder_bits(value, &HITEK_BANK_REORDERING[(st.bank_swap_mode & 7) as usize])
+            }
+            // Program the data-swap mode; the raw value still lands in the MBC5
+            // low-bank register below, exactly as on hardware/mGBA.
+            0x2001 => st.data_swap_mode = value & 7,
+            // Program the bank-swap mode (likewise falls through to MBC5).
+            0x2080 => st.bank_swap_mode = value & 7,
+            _ => {}
+        }
+        self.unl_mapper = UnlMapper::Hitek(st);
+        // Plain MBC5 write semantics for the effective (addr, value). HITEK has
+        // no rumble and no banking-mode register, so $6000-$7FFF is inert.
+        if let Mapper::Hitek(m) = &mut self.mapper {
+            match addr {
+                RAM_ENABLE_START..=RAM_ENABLE_END => {
+                    m.ram_enabled = (value & 0x0F) == 0x0A
+                }
+                ROM_BANK_SELECT_START..=ROM_BANK_SELECT_END => {
+                    if addr <= 0x2FFF {
+                        m.regs.rom_bank_low = value;
+                    } else {
+                        m.regs.rom_bank_high = value & 0x01;
+                    }
+                }
+                RAM_BANK_ROM_BANK_HIGH_START..=RAM_BANK_ROM_BANK_HIGH_END => {
+                    m.regs.ram_bank = value;
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 // --- board struct + banking ---------------------------------------------
@@ -708,6 +764,29 @@ pub(super) struct Sintax {
 }
 
 impl Banking for Sintax {
+    fn rom_bankn(&self, g: Geom) -> usize {
+        let bank =
+            (self.regs.rom_bank_low as usize) | ((self.regs.rom_bank_high as usize & 0x01) << 8);
+        bank % g.rom_banks
+    }
+    fn rom_bank0(&self, _g: Geom) -> usize {
+        0
+    }
+    fn ram_bank(&self, g: Geom) -> usize {
+        (self.regs.ram_bank & 0x0F) as usize % g.ram_banks.max(1)
+    }
+}
+
+/// HITEK: electrically MBC5+RAM+BATTERY. The two swap-mode ports ($2001/$2080),
+/// the $2000 bank reorder (`hitek_write`), and the $4000-$7FFF read reorder are
+/// applied around this board; the bank math is plain MBC5.
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct Hitek {
+    pub ram_enabled: bool,
+    pub regs: Mbc5State,
+}
+
+impl Banking for Hitek {
     fn rom_bankn(&self, g: Geom) -> usize {
         let bank =
             (self.regs.rom_bank_low as usize) | ((self.regs.rom_bank_high as usize & 0x01) << 8);

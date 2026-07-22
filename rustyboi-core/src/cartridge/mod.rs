@@ -157,6 +157,40 @@ const SINTAX_BANK_REORDER: [[u8; 8]; 16] = [
     [0, 1, 2, 3, 4, 5, 6, 7],
 ];
 
+/// CRC32 (reflected IEEE) of the 48-byte $0184 secondary logo on HITEK boards
+/// (Terrifying 911, Shuihu Zhuan). mGBA's `_detectUnlMBC` keys on this value.
+const HITEK_LOGO_CRC32: u32 = 0x4FDA_B691;
+
+/// HITEK data-bit reordering tables, selected by the data-swap mode the game
+/// programs at boot (write to $2001). A read of a switchable ROM bank
+/// ($4000-$7FFF) returns `reorder_bits(rom_byte, table)`; bank 0 is unmodified.
+/// Verbatim from mGBA `_hitekDataReordering`.
+const HITEK_DATA_REORDERING: [[u8; 8]; 8] = [
+    [0, 1, 2, 3, 4, 5, 6, 7],
+    [0, 6, 5, 3, 4, 1, 2, 7],
+    [0, 5, 6, 3, 4, 2, 1, 7],
+    [0, 6, 2, 3, 4, 5, 1, 7],
+    [0, 6, 1, 3, 4, 5, 2, 7],
+    [0, 1, 6, 3, 4, 5, 2, 7],
+    [0, 2, 6, 3, 4, 1, 5, 7],
+    [0, 6, 2, 3, 4, 1, 5, 7],
+];
+
+/// HITEK bank-number reordering tables, selected by the bank-swap mode the game
+/// programs at boot (write to $2080). A bank-select write to $2000 stores
+/// `reorder_bits(value, table)` as the low ROM-bank byte. Verbatim from mGBA
+/// `_hitekBankReordering`.
+const HITEK_BANK_REORDERING: [[u8; 8]; 8] = [
+    [0, 1, 2, 3, 4, 5, 6, 7],
+    [3, 2, 1, 0, 4, 5, 6, 7],
+    [2, 1, 0, 3, 4, 5, 6, 7],
+    [1, 0, 3, 2, 4, 5, 6, 7],
+    [0, 3, 2, 1, 4, 5, 6, 7],
+    [2, 3, 0, 1, 4, 5, 6, 7],
+    [3, 0, 1, 2, 4, 5, 6, 7],
+    [2, 0, 3, 1, 4, 5, 6, 7],
+];
+
 // Lock-phase values shared by the Sachen and Rocket boot state machines
 // (the board powers up locked and unlocks in DMG -> CGB -> unlocked phases).
 const UNL_LOCKED_DMG: u8 = 0;
@@ -264,6 +298,25 @@ pub enum UnlMapper {
     /// the small scramble state in the enum payload (as `Vf001` does) so every
     /// other cart's bincode savestate layout stays byte-identical.
     Sintax(SintaxState),
+    /// HITEK (Vast Fame family): electrically a plain MBC5+RAM+BATTERY with two
+    /// added protections (mGBA `_GBHitek`). A boot-programmed data-swap mode
+    /// bit-reorders every switchable-bank ($4000-$7FFF) ROM read, and a
+    /// bank-swap mode bit-reorders each bank-select value written to $2000. The
+    /// two swap modes are the board's volatile state, carried in the variant
+    /// payload so no other cart's savestate layout shifts. Detected from the
+    /// $0184 secondary-logo CRC32.
+    Hitek(HitekState),
+}
+
+/// Swap-mode latches for `UnlMapper::Hitek`, carried inside the enum variant
+/// (not as `Cartridge` fields) so every other cart's bincode savestate layout
+/// stays byte-identical. Both power up at 0 (the identity permutation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HitekState {
+    /// Selects `HITEK_DATA_REORDERING`; set by a write to $2001 (`value & 7`).
+    data_swap_mode: u8,
+    /// Selects `HITEK_BANK_REORDERING`; set by a write to $2080 (`value & 7`).
+    bank_swap_mode: u8,
 }
 
 /// Boot-programmed data-scramble state for `UnlMapper::Sintax`. Held inside the
@@ -799,6 +852,8 @@ impl Cartridge {
             // Sintax's scramble state is volatile; power up at the mode-$F
             // identity + zero XOR so reset() matches a fresh load.
             UnlMapper::Sintax(_) => UnlMapper::Sintax(SintaxState::default()),
+            // HITEK's swap modes are volatile board logic; power up at 0.
+            UnlMapper::Hitek(_) => UnlMapper::Hitek(HitekState::default()),
             other => other,
         };
         Cartridge {
@@ -996,6 +1051,11 @@ impl Cartridge {
             UnlMapper::Sintax(_) => {
                 return CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
             }
+            // HITEK is electrically MBC5+RAM+BATTERY; decode it explicitly so
+            // the mapper is independent of the header byte.
+            UnlMapper::Hitek(_) => {
+                return CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
+            }
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -1054,6 +1114,7 @@ impl Cartridge {
             Mapper::Bbd(m) => m.ram_enabled,
             Mapper::Ggb81(m) => m.ram_enabled,
             Mapper::Sintax(m) => m.ram_enabled,
+            Mapper::Hitek(m) => m.ram_enabled,
             _ => false,
         }
     }
@@ -1831,6 +1892,11 @@ impl memory::Addressable for Cartridge {
                     // Sintax XORs the switchable window with the active per-bank
                     // key (mGBA `_GBSintaxRead`).
                     UnlMapper::Sintax(st) => byte ^ st.rom_bank_xor,
+                    // HITEK bit-reorders the switchable window through the
+                    // boot-programmed data-swap mode (mGBA `_GBHitekRead`).
+                    UnlMapper::Hitek(st) => {
+                        Self::reorder_bits(byte, &HITEK_DATA_REORDERING[(st.data_swap_mode & 7) as usize])
+                    }
                     _ => byte,
                 }
             }
@@ -1944,6 +2010,17 @@ impl memory::Addressable for Cartridge {
                     // Sintax is electrically MBC5+RAM; RAM reads are plain (only
                     // the ROM read path is XOR-descrambled).
                     Mapper::Sintax(m) => {
+                        if m.ram_enabled
+                            && let Some(offset) = self.banked_ram_offset(addr)
+                        {
+                            self.ram_data[offset]
+                        } else {
+                            0xFF
+                        }
+                    }
+                    // HITEK is electrically MBC5+RAM; RAM reads are plain (only
+                    // the ROM read path is reordered).
+                    Mapper::Hitek(m) => {
                         if m.ram_enabled
                             && let Some(offset) = self.banked_ram_offset(addr)
                         {
@@ -2126,6 +2203,14 @@ impl memory::Addressable for Cartridge {
                 if matches!(self.unl_mapper, UnlMapper::Sintax(_)) =>
             {
                 self.sintax_write(addr, value);
+            }
+            // HITEK (Vast Fame): the whole $0000-$7FFF register space follows
+            // mGBA `_GBHitek` (the two swap-mode ports layered over MBC5 write
+            // semantics), so it is handled before the generic arms.
+            RAM_ENABLE_START..=BANKING_MODE_END
+                if matches!(self.unl_mapper, UnlMapper::Hitek(_)) =>
+            {
+                self.hitek_write(addr, value);
             }
             // RAM Enable (0x0000-0x1FFF)
             RAM_ENABLE_START..=RAM_ENABLE_END => match &mut self.mapper {
@@ -2343,6 +2428,7 @@ impl memory::Addressable for Cartridge {
                     Mapper::Bbd(m) => Ext::Banked(m.ram_enabled),
                     Mapper::Ggb81(m) => Ext::Banked(m.ram_enabled),
                     Mapper::Sintax(m) => Ext::Banked(m.ram_enabled),
+                    Mapper::Hitek(m) => Ext::Banked(m.ram_enabled),
                     Mapper::Mbc7(m) => Ext::Mbc7(m.ram_enabled && m.state.ram_enabled2),
                     Mapper::HuC1(m) => Ext::HuC1(m.state.ir_mode),
                     Mapper::Camera(m) => {
@@ -2817,6 +2903,70 @@ mod tests {
         let mut perturbed = make_sintax_rom();
         perturbed[0x184] ^= 0x01;
         assert_eq!(Cartridge::detect_unl_mapper(&perturbed), UnlMapper::None);
+    }
+
+    // Clean-room 48-byte stand-in for the HITEK secondary logo: a plain ASCII
+    // banner (44 bytes) plus a 4-byte suffix computed so the block's CRC32
+    // equals HITEK_LOGO_CRC32 (0x4FDA_B691). No copyrighted logo bytes; the
+    // same block is embedded in the hitek_banking test ROM.
+    const HITEK_LOGO: [u8; 48] =
+        *b"RUSTYBOI HITEK VASTFAME CLEANROOM STANDIN!!!\x8C\x13\x02\x75";
+
+    /// 128KB image carrying the HITEK signature: the truthful MBC5+RAM+BATTERY
+    /// header ($1B), the $0184 logo whose CRC32 keys detection, a $7FFF byte
+    /// that is not the "cracked-dump" $01, a real Nintendo logo, and bank
+    /// markers at banks 1, 2 and 4 (the same layout as the hitek_banking ROM).
+    fn make_hitek_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x20000]; // 8 banks
+        rom[CARTRIDGE_TYPE_OFFSET] = 0x1B; // MBC5+RAM+BATTERY (truthful)
+        rom[ROM_SIZE_OFFSET] = 0x02; // 128KB / 8 banks
+        rom[RAM_SIZE_OFFSET] = 0x03; // 32KB
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+        rom[0x184..0x1B4].copy_from_slice(&HITEK_LOGO);
+        rom[0x7FFF] = 0x99; // != 0x01: a protected (non-cracked) dump
+        rom[0x4000] = 0xB1; // bank 1, offset 0
+        rom[0x2 * 0x4000] = 0xB2; // bank 2 (where a plain MBC5 lands in step 1)
+        rom[0x4 * 0x4000] = 0xA4; // bank 4 (the HITEK bank-reorder target)
+        rom
+    }
+
+    #[test]
+    fn hitek_detects_and_descrambles() {
+        let rom = make_hitek_rom();
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::Hitek(HitekState::default())
+        );
+
+        // Electrically MBC5+RAM+BATTERY.
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(cart.get_cartridge_type(), CartridgeType::MBC5 { .. }));
+
+        // Bank reorder: bank_swap_mode=1, then a $2000 write of $02 selects bank
+        // 4 (reorder of $02 through HITEK_BANK_REORDERING[1]). data_swap_mode is
+        // still 0, so the read is the raw bank-4 marker. A plain MBC5 would
+        // select bank 2 and read 0xB2.
+        cart.write(0x2080, 0x01); // bank_swap_mode = 1
+        cart.write(0x2000, 0x02); // -> bank 4
+        assert_eq!(cart.read(0x4000), 0xA4);
+
+        // Data reorder: data_swap_mode=1 (the $2001 write also reselects bank 1
+        // with the raw value); the bank-1 marker 0xB1 reads back reordered to
+        // 0x95. A plain MBC5 would read the raw 0xB1.
+        cart.write(0x2001, 0x01); // data_swap_mode = 1, bank_low = 1
+        assert_eq!(cart.read(0x4000), 0x95);
+
+        // A one-byte perturbation of the $0184 block changes its CRC32 -> the
+        // rule no longer matches (detection is a 48-byte CRC32, not a sum).
+        let mut perturbed = rom.clone();
+        perturbed[0x184] ^= 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&perturbed), UnlMapper::None);
+
+        // The $7FFF==$01 guard: a cracked dump that already runs as plain MBC5
+        // must NOT be routed to HITEK.
+        let mut cracked = rom.clone();
+        cracked[0x7FFF] = 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&cracked), UnlMapper::None);
     }
 
     /// Write the correct boot-ROM header checksum into $014D.

@@ -26,7 +26,9 @@ use serde::{Deserialize, Serialize};
 use super::{
     camera::Camera, huc1::HuC1, huc3::HuC3, mbc1::Mbc1, mbc2::Mbc2, mbc3::Mbc3, mbc5::Mbc5,
     mbc7::Mbc7, nombc::NoMbc,
-    unlicensed::{Bbd, Ggb81, LiCheng, M161, NtOld, Rocket, Sachen, Sintax, Vf001, WisdomTree},
+    unlicensed::{
+        Bbd, Ggb81, Hitek, LiCheng, M161, NtOld, Rocket, Sachen, Sintax, Vf001, WisdomTree,
+    },
 };
 
 /// ROM/RAM geometry the bank math needs, passed by value (Copy).
@@ -130,6 +132,7 @@ pub(super) enum Mapper {
     Bbd(Bbd),
     Ggb81(Ggb81),
     Sintax(Sintax),
+    Hitek(Hitek),
 }
 
 impl Banking for Mapper {
@@ -211,6 +214,11 @@ impl Mapper {
             UnlMapper::Sintax(_) => {
                 return Mapper::Sintax(Sintax { ram_enabled: false, regs: Mbc5State::default() })
             }
+            // HITEK is electrically MBC5+RAM; the scramble state rides in the
+            // UnlMapper::Hitek payload, so the board is plain MBC5 registers.
+            UnlMapper::Hitek(_) => {
+                return Mapper::Hitek(Hitek { ram_enabled: false, regs: Mbc5State::default() })
+            }
         }
         let mbc3 = |has_ram, timer| {
             Mapper::Mbc3(Mbc3 { ram_enabled: false, rom_bank_low: 1, ram_bank: 0, has_ram, timer })
@@ -278,6 +286,7 @@ impl Mapper {
             Mapper::Bbd(m) => f(m),
             Mapper::Ggb81(m) => f(m),
             Mapper::Sintax(m) => f(m),
+            Mapper::Hitek(m) => f(m),
         }
     }
 }
