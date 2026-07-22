@@ -3094,7 +3094,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustyboi-debugger"
+name = "rustyboi-disassembler"
 version = "0.1.0"
 
 [[package]]
@@ -3104,7 +3104,7 @@ dependencies = [
  "egui",
  "rfd",
  "rustyboi-core",
- "rustyboi-debugger",
+ "rustyboi-disassembler",
  "rustyboi-session",
  "wasm-bindgen-futures",
 ]

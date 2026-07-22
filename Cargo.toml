@@ -4,7 +4,7 @@ members = [
     "rustyboi-core",
     "rustyboi-mix",
     "rustyboi-session",
-    "rustyboi-debugger",
+    "rustyboi-disassembler",
     "rustyboi-egui",
     "rustyboi-frontend",
     "rustyboi-platform",
@@ -18,7 +18,7 @@ members = [
 default-members = [
     "rustyboi-core",
     "rustyboi-mix",
-    "rustyboi-debugger",
+    "rustyboi-disassembler",
     "rustyboi-egui",
     "rustyboi-platform",
 ]

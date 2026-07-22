@@ -179,7 +179,7 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
     listOf(
         "rustyboi-platform",
         "rustyboi-core",
-        "rustyboi-debugger",
+        "rustyboi-disassembler",
         "rustyboi-egui",
         "rustyboi-frontend",
         "rustyboi-session",

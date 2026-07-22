@@ -1,5 +1,5 @@
 [package]
-name = "rustyboi-debugger"
+name = "rustyboi-disassembler"
 version = "0.1.0"
 edition = "2024"
 
