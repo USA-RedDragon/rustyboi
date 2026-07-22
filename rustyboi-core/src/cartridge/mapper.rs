@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     camera::Camera, huc1::HuC1, huc3::HuC3, mbc1::Mbc1, mbc2::Mbc2, mbc3::Mbc3, mbc5::Mbc5,
     mbc7::Mbc7, nombc::NoMbc,
-    unlicensed::{LiCheng, M161, NtOld, Rocket, Sachen, Vf001, WisdomTree},
+    unlicensed::{Bbd, LiCheng, M161, NtOld, Rocket, Sachen, Vf001, WisdomTree},
 };
 
 /// ROM/RAM geometry the bank math needs, passed by value (Copy).
@@ -127,6 +127,7 @@ pub(super) enum Mapper {
     M161(M161),
     Vf001(Vf001),
     LiCheng(LiCheng),
+    Bbd(Bbd),
 }
 
 impl Banking for Mapper {
@@ -192,6 +193,11 @@ impl Mapper {
             UnlMapper::LiCheng => {
                 return Mapper::LiCheng(LiCheng { ram_enabled: false, regs: Mbc5State::default() })
             }
+            // BBD is electrically MBC5+RAM; the scramble state rides in the
+            // UnlMapper::Bbd payload, so the board is plain MBC5 registers.
+            UnlMapper::Bbd(_) => {
+                return Mapper::Bbd(Bbd { ram_enabled: false, regs: Mbc5State::default() })
+            }
         }
         let mbc3 = |has_ram, timer| {
             Mapper::Mbc3(Mbc3 { ram_enabled: false, rom_bank_low: 1, ram_bank: 0, has_ram, timer })
@@ -256,6 +262,7 @@ impl Mapper {
             Mapper::M161(m) => f(m),
             Mapper::Vf001(m) => f(m),
             Mapper::LiCheng(m) => f(m),
+            Mapper::Bbd(m) => f(m),
         }
     }
 }

@@ -71,6 +71,40 @@ const VF001_STUB: [u8; 6] = [0x11, 0x80, 0x70, 0x3E, 0x9A, 0x12];
 /// window cannot collide with licensed header code in practice.
 const LICHENG_LOGO_CRC32: [u32; 2] = [0xD2B5_7657, 0x20D0_92E2];
 
+/// CRC32 (reflected IEEE) of the 48-byte Vast Fame secondary logo at $0184 on
+/// BBD boards. Same detection basis as LiCheng (mGBA `_detectUnlMBC`).
+const BBD_LOGO_CRC32: [u32; 2] = [0x6D1E_A662, 0xC7D8_C1DF];
+
+/// BBD data-line reorder tables (mGBA `_bbdDataReordering`), indexed by the
+/// current data swap mode; applied to every $4000-$7FFF ROM read. output bit
+/// i = input bit table[i]. Only modes 0/4/5/7 are documented on real carts
+/// (Garou/Harry/Digimon); the rest are the identity permutation.
+const BBD_DATA_REORDERING: [[u8; 8]; 8] = [
+    [0, 1, 2, 3, 4, 5, 6, 7], // 00 - normal
+    [0, 1, 2, 3, 4, 5, 6, 7], // 01 - unknown
+    [0, 1, 2, 3, 4, 5, 6, 7], // 02 - unknown
+    [0, 1, 2, 3, 4, 5, 6, 7], // 03 - unknown
+    [0, 5, 1, 3, 4, 2, 6, 7], // 04 - Garou
+    [0, 4, 2, 3, 1, 5, 6, 7], // 05 - Harry
+    [0, 1, 2, 3, 4, 5, 6, 7], // 06 - unknown
+    [0, 1, 5, 3, 4, 2, 6, 7], // 07 - Digimon
+];
+
+/// BBD bank-line reorder tables (mGBA `_bbdBankReordering`), indexed by the
+/// current bank swap mode; applied to the bank number written to $2000 before
+/// it latches into the MBC5 low-8 ROM-bank register. output bit i = input bit
+/// table[i].
+const BBD_BANK_REORDERING: [[u8; 8]; 8] = [
+    [0, 1, 2, 3, 4, 5, 6, 7], // 00 - normal
+    [0, 1, 2, 3, 4, 5, 6, 7], // 01 - unknown
+    [0, 1, 2, 3, 4, 5, 6, 7], // 02 - unknown
+    [3, 4, 2, 0, 1, 5, 6, 7], // 03 - Digimon/Garou
+    [0, 1, 2, 3, 4, 5, 6, 7], // 04 - unknown
+    [1, 2, 3, 4, 0, 5, 6, 7], // 05 - Harry
+    [0, 1, 2, 3, 4, 5, 6, 7], // 06 - unknown
+    [0, 1, 2, 3, 4, 5, 6, 7], // 07 - unknown
+];
+
 // Lock-phase values shared by the Sachen and Rocket boot state machines
 // (the board powers up locked and unlocks in DMG -> CGB -> unlocked phases).
 const UNL_LOCKED_DMG: u8 = 0;
@@ -151,6 +185,26 @@ pub enum UnlMapper {
     /// $0184 secondary-logo CRC32; kept last so existing variant indices (and
     /// thus every other cart's savestate layout) stay unchanged.
     LiCheng,
+    /// BBD (Vast Fame family): electrically an MBC5 whose $2000-$2FFF register
+    /// block also carries a bit-scrambling protocol (mGBA `_GBBBD`). A write to
+    /// $2001 latches the data swap mode, $2080 the bank swap mode; the bank
+    /// number written to $2000 is reordered through `BBD_BANK_REORDERING`
+    /// before latching, and every $4000-$7FFF ROM read is reordered through
+    /// `BBD_DATA_REORDERING`. Detected from the $0184 secondary-logo CRC32
+    /// (gated on $7FFF != $01, which marks a cracked dump that runs plain).
+    Bbd(BbdState),
+}
+
+/// Bit-scramble mode state for `UnlMapper::Bbd`. Carried inside the enum
+/// variant (like `Vf001State`) so every other cart's bincode savestate layout
+/// stays byte-identical. Both modes power up at 0 (identity) and are
+/// re-programmed by the game's boot code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BbdState {
+    /// Selects `BBD_DATA_REORDERING` for $4000-$7FFF reads (set via $2001).
+    data_swap_mode: u8,
+    /// Selects `BBD_BANK_REORDERING` for the $2000 bank write (set via $2080).
+    bank_swap_mode: u8,
 }
 
 /// Protection register-file state for `UnlMapper::Vf001`. Carried inside the
@@ -637,6 +691,9 @@ impl Cartridge {
         // identity in) always powers up clean, exactly like a fresh load.
         let unl_mapper = match unl_mapper {
             UnlMapper::Vf001(_) => UnlMapper::Vf001(Vf001State::default()),
+            // BBD's swap-mode registers are volatile logic; power up at the
+            // identity permutation so reset() matches a fresh load.
+            UnlMapper::Bbd(_) => UnlMapper::Bbd(BbdState::default()),
             other => other,
         };
         Cartridge {
@@ -819,6 +876,11 @@ impl Cartridge {
             UnlMapper::LiCheng => {
                 return CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
             }
+            // BBD is electrically MBC5+RAM+BATTERY; only the $2000-$2FFF write
+            // protocol and the $4000-$7FFF read bit-reorder differ.
+            UnlMapper::Bbd(_) => {
+                return CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
+            }
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -874,6 +936,7 @@ impl Cartridge {
             Mapper::NtOld(m) => m.ram_enabled,
             Mapper::Vf001(m) => m.ram_enabled,
             Mapper::LiCheng(m) => m.ram_enabled,
+            Mapper::Bbd(m) => m.ram_enabled,
             _ => false,
         }
     }
@@ -1633,10 +1696,19 @@ impl memory::Addressable for Cartridge {
             mmio::CARTRIDGE_BANK_START..=mmio::CARTRIDGE_BANK_END => {
                 let offset =
                     (addr - mmio::CARTRIDGE_BANK_START) as usize + self.rom_bank_bases().1;
-                if offset < self.rom_data.len() {
+                let byte = if offset < self.rom_data.len() {
                     self.rom_data[offset]
                 } else {
                     0xFF
+                };
+                // Vast Fame boards descramble the switchable $4000-$7FFF window
+                // on read (mGBA `_GB*Read`); bank 0 (the fixed arm above) is
+                // never scrambled.
+                match self.unl_mapper {
+                    UnlMapper::Bbd(st) => {
+                        Self::reorder_bits(byte, &BBD_DATA_REORDERING[st.data_swap_mode as usize])
+                    }
+                    _ => byte,
                 }
             }
             // External RAM
@@ -1717,6 +1789,17 @@ impl memory::Addressable for Cartridge {
                     }
                     // LiCheng is electrically MBC5+RAM; RAM reads are plain.
                     Mapper::LiCheng(m) => {
+                        if m.ram_enabled
+                            && let Some(offset) = self.banked_ram_offset(addr)
+                        {
+                            self.ram_data[offset]
+                        } else {
+                            0xFF
+                        }
+                    }
+                    // BBD is electrically MBC5+RAM; RAM reads are plain (only
+                    // the ROM read path is descrambled).
+                    Mapper::Bbd(m) => {
                         if m.ram_enabled
                             && let Some(offset) = self.banked_ram_offset(addr)
                         {
@@ -1895,6 +1978,7 @@ impl memory::Addressable for Cartridge {
                 Mapper::Mbc5(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 Mapper::Vf001(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 Mapper::LiCheng(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
+                Mapper::Bbd(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 // MBC7 stage-1 unlock (stage 2 is 0x40 to 0x4000-0x5FFF).
                 Mapper::Mbc7(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 // HuC1 IR select: $0E maps the IR transceiver, else RAM (no disable).
@@ -1919,6 +2003,14 @@ impl memory::Addressable for Cartridge {
             ROM_BANK_SELECT_START..=ROM_BANK_SELECT_END
                 if self.unl_mapper == UnlMapper::LiCheng
                     && (0x2101..=0x2FFF).contains(&addr) => {}
+            // BBD (Vast Fame): the $2000/$2001/$2080 protocol reorders the
+            // written bank number and latches the data/bank swap modes, then
+            // behaves as MBC5 for the ROM-bank register (mGBA `_GBBBD`).
+            ROM_BANK_SELECT_START..=ROM_BANK_SELECT_END
+                if matches!(self.unl_mapper, UnlMapper::Bbd(_)) =>
+            {
+                self.bbd_write(addr, value);
+            }
             // ROM Bank Number (0x2000-0x3FFF)
             ROM_BANK_SELECT_START..=ROM_BANK_SELECT_END => match &mut self.mapper {
                 Mapper::Mbc1(m) => m.rom_bank_low = (value & 0x1F).max(1), // 5 bits, min 1
@@ -1981,6 +2073,7 @@ impl memory::Addressable for Cartridge {
                     }
                     Mapper::Vf001(m) => m.regs.ram_bank = value,
                     Mapper::LiCheng(m) => m.regs.ram_bank = value,
+                    Mapper::Bbd(m) => m.regs.ram_bank = value,
                     // MBC7 stage-2 unlock: exactly 0x40 enables.
                     Mapper::Mbc7(m) => m.state.ram_enabled2 = value == 0x40,
                     Mapper::HuC1(m) => m.state.ram_bank = value,
@@ -2081,6 +2174,7 @@ impl memory::Addressable for Cartridge {
                     Mapper::Mbc5(m) => Ext::Banked(m.has_ram && m.ram_enabled),
                     Mapper::Vf001(m) => Ext::Banked(m.ram_enabled),
                     Mapper::LiCheng(m) => Ext::Banked(m.ram_enabled),
+                    Mapper::Bbd(m) => Ext::Banked(m.ram_enabled),
                     Mapper::Mbc7(m) => Ext::Mbc7(m.ram_enabled && m.state.ram_enabled2),
                     Mapper::HuC1(m) => Ext::HuC1(m.state.ir_mode),
                     Mapper::Camera(m) => {
@@ -2341,6 +2435,72 @@ mod tests {
         let mut perturbed = rom.clone();
         perturbed[0x184] ^= 0x01;
         assert_eq!(Cartridge::detect_unl_mapper(&perturbed), UnlMapper::None);
+    }
+
+    // Clean-room 48-byte stand-in for the BBD secondary logo at $0184: a plain
+    // ASCII banner (44 bytes) plus a 4-byte suffix computed so the block's
+    // CRC32 equals BBD_LOGO_CRC32[0] (0x6D1E_A662). No copyrighted logo bytes;
+    // the same block is embedded in the bbd_banking test ROM.
+    const BBD_LOGO: [u8; 48] =
+        *b"RUSTYBOI BBD VASTFAME CLEANROOM STANDIN BBD!\x1B\xF7\x14\xA4";
+
+    /// 256KB (16-bank) MBC5+RAM+BATTERY image carrying the BBD signature: the
+    /// $0184 logo whose CRC32 keys detection, the $7FFF!=$01 "still protected"
+    /// guard byte, and bank markers at banks 1 and 8.
+    fn make_bbd_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x40000]; // 16 banks
+        rom[CARTRIDGE_TYPE_OFFSET] = MBC5_RAM_BATTERY;
+        rom[ROM_SIZE_OFFSET] = 0x03; // 256KB
+        rom[RAM_SIZE_OFFSET] = 0x02; // 8KB
+        rom[0x184..0x1B4].copy_from_slice(&BBD_LOGO);
+        rom[0x7FFF] = 0x08; // != 0x01: a still-protected dump (as the real cart)
+        rom[0x4000] = 0x04; // bank 1, offset 0 (mode-7 reorders 0x04 -> 0x20)
+        rom[8 * 0x4000] = 0xA5; // bank 8, offset 0 (mode-3 bank reorder target)
+        rom
+    }
+
+    #[test]
+    fn bbd_detects_and_descrambles() {
+        let rom = make_bbd_rom();
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::Bbd(BbdState::default())
+        );
+
+        // Electrically MBC5+RAM+BATTERY.
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(
+            cart.get_cartridge_type(),
+            CartridgeType::MBC5 { ram: true, battery: true, .. }
+        ));
+
+        // --- data reorder (mode 7 = Digimon [0,1,5,3,4,2,6,7]) ---
+        // $2001 latches dataSwapMode=7 (and, per mGBA, clobbers the low bank
+        // register); re-select bank 1 via $2000. bank1[0]=0x04 reorders to
+        // 0x20. A plain MBC5 read would return the raw 0x04.
+        cart.write(0x2001, 0x07);
+        cart.write(0x2000, 0x01);
+        assert_eq!(cart.read(0x4000), 0x20);
+
+        // --- bank reorder (mode 3 = [3,4,2,0,1,5,6,7]) ---
+        // $2080 latches bankSwapMode=3; reset dataSwapMode to 0 (identity) to
+        // isolate the bank reorder. Writing 0x01 to $2000 reorders bit0 -> bit3
+        // = bank 8. A plain MBC5 would select bank 1 (raw 0x04 marker).
+        cart.write(0x2080, 0x03);
+        cart.write(0x2001, 0x00);
+        cart.write(0x2000, 0x01);
+        assert_eq!(cart.read(0x4000), 0xA5);
+
+        // Detection is a 48-byte CRC32, not a sum: a one-byte perturbation of
+        // the $0184 block no longer matches.
+        let mut perturbed = rom.clone();
+        perturbed[0x184] ^= 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&perturbed), UnlMapper::None);
+
+        // $7FFF==0x01 marks a cracked dump that runs plain -> excluded.
+        let mut cracked = rom.clone();
+        cracked[0x7FFF] = 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&cracked), UnlMapper::None);
     }
 
     /// Write the correct boot-ROM header checksum into $014D.

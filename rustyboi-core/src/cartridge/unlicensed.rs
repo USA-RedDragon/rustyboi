@@ -172,6 +172,17 @@ impl Cartridge {
             return UnlMapper::LiCheng;
         }
 
+        // BBD (Vast Fame family): keyed on the CRC32 of the 48-byte $0184
+        // secondary logo (mGBA `_detectUnlMBC`), gated on $7FFF != $01. A
+        // matching $7FFF marks a cracked/decrypted dump that already runs as a
+        // plain MBC5, so the bit-scrambling must NOT be applied to it (mGBA's
+        // guard). data.len() >= 0x8000 is guaranteed above, so $7FFF is in
+        // range. The 48-byte CRC32 window makes a licensed-cart match
+        // impossible.
+        if BBD_LOGO_CRC32.contains(&logo_crc32) && data[0x7FFF] != 0x01 {
+            return UnlMapper::Bbd(BbdState::default());
+        }
+
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
         // banked-size file) the publisher string in the ROM. The
         // string+type+size gate already implies the blank-header shape in
@@ -350,6 +361,42 @@ impl Cartridge {
             _ => None,
         }
     }
+    /// BBD $2000-$3FFF register write (mGBA `_GBBBD`). Matched on `addr &
+    /// 0xF0FF`: $2001 latches the data swap mode, $2080 the bank swap mode, and
+    /// $2000 reorders the written bank number through the current bank table.
+    /// The (possibly reordered) value then latches into the MBC5 ROM-bank
+    /// register exactly as `_GBMBC5` would, so mode writes also update the low
+    /// bank register -- a faithful mGBA side effect the game overwrites with its
+    /// next $2000 write. Swap-mode state rides in the `UnlMapper::Bbd` payload;
+    /// the bank register lives on the `Mapper::Bbd` board.
+    pub(super) fn bbd_write(&mut self, addr: u16, value: u8) {
+        let value = {
+            let UnlMapper::Bbd(ref mut st) = self.unl_mapper else {
+                return;
+            };
+            match addr & 0xF0FF {
+                0x2000 => {
+                    Self::reorder_bits(value, &BBD_BANK_REORDERING[st.bank_swap_mode as usize])
+                }
+                0x2001 => {
+                    st.data_swap_mode = value & 0x07;
+                    value
+                }
+                0x2080 => {
+                    st.bank_swap_mode = value & 0x07;
+                    value
+                }
+                _ => value,
+            }
+        };
+        if let Mapper::Bbd(m) = &mut self.mapper {
+            if addr <= 0x2FFF {
+                m.regs.rom_bank_low = value; // MBC5 low 8 bits (bank 0 allowed)
+            } else {
+                m.regs.rom_bank_high = value & 0x01; // MBC5 high bit
+            }
+        }
+    }
 }
 
 // --- board struct + banking ---------------------------------------------
@@ -483,6 +530,29 @@ pub(super) struct LiCheng {
 }
 
 impl Banking for LiCheng {
+    fn rom_bankn(&self, g: Geom) -> usize {
+        let bank =
+            (self.regs.rom_bank_low as usize) | ((self.regs.rom_bank_high as usize & 0x01) << 8);
+        bank % g.rom_banks
+    }
+    fn rom_bank0(&self, _g: Geom) -> usize {
+        0
+    }
+    fn ram_bank(&self, g: Geom) -> usize {
+        (self.regs.ram_bank & 0x0F) as usize % g.ram_banks.max(1)
+    }
+}
+
+/// BBD: electrically MBC5+RAM. The $2000-$2FFF bit-scramble protocol
+/// (`bbd_write`) and the $4000-$7FFF read reorder are applied around this
+/// board; the bank math itself is plain MBC5.
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct Bbd {
+    pub ram_enabled: bool,
+    pub regs: Mbc5State,
+}
+
+impl Banking for Bbd {
     fn rom_bankn(&self, g: Geom) -> usize {
         let bank =
             (self.regs.rom_bank_low as usize) | ((self.regs.rom_bank_high as usize & 0x01) << 8);
