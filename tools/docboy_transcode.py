@@ -137,6 +137,71 @@ REDUNDANT_AUTHORS = {
     "hacktix": "bully / strikethrough",
 }
 
+# DMG diff references that are DOCBOY-WRONG: dropped from docboy_diff_dmg.manifest
+# the same way gen_manifests.py drops corrupted_stop / tac_set_everything -- a
+# bad oracle is excluded, not asserted. These 46 are the DMG framebuffer tests
+# where rustyboi DISAGREES with docboy's F12 self-screenshot AND is adjudicated
+# hardware-correct: byte-identical to SameBoy-from-source at the steady frame and
+# consistent with the mealybug tearoom HARDWARE behaviour (rustyboi passes
+# mealybug 51/51). docboy's screenshot carries a spurious artifact -- a dark top
+# band in window_turn_off_* (43), a darkened tile edge in change_win_map_wx19-21
+# (3). Keeping them would invert the tripwire: the "disagreement" is us being
+# correct, and a future fix that preserved our correct render would false-trip.
+# ONLY the DMG diff is adjudicated; CGB is NOT (its disagreements are an
+# un-split mix of docboy-bugs and real gaps), so this set is DMG-scoped.
+# Adjudication recorded in the docboy-differential memory note; the list is the
+# exact currently-disagreeing members of these two families (measured with
+# tools/docboy_diff.py, mode dmg). Match is on the ROM basename under
+# tests/roms/dmg/; the transcoder self-checks that all 46 fire (see main()).
+DOCBOY_WRONG = frozenset({
+    "change_win_map_wx19",
+    "change_win_map_wx20",
+    "change_win_map_wx21",
+    "window_turn_off_alt_nops22_sprite_x3",
+    "window_turn_off_alt_nops22_sprite_x4",
+    "window_turn_off_alt_nops22_sprite_x5",
+    "window_turn_off_alt_nops22_sprite_x6",
+    "window_turn_off_alt_nops22_sprite_x7",
+    "window_turn_off_alt_nops23_sprite_x0",
+    "window_turn_off_alt_nops23_sprite_x1",
+    "window_turn_off_alt_nops23_sprite_x2",
+    "window_turn_off_alt_nops23_sprite_x3",
+    "window_turn_off_alt_nops24_sprite_x2",
+    "window_turn_off_alt_nops24_sprite_x3",
+    "window_turn_off_alt_nops24_sprite_x4",
+    "window_turn_off_alt_nops24_sprite_x5",
+    "window_turn_off_alt_nops24_sprite_x6",
+    "window_turn_off_alt_nops24_sprite_x7",
+    "window_turn_off_alt_nops25_sprite_x0",
+    "window_turn_off_alt_nops25_sprite_x1",
+    "window_turn_off_nops22_sprite_x3_variation_a",
+    "window_turn_off_nops22_sprite_x3_variation_b",
+    "window_turn_off_nops22_sprite_x4",
+    "window_turn_off_nops22_sprite_x4_variation_a",
+    "window_turn_off_nops22_sprite_x4_variation_b",
+    "window_turn_off_nops22_sprite_x5",
+    "window_turn_off_nops22_sprite_x5_variation_a",
+    "window_turn_off_nops22_sprite_x5_variation_b",
+    "window_turn_off_nops22_sprite_x6",
+    "window_turn_off_nops22_sprite_x6_variation_a",
+    "window_turn_off_nops22_sprite_x6_variation_b",
+    "window_turn_off_nops22_sprite_x7",
+    "window_turn_off_nops22_sprite_x7_variation_a",
+    "window_turn_off_nops22_sprite_x7_variation_b",
+    "window_turn_off_nops23_sprite_x0",
+    "window_turn_off_nops23_sprite_x0_variation_a",
+    "window_turn_off_nops23_sprite_x0_variation_b",
+    "window_turn_off_nops23_sprite_x1",
+    "window_turn_off_nops23_sprite_x1_variation_a",
+    "window_turn_off_nops23_sprite_x1_variation_b",
+    "window_turn_off_nops23_sprite_x2",
+    "window_turn_off_nops23_sprite_x2_variation_a",
+    "window_turn_off_nops23_sprite_x2_variation_b",
+    "window_turn_off_nops23_sprite_x3",
+    "window_turn_off_nops23_sprite_x3_variation_a",
+    "window_turn_off_nops23_sprite_x3_variation_b",
+})
+
 
 def die(msg):
     sys.exit(f"error: {msg}")
@@ -234,6 +299,15 @@ def classify(model, cat, entry, stats):
     rom_field = entry["rom"]
     rom = f"{REL_DOCBOY}/tests/roms/{model}/{rom_field}"
     name = f"docboy/{model}/{os.path.splitext(rom_field)[0]}"
+
+    # DOCBOY-WRONG DMG references: drop entirely (bad oracle, not a gap). Scoped
+    # to DMG -- the only model adjudicated -- and recorded for the main() count
+    # self-check. These entries are all `docboy`-author framebuffer diffs, so the
+    # drop happens before any deferral branch could reclassify them.
+    stem = os.path.splitext(os.path.basename(rom_field))[0]
+    if model == "dmg" and stem in DOCBOY_WRONG:
+        stats["docboy_wrong_dropped"].add(stem)
+        return None
 
     disabled = entry.get("enabled") is False
 
@@ -367,7 +441,8 @@ def main():
     for model in MODELS:
         cfg = load_config(model)
         buckets = {"anchored": [], "diff": [], "deferred": []}
-        stats = {"dmg_palette_skips": {}, "cgb_ref_skips": {}}
+        stats = {"dmg_palette_skips": {}, "cgb_ref_skips": {},
+                 "docboy_wrong_dropped": set()}
         oracle_counts = Counter()
         anchored_authors = Counter()
         deferred_reasons = Counter()
@@ -384,6 +459,16 @@ def main():
                     anchored_authors[row.author] += 1
                 if row.bucket == "deferred":
                     deferred_reasons[(row.reason or "?").split(":")[0]] += 1
+
+        # Fail loud if the DOCBOY_WRONG exclusion drifted from the corpus: every
+        # adjudicated name must match exactly one dropped DMG row. A renamed or
+        # removed ROM (e.g. a re-pinned corpus) then aborts here instead of
+        # silently under/over-excluding and quietly moving the diff floor.
+        if model == "dmg" and stats["docboy_wrong_dropped"] != DOCBOY_WRONG:
+            missed = sorted(DOCBOY_WRONG - stats["docboy_wrong_dropped"])
+            extra = sorted(stats["docboy_wrong_dropped"] - DOCBOY_WRONG)
+            die(f"DOCBOY_WRONG mismatch: {len(missed)} name(s) never matched a "
+                f"DMG ROM {missed}; {len(extra)} unexpected {extra}")
 
         for bucket, rows in buckets.items():
             path = os.path.join(MANIFEST_DIR, f"docboy_{bucket}_{model}.manifest")
@@ -410,6 +495,7 @@ def main():
             "redundant_candidates": dict(redundant),
             "dmg_palette_skips": stats["dmg_palette_skips"],
             "cgb_ref_skips": stats["cgb_ref_skips"],
+            "docboy_wrong_excluded": sorted(stats["docboy_wrong_dropped"]),
         }
         for k in ("anchored", "diff", "deferred"):
             grand[k] += len(buckets[k])
