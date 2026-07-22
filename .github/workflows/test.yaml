@@ -451,6 +451,9 @@ jobs:
     runs-on: ubuntu-24.04
     needs: build-roms
     timeout-minutes: 90
+    env:
+      BIOS_URL: ${{ secrets.BIOS_URL }}
+      BIOS_PASSWORD: ${{ secrets.BIOS_PASSWORD }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install ALSA + udev headers (rustyboi-platform → cpal/rodio)
@@ -476,6 +479,16 @@ jobs:
         with:
           path: gb-test-roms
           key: roms-linux-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a-gbchw631e600-docboybb4c525a
+      - name: Download boot ROMs + SGB firmware
+        shell: bash
+        run: |
+          [ -n "$BIOS_URL" ]      || { echo "::error::BIOS_URL secret is required (the SGB border tests need sgb1/sgb2.sfc)"; exit 1; }
+          [ -n "$BIOS_PASSWORD" ] || { echo "::error::BIOS_PASSWORD secret is required"; exit 1; }
+          curl -fsSL "$BIOS_URL" -o /tmp/bios.zip
+          unzip -P "$BIOS_PASSWORD" -q -o /tmp/bios.zip -d bios
+          for f in sgb1.sfc sgb2.sfc; do
+            [ -f "bios/$f" ] || { echo "::error::$f not in the BIOS archive; the SGB firmware tests cannot run"; exit 1; }
+          done
       - name: Install Rust + llvm-tools
         run: |
           rustup default stable
