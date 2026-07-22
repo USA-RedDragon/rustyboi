@@ -17,7 +17,7 @@ adjudication.
 <!-- SUITE-PROGRESS:START -->
 | Suite | Passing | Total |
 | :--- | ---: | ---: |
-| rustyboi | 41 | 41 |
+| rustyboi | 38 | 38 |
 | acid2 | 3 | 3 |
 | cgb_acid_hell | 1 | 1 |
 | mealybug | 51 | 51 |

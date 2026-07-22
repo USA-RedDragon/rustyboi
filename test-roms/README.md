@@ -70,11 +70,17 @@ builds these ROMs during setup (rgbds is a documented dependency) and gates the
 
 ## Provenance rules (important)
 
-Author ROMs **only for silicon-verified behavior** — documented in Pan Docs, or
-later confirmed on the hardware bench. Do NOT encode behavior that is only
-Gambatte-derived or emulator-reference-derived; park those in `COVERAGE.md` until
-the bench confirms them. A `png` oracle must be **derived from the documented
-rule** (or captured on real silicon), never screenshotted from rustyboi.
+Author a ROM **only for behavior that is strongly defensible as real silicon** —
+either documented in Pan Docs, or anchored by a direct real-hardware observation
+(a real-silicon capture, or the behavior of a shipped game running on real
+hardware). Behavior that rests *solely* on another emulator's source or
+measurement (Gambatte, SameBoy, SameSuite, …), or on inference alone, is **not**
+strong enough for a portable ROM — it belongs in an engine-internal Rust test,
+which pins the modeled behavior without claiming it is hardware-portable. A `png`
+oracle must be **derived from the documented rule** (or captured on real
+silicon), never screenshotted from rustyboi.
 
-When a ROM assures a behavior (fails on the pre-fix engine, passes after), delete
-the paired in-code Rust test — the ROM is the stronger, portable guard.
+The split runs both ways. When a strongly-defensible behavior gets a ROM (fails
+on the pre-fix engine, passes after), delete the paired in-code Rust test — the
+ROM is the stronger, portable guard. When a behavior turns out to be only
+emulator-derived, do the reverse: drop the ROM and keep a Rust test.
