@@ -414,29 +414,6 @@ pub(crate) enum CartridgeType {
     M161,
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[derive(Serialize, Deserialize)]
 pub struct Cartridge {
     // ROM data - all banks. Read-only (never mutated after construction) and
