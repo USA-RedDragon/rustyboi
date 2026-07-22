@@ -9141,11 +9141,6 @@ impl Ppu {
         }
 
         // Whether this dot executed a PushToFIFO fetch substep — the
-        // window-reactivation insert fires on the pop of a window tile's
-        // FIRST pixel, i.e. our push dot (on hardware: the fetcher at its
-        // TileNumber T1 step with the BG FIFO holding 8, the cycle right
-        // after its push-at-empty).
-        let mut push_this_dot = false;
         // Fetcher cadence: on CGB, decouple from absolute self.ticks so that
         // sprite-fetch stall dots don't flip the fetcher's even/odd phase
         // (matches hardware). On DMG, keep the original self.ticks gate.
@@ -9210,9 +9205,7 @@ impl Ppu {
         } else {
             0
         };
-        if self.mode3_fetch_step(mmio, cadence_even, fetcher_lcdc_state, pending_discard) {
-            push_this_dot = true;
-        }
+        self.mode3_fetch_step(mmio, cadence_even, fetcher_lcdc_state, pending_discard);
 
         if self.fetcher.pixel_fifo.size() == 0 {
             return;
@@ -9371,17 +9364,17 @@ impl Ppu {
         }
         // DMG window reactivation zero pixel (the hardware BG-pixel insert):
         // the WX comparator matches again with the window already active
-        // (past its startup fetch), exactly at the pop of a window
-        // tile's FIRST pixel — our push-at-empty dot (fetcher at
-        // the tile-number fetch step with bg_fifo.size == 8, the cycle right after its
-        // push; the insert diagonal sits at x == 8k + (8 - chop)). The pop
-        // below then renders a color-0 pixel WITHOUT consuming the FIFO,
-        // inserting one pixel into the line.
+        // (past its startup fetch), exactly at the pop of a window tile's
+        // FIRST pixel. That pop is the dot on which the FIFO still holds all 8
+        // pushed pixels; it is NOT necessarily the push dot itself, because a
+        // sprite fetch can stall the renderer across the push (the insert
+        // diagonal sits at x == 8k + (8 - chop)). The pop below then renders a
+        // color-0 pixel WITHOUT consuming the FIFO, inserting one pixel into
+        // the line.
         if !mmio.is_cgb_features_enabled()
             && self.window_started_this_line
             && self.fetcher.is_fetching_window()
             && !self.win_being_fetched
-            && push_this_dot
             && self.fetcher.pixel_fifo.size() == 8
             && mmio.read(WX) == self.x + 7
         {
