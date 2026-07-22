@@ -36,6 +36,7 @@ cartridge-tama5_banking-dmg|dmg|mooneye|test-roms/build/cartridge/tama5_banking.
 cartridge-undocumented_type_banking-dmg|dmg|mooneye|test-roms/build/cartridge/undocumented_type_banking.dmg.mooneye.gb
 cartridge-vf001_protection-cgb|cgb|mooneye|test-roms/build/cartridge/vf001_protection.cgb.mooneye.gbc
 cartridge-vf001gen_protection-cgb|cgb|mooneye|test-roms/build/cartridge/vf001gen_protection.cgb.mooneye.gbc
+cartridge-vf001zook_protection-cgb|cgb|mooneye|test-roms/build/cartridge/vf001zook_protection.cgb.mooneye.gbc
 cartridge-vf8k_dual_window-cgb|cgb|mooneye|test-roms/build/cartridge/vf8k_dual_window.cgb.mooneye.gbc
 dma-hdma_ff55_cancel_after_block-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_cancel_after_block.cgb.mooneye.gbc
 dma-hdma_ff55_countdown_ds-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_countdown_ds.cgb.mooneye.gbc
