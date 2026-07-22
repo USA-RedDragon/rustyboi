@@ -27,8 +27,9 @@ NEED_382 = if [ "$(filter $(MIN),$(firstword $(sort $(MAKE_VERSION) $(MIN))))" !
   echo "make: this target needs GNU Make >= $(MIN) (macOS system make is 3.81; brew install make, use gmake)" >&2; exit 1; fi
 
 COV_CRATES := -p rustyboi-core -p rustyboi-session -p rustyboi-frontend \
-  -p rustyboi-egui -p rustyboi-debugger -p rustyboi-test-runner \
-  -p rustyboi-libretro-sys -p rustyboi-libretro -p rustyboi-platform
+  -p rustyboi-egui -p rustyboi-debugger -p rustyboi-replay \
+  -p rustyboi-libretro-sys -p rustyboi-libretro -p rustyboi-platform \
+  -p rustyboi-mix
 # Coverage artifact DAG: runner -> profdata -> lcov.info. The two intermediates
 # are .PHONY (below) so `make coverage` always regenerates from a fresh build.
 COV_TD       := target/llvm-cov-target
