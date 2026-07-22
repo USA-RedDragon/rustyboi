@@ -13,6 +13,8 @@ use std::fs;
 use std::io;
 
 mod dma;
+mod gdma;
+mod hdma;
 
 const EMPTY_BYTE: u8 = 0xFF;
 
