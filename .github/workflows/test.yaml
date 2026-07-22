@@ -108,6 +108,14 @@ jobs:
           - sketchtests
           - gbc_hw_tests
           - gambatte
+          # docboy differential tripwires (NOT a hardware oracle): graded against
+          # docboy's own F12 self-screenshots, gated on their own floors. Their
+          # corpus is fetched by `make setup` (always-on) and lands in the shared
+          # gb-test-roms cache; the cache key carries a docboy pin so a
+          # docboy-less entry cannot mask these cells with an empty corpus.
+          - docboy_diff_dmg
+          - docboy_diff_cgb
+          - docboy_diff_cgb_dmg_mode
         exclude:
           - { os: windows, arch: armv7 }
           - { os: macos, arch: armv7 }
@@ -161,7 +169,21 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: gb-test-roms
-          key: roms-${{ matrix.os }}-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a-gbchw631e600
+          key: roms-${{ matrix.os }}-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a-gbchw631e600-docboybb4c525a
+      # The docboy tripwires are transcoded from the corpus at setup time, and the
+      # transcoder needs Pillow (PIL). Without it `make setup` skips the transcode,
+      # the manifests never appear, and the docboy cells would silently SKIP (a
+      # false green). Only the docboy cells transcode, so only they need Pillow.
+      # Install into the SAME interpreter run-suites.sh resolves (python3 else
+      # python); the second form covers PEP 668 externally-managed envs (Ubuntu
+      # 24.04 / Homebrew Python) where a plain --user install is refused.
+      - name: Install Pillow (docboy transcode)
+        if: contains(matrix.suite, 'docboy')
+        shell: bash
+        run: |
+          py="$(command -v python3 || command -v python)"
+          "$py" -m pip install --user --quiet Pillow \
+            || "$py" -m pip install --user --break-system-packages --quiet Pillow
       - name: Fetch ROMs
         shell: bash
         run: make setup
@@ -220,7 +242,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: gb-test-roms
-          key: roms-linux-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a-gbchw631e600
+          key: roms-linux-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a-gbchw631e600-docboybb4c525a
       - name: Fetch ROMs
         run: make setup
       # Unlike the gallery sweep, sgb1/sgb2.sfc are NOT optional here: they are
@@ -326,6 +348,17 @@ jobs:
         with:
           name: runner-linux-x86_64
           path: runner
+      # report-update folds in the docboy tripwire block when the corpus is
+      # present (it is, `make setup` fetches it). The transcode needs Pillow;
+      # without it the docboy block is left byte-identical (non-fatal), but here
+      # we WANT it refreshed, so install Pillow (same interpreter run-suites.sh
+      # uses; second form covers PEP 668 externally-managed envs).
+      - name: Install Pillow (docboy transcode)
+        shell: bash
+        run: |
+          py="$(command -v python3 || command -v python)"
+          "$py" -m pip install --user --quiet Pillow \
+            || "$py" -m pip install --user --break-system-packages --quiet Pillow
       - name: Fetch ROMs
         shell: bash
         run: make setup
@@ -422,7 +455,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: gb-test-roms
-          key: roms-linux-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a-gbchw631e600
+          key: roms-linux-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a-gbchw631e600-docboybb4c525a
       - name: Install Rust + llvm-tools
         run: |
           rustup default stable

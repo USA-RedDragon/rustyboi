@@ -9,9 +9,9 @@
 #   tools/run-suites.sh build            # cargo build --release the test runner
 #   tools/run-suites.sh list             # print the known suites + thresholds
 #   tools/run-suites.sh report           # markdown progress table (all suites)
-#   tools/run-suites.sh report-docboy    # refresh the docboy tripwire table (opt-in)
+#   tools/run-suites.sh report-docboy    # refresh only the docboy tripwire table
 #   tools/run-suites.sh <suite>          # run one suite, gate against its floor
-#   tools/run-suites.sh all              # run every suite, gate each (+ docboy if present)
+#   tools/run-suites.sh all              # run every suite, gate each (+ docboy tripwire)
 #   tools/run-suites.sh <suite> [<suite>...]   # run several
 #
 # `setup` and `build` run automatically before a suite if their outputs are
@@ -30,10 +30,6 @@
 #   RB_MODE     hardware modes            (default: per-suite, see suite_mode)
 #   RB_JOBS     parallel case workers     (default: nproc-derived)
 #   RB_ROMS     ROM dir                   (default: gb-test-roms)
-#   RB_DOCBOY   1 = provision the opt-in docboy differential corpus in `setup`
-#               (~260 MiB fetch + transcode) and gate its NON-oracle tripwire
-#               suites in `all`. Off by default; the tripwire is a diff lead vs
-#               docboy's own screenshots, never a hardware assertion.
 #   RB_BIN      runner binary             (default: target/release/rustyboi-test-runner)
 #   RB_RUN_PREFIX  launcher prepended to every runner invocation (default: none =
 #               run RB_BIN directly). Set it to run a non-native build under a VM;
@@ -199,12 +195,14 @@ mbc3_tester cpp magentests little_things_extra sketchtests gbc_hw_tests gambatte
 # docboy differential suites: a REGRESSION TRIPWIRE, not a hardware oracle. They
 # grade rustyboi against docboy's own F12 self-screenshots (NO hardware
 # provenance), so they are held OUT of $ORDER (and thus out of generate_report's
-# hardware Total + the ratchet + the CI progress table) and gated separately.
-# Their corpus (~260 MiB) is fetched only opt-in (RB_DOCBOY=1 in setup); `all`
-# appends them iff the corpus is present, and an absent corpus is a graceful skip
-# (never a gate failure). Manifests are transcoded (never committed) into the
-# generated dir. See tools/docboy_transcode.py + the DOCBOY-TRIPWIRE block in
-# README.md.
+# hardware Total + the ratchet + the CI progress table) and gated separately in
+# their own labeled README sub-table. Their corpus (~260 MiB) is always
+# provisioned by setup and always gated by `all`; the corpus-present guard is
+# kept only as a safety net so a docboy-less environment (e.g. pre-commit, which
+# stashes the gitignored corpus away) degrades gracefully instead of hard-failing
+# -- an absent corpus is a graceful skip, never a gate failure. Manifests are
+# transcoded (never committed) into the generated dir. See
+# tools/docboy_transcode.py + the DOCBOY-TRIPWIRE block in README.md.
 DOCBOY_SUITES="docboy_diff_dmg docboy_diff_cgb docboy_diff_cgb_dmg_mode"
 DOCBOY_MANIFEST_DIR="gb-test-roms/docboy/generated/manifests"
 # Screen-ever-matches forward-scan budget for the docboy png diff (docboy's
@@ -266,8 +264,10 @@ manifest_path() {
     esac
 }
 
-# True iff the docboy corpus has been provisioned + transcoded (RB_DOCBOY=1
-# setup). Gates whether `all` and the README docboy block include the tripwire.
+# True iff the docboy corpus has been provisioned + transcoded (setup always
+# does this now). A safety net only: `all` and the README docboy block include
+# the tripwire when it is true, and skip gracefully (never fail) when it is not
+# -- e.g. pre-commit runs with the gitignored corpus stashed away.
 docboy_corpus_present() {
     local suite
     for suite in $DOCBOY_SUITES; do
@@ -313,15 +313,15 @@ setup() {
     sync_gbchwtests_roms
     log "Building first-party test ROMs (test-roms/, RGBDS)"
     build_test_roms
-    # docboy differential corpus: OPT-IN (RB_DOCBOY=1). It is a ~260 MiB network
-    # fetch and grades a non-gating TRIPWIRE (docboy's own screenshots, no
-    # hardware provenance), so it is NOT worth the download on every CI/dev run.
-    # When enabled it is idempotent: the clone is sentinel-guarded (no-op once
-    # pinned) and the transcode reproduces byte-identical manifests.
-    if [ -n "${RB_DOCBOY:-}" ]; then
-        log "Sourcing docboy corpus + transcoding diff manifests (RB_DOCBOY=1, opt-in)"
-        sync_docboy_corpus
-    fi
+    # docboy differential corpus: ALWAYS provisioned -- it is a first-class part
+    # of the gate now (always fetched, always gated in `all`, always refreshed in
+    # the report path). It is a ~260 MiB network fetch that grades a non-gating
+    # TRIPWIRE (docboy's own screenshots, no hardware provenance), so its counts
+    # stay in their own labeled README sub-table and NEVER merge into the hardware
+    # Total. Idempotent: the clone is sentinel-guarded (no-op once pinned) and the
+    # transcode reproduces byte-identical manifests.
+    log "Sourcing docboy corpus + transcoding diff manifests"
+    sync_docboy_corpus
     log "ROM setup complete"
 }
 
@@ -602,13 +602,14 @@ run_suite() {
     [ -n "$row" ] || { warn "unknown suite: $suite (see 'list')"; return 2; }
     local manifest
     manifest="$(manifest_path "$suite")"
-    # A docboy tripwire whose corpus was not provisioned (the ~260 MiB opt-in
-    # fetch) is a graceful SKIP, never a regression: it grades nothing, so there
-    # is no count to gate. Provision it with RB_DOCBOY=1 (see setup).
+    # A docboy tripwire whose corpus was not provisioned is a graceful SKIP,
+    # never a regression: it grades nothing, so there is no count to gate. setup
+    # always provisions it; this only fires in a docboy-less environment (e.g.
+    # pre-commit, which stashes the gitignored corpus away).
     case "$suite" in
         docboy_*)
             if [ ! -f "$manifest" ]; then
-                printf 'SKIP  %-20s (docboy corpus not provisioned; RB_DOCBOY=1 %s setup)\n' \
+                printf 'SKIP  %-20s (docboy corpus not provisioned; run %s setup)\n' \
                     "$suite" "$0"
                 return 0
             fi
@@ -868,11 +869,12 @@ generate_docboy_report() {
 }
 
 # Refresh the DOCBOY-TRIPWIRE README block from a live measurement + ratchet the
-# three docboy floors up to it. Deliberately NOT part of update_readme_report /
-# the pre-commit report-update: the hardware table + its ratchet must stay
-# byte-identical whether or not the opt-in docboy corpus is present (CI runs
-# report-update without it). Reuses ratchet_thresholds -- a docboy-only table
-# only bumps the docboy floors (no other suite is in its counts).
+# three docboy floors up to it. report-update folds this in when the corpus is
+# present, but it stays a SEPARATE function from update_readme_report so the
+# hardware table + its ratchet stay byte-identical whether or not the docboy
+# corpus is present (pre-commit report-update runs with it stashed away, and
+# then this is simply not called). Reuses ratchet_thresholds -- a docboy-only
+# table only bumps the docboy floors (no other suite is in its counts).
 update_docboy_readme() {
     local readme="$ROOT/README.md" tmp out
     grep -q '<!-- DOCBOY-TRIPWIRE:START -->' "$readme" \
@@ -961,6 +963,22 @@ if [ "$1" = "report-update" ]; then
                 || die "report-update: refusing to publish an unmeasurable progress table"
             echo "run-suites: report-update skipped (some suites' ROMs are not present)"
         fi
+        # The docboy tripwire is first-class: refresh its own labeled README
+        # sub-table (and ratchet its three floors) in the same path. This is
+        # NON-FATAL when the corpus is absent -- pre-commit runs with the
+        # gitignored docboy corpus stashed away, so docboy_corpus_present is
+        # false and the DOCBOY-TRIPWIRE block is left byte-identical (never
+        # blocking the commit). When the corpus IS present (CI after `make
+        # setup`, or a manual full run) it refreshes the block. The hardware
+        # table above and this block are independent: the hardware SUITE-PROGRESS
+        # table + its ratchet stay byte-identical whether or not docboy is here.
+        if docboy_corpus_present; then
+            if ! update_docboy_readme; then
+                [ -z "${CI:-}" ] \
+                    || die "report-update: refusing to publish a stale docboy tripwire block"
+                echo "run-suites: docboy tripwire refresh skipped"
+            fi
+        fi
     else
         echo "run-suites: report-update skipped (binary or ROM set not present)"
     fi
@@ -975,19 +993,21 @@ bin_ready || die "runner binary not found at $BIN (run: $0 build)"
 # Propagate generate_report's refusal (3) instead of exiting 0 on an empty table.
 if [ "$1" = "report" ]; then generate_report || exit $?; exit 0; fi
 
-# Opt-in docboy tripwire refresh: measure the three diff suites, rewrite the
-# DOCBOY-TRIPWIRE README block, and ratchet their floors. Separate from
-# report-update so the hardware table + gate stay untouched when docboy is not
-# provisioned. Run it as: RB_DOCBOY=1 tools/run-suites.sh report-docboy
-# (setup fetches the corpus; RB_SKIP_SETUP=1 reuses an already-provisioned one).
+# Docboy-only tripwire refresh: measure the three diff suites, rewrite the
+# DOCBOY-TRIPWIRE README block, and ratchet their floors -- WITHOUT touching the
+# hardware table. `report-update` folds this in when the corpus is present; this
+# subcommand is the standalone path for refreshing only the docboy block (setup
+# provisions the corpus; RB_SKIP_SETUP=1 reuses an already-provisioned one).
 if [ "$1" = "report-docboy" ]; then update_docboy_readme || exit $?; exit 0; fi
 
 if [ "$1" = "all" ]; then
     # shellcheck disable=SC2086  # ORDER is a space-separated list of bare words
     set -- $ORDER
-    # Append the docboy tripwire suites when their corpus is provisioned (opt-in
-    # RB_DOCBOY=1 fetch). Absent = simply not appended; run_suite would skip them
-    # anyway, so `all` never fails for lack of the ~260 MiB docboy corpus.
+    # Append the docboy tripwire suites. setup always provisions their corpus, so
+    # a normal `all` always runs and gates them. The corpus-present guard is a
+    # safety net for a docboy-less environment (pre-commit stashes the gitignored
+    # corpus): absent = simply not appended; run_suite would skip them anyway, so
+    # `all` never fails for lack of the ~260 MiB docboy corpus.
     if docboy_corpus_present; then
         # shellcheck disable=SC2086  # DOCBOY_SUITES is a space-separated word list
         set -- "$@" $DOCBOY_SUITES
