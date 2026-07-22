@@ -8273,22 +8273,32 @@ impl Ppu {
             } else {
                 mmio.read(SCX) & 0x07
             };
-            // CGB WX=0 with a fine SCX scroll: the window's takeover of the
-            // pixel stream is two tile-fetches late. The window grid is
-            // anchored at screen x = -(8 + scx&7) exactly as on DMG, but its
-            // first two columns never reach the LCD -- the BACKGROUND keeps
-            // supplying pixels through them, so the window becomes visible at
-            // x = 8 - scx&7 starting from its tile column 2. scx&7 == 7
-            // behaves as 6 (one prologue pixel fewer is consumed while the
-            // window is being fetched).
-            // Evidence: SameBoy-from-source (CGB-C and CGB-E agree) on the
-            // docboy window_wx0_scxN ROMs widened to a 6-tile window marker:
-            // scx1..6 render 8-scx BG pixels then 32 window pixels (window
-            // columns 2..5), scx7 renders 2 then 32; DMG renders 48-(8+scx)
-            // window pixels from x0 with no BG. scx&7 == 0 keeps the plain
-            // 7-WX chop on both models.
+            // CGB WX=0 with a fine SCX scroll: the window takes the stream over
+            // at once, its grid anchored at screen x = -(8 + scx&7) as on DMG,
+            // but the fetches covering its first two columns are GLITCHED --
+            // they skip the tile-MAP read, so they draw the PREVIOUS scanline's
+            // last tile number (and attributes) at this line's window row (see
+            // Fetcher::wx0_glitch_fetches). SameBoy Core/display.c
+            // GB_update_wx_glitch sets cgb_wx_glitch for WX==0 while
+            // position_in_line is in [-16,-8] (extended to -7 with fractional
+            // scrolling), which gates GET_TILE_T2; the two tile-data reads
+            // still run. Column 0 is entirely off-screen, so only the on-screen
+            // part of column 1 shows the glitch: 8-(scx&7) pixels at x = 0..,
+            // with column 2 the first real window column at x = 8 - scx&7.
+            // scx&7 == 7 discards one pixel fewer (SameBoy's `(position_in_line
+            // & 7) == 6 && scx&7 == 7` shortcut while the window is being
+            // fetched), so it lands like scx&7 == 6.
+            // Evidence: on a probe whose window map row 0 uses a different tile
+            // from rows 1+, and whose tile rows alternate colour, x0..6 renders
+            // the previous row's TILE at the current row's LINE -- a colour
+            // present in neither that scanline's background nor its window. The
+            // background cannot supply it. SameBoy CGB-C and CGB-E agree
+            // pixel-for-pixel over the whole probe set; docboy's
+            // window_wx0_scx1_fancy_tile0 reference is wrong there.
+            // scx&7 == 0 does not glitch (the window activates at
+            // position_in_line == -7, past the glitch window) and keeps the
+            // plain 7-WX chop.
             let cgb_wx0_fine = is_cgb && wx == 0 && scx_fine != 0;
-            let cgb_wx0_fine_x = 8 - scx_fine.min(6);
             // DMG WX=0 with a fine SCX scroll: same anchor, but the window
             // takes the stream over immediately, so window column 1 pixel
             // scx&7 is what lands at x0 -- the first fetched column is 1, not
@@ -8305,9 +8315,7 @@ impl Ppu {
             // read the WE-off pulse), the very next dot still matches via
             // WX == x+6 and starts the window one pixel late (at WX-6).
             let should_start_window = wx_allowed
-                && if cgb_wx0_fine {
-                    self.x == cgb_wx0_fine_x
-                } else if wx < 7 {
+                && if wx < 7 {
                     self.x == 0 && !(is_dmg && (1..7).contains(&wx))
                 } else {
                     self.x + 7 == wx || (is_dmg && self.x >= 1 && self.x + 6 == wx)
@@ -8335,10 +8343,18 @@ impl Ppu {
                     return true;
                 }
                 // Window draw-start (the mode-3-start window checkpoint /
-                // plot win_draw_start). The deferred CGB WX=0 fine-scroll
-                // start skips the two window columns the BG covered for.
+                // plot win_draw_start).
                 if cgb_wx0_fine {
-                    self.begin_window_draw_at_tile(self.x, 2);
+                    // Column 0 lies entirely left of the screen, and rustyboi's
+                    // prologue -- unlike hardware's -- does not run a discarded
+                    // dummy first fetch, so the first FETCHED column here is the
+                    // first DISPLAYED one: column 1. Both hardware fetches over
+                    // columns 0 and 1 are glitched, but they reuse the same
+                    // stale tile number, so eliding column 0 leaves one armed
+                    // glitch and keeps the prologue's dot budget identical to
+                    // the background's.
+                    self.begin_window_draw_at_tile(self.x, 1);
+                    self.fetcher.arm_wx0_glitch(1);
                 } else if dmg_wx0_fine {
                     self.begin_window_draw_at_tile(self.x, 1);
                 } else {
@@ -8405,7 +8421,18 @@ impl Ppu {
                     }
                     self.win_fetch_anchor =
                         Some(self.ticks.wrapping_sub(chop as u128));
-                } else if wx < 7 && !cgb_wx0_fine {
+                } else if cgb_wx0_fine {
+                    // The SCX fine-scroll discard below trims scx&7 pixels off
+                    // the glitched column 1, leaving 8-(scx&7) of it on screen
+                    // and column 2 at x = 8 - scx&7. scx&7 == 7 stops one pixel
+                    // early (SameBoy's `(position_in_line & 7) == 6 && scx&7 ==
+                    // 7` shortcut while the window is being fetched), so it
+                    // lands like scx&7 == 6.
+                    self.win_first_tile_chop = 0;
+                    if scx_fine == 7 {
+                        self.m3_pixels_discarded = 1;
+                    }
+                } else if wx < 7 {
                     // CGB window left-clip chop (window_wx0..6):
                     // a WX<7 window activates at LX==0 with chop = 7-WX
                     // pixels of its first tile off the left edge. SameBoy

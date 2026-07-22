@@ -219,7 +219,7 @@ DOCBOY_WRONG = frozenset({
 # are a legit C-vs-E divergence, not a docboy bug, so both sides stay. See the
 # docboy-differential memory note; the transcoder self-checks that all fire.
 DOCBOY_WRONG_CGB = frozenset({
-    # native cgb (17)
+    # native cgb (18)
     "speed_switch_to_double_stop_ppu_off",
     "halt_ppu_off",
     "stop_ly42_during_hblank_a",
@@ -237,6 +237,12 @@ DOCBOY_WRONG_CGB = frozenset({
     "turn_off_y50_stall_nops50",
     "turn_off_y50_stall_nops51",
     "window_bg_reprise_wx25",
+    # docboy paints a 7-column BG stripe over the CGB WX=0 fine-SCX window
+    # glitch (see Ppu::mode3_activate_window): hardware draws the previous
+    # scanline's tile there, not background. SameBoy CGB-C and CGB-E render it
+    # uniform and agree with rustyboi pixel-for-pixel, stable across
+    # --length 4..10; docboy is the sole outlier.
+    "window_wx0_scx1_fancy_tile0",
     # cgb_dmg_mode (6)
     "change_bg_tile_data_glitch_mealybug_var42",
     "enable_win_during_pixel_transfer_round1",

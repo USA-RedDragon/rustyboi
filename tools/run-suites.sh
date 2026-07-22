@@ -181,7 +181,7 @@ threshold() {
         # docboy_transcode.py (DOCBOY_WRONG / DOCBOY_WRONG_CGB), so a floor's
         # denominator is already the honest, artifact-free reference set.
         docboy_diff_dmg)          echo "522 15" ;;  # 522/531; +2 DMG window-Y comparator re-run on a WY/LCDC store (window_trigger_wy_blink_during_oam_scan, window_trigger_win_disabled_blink_enabled), +2 window-reactivation insert across a sprite stall (window_retrigger_pixel_glitch_scx0_wx8_wx80_sprite_x72/x74); 46 docboy-wrong refs excluded
-        docboy_diff_cgb)          echo "73 15" ;;   # 73/96; +11 CGB WE-off revert on the fetch grid's display column (window_bg_reprise_wx8..24) + 17 docboy-wrong refs excluded (SameBoy CGB-C+E)
+        docboy_diff_cgb)          echo "72 15" ;;   # 72/95; -1 denominator: window_wx0_scx1_fancy_tile0 joins the docboy-wrong refs (CGB WX=0 fine-SCX window glitch) -> 18 docboy-wrong refs excluded (SameBoy CGB-C+E)
         docboy_diff_cgb_dmg_mode) echo "283 15" ;;  # 283/444; 6 docboy-wrong refs excluded
         *)                  echo "" ;;
     esac

@@ -58,7 +58,7 @@ hardware Total**. "Matching" is the number of frames that equal docboy's
 screenshot under a screen-ever-matches scan. The references that rustyboi and
 SameBoy-from-source agree docboy rendered wrong (a spurious artifact, cross-
 checked against mealybug hardware) are excluded rather than asserted: 46 on DMG,
-and now 23 on CGB, adjudicated against SameBoy at both CGB-C and CGB-E (a
+and now 24 on CGB, adjudicated against SameBoy at both CGB-C and CGB-E (a
 handful of CGB-C-vs-E revision splits are left as-is, not dropped). The corpus is
 provisioned automatically by `tools/run-suites.sh setup`, gated by
 `tools/run-suites.sh all`, and refreshed alongside the hardware table by
@@ -68,9 +68,9 @@ provisioned automatically by `tools/run-suites.sh setup`, gated by
 | Tripwire (docboy diff, non-gating) | Matching | Total |
 | :--- | ---: | ---: |
 | docboy_diff_dmg | 522 | 531 |
-| docboy_diff_cgb | 73 | 96 |
+| docboy_diff_cgb | 72 | 95 |
 | docboy_diff_cgb_dmg_mode | 283 | 444 |
-| **Tripwire total** | **878** | **1071** |
+| **Tripwire total** | **877** | **1070** |
 <!-- DOCBOY-TRIPWIRE:END -->
 
 ## RetroArch / libretro core

@@ -139,6 +139,28 @@ pub(super) struct Fetcher {
     last_low_tds: bool,
     #[serde(default)]
     last_high_tds: bool,
+
+    // CGB WX=0 window glitch (SameBoy Core/display.c: GB_update_wx_glitch plus
+    // the `cgb_wx_glitch` gate on GET_TILE_T2). While armed, a fetch skips its
+    // tile-MAP read: the tile number and attributes stay at the previous
+    // fetch's values. The two tile-DATA reads still happen, addressed by that
+    // stale tile number at this fetch's live tile row -- so the row that
+    // reaches the FIFO is the previous scanline's last tile number drawn at the
+    // CURRENT window row. The window tile column still advances.
+    // Kept out of the savestate wire format in this commit so the golden
+    // fixtures stay byte-exact; promoted in the follow-up that unskips the
+    // PPU's other transients and regenerates them once.
+    #[serde(skip)]
+    wx0_glitch_fetches: u8,
+    // The tile number / attributes the glitched fetch reuses: the PREVIOUS
+    // scanline's last completed fetch. Snapshotted by `reset()` (mode-3 start)
+    // rather than tracked live, because hardware aborts this line's first
+    // background fetch before its tile-map read while rustyboi's pipeline has
+    // already run it.
+    #[serde(skip)]
+    glitch_tile_num: u8,
+    #[serde(skip)]
+    glitch_attrs: u8,
 }
 
 impl Fetcher {
@@ -163,6 +185,9 @@ impl Fetcher {
             last_low_tds: false,
             last_high_tds: false,
             last_bg_tn_col: 0,
+            wx0_glitch_fetches: 0,
+            glitch_tile_num: 0,
+            glitch_attrs: 0,
         }
     }
 
@@ -175,6 +200,8 @@ impl Fetcher {
     }
 
     pub(super) fn reset(&mut self) {
+        self.glitch_tile_num = self.tile_num;
+        self.glitch_attrs = self.tile_attributes;
         self.state = State::TileNumber;
         self.pixel_fifo.reset();
         self.tile_num = 0;
@@ -185,6 +212,7 @@ impl Fetcher {
         self.window_x_start = 0;
         self.stop_window_after_tiles = 0;
         self.window_revert_at_push = false;
+        self.wx0_glitch_fetches = 0;
         // Hold the OAM-DMA conflict bus at AND-identity for the new line until the
         // fetcher drives a real address (the first locked read is suppressed in
         // mmio; this guards against a stale cross-line address conflicting).
@@ -205,6 +233,12 @@ impl Fetcher {
         // A fresh window start cancels any pending deferred WE-off revert.
         self.stop_window_after_tiles = 0;
         self.window_revert_at_push = false;
+        self.wx0_glitch_fetches = 0;
+    }
+
+    // Arm `n` glitched (VRAM-read-free) fetches; see `wx0_glitch_fetches`.
+    pub(super) fn arm_wx0_glitch(&mut self, n: u8) {
+        self.wx0_glitch_fetches = n;
     }
 
     // Stop the window, but draw `extra` additional full window tiles first.
@@ -351,6 +385,7 @@ impl Fetcher {
             self.latched_y
         };
         let tile_line = y % 8;
+        let glitched = self.wx0_glitch_fetches > 0;
 
         match self.state {
             State::TileNumber => {
@@ -416,28 +451,37 @@ impl Fetcher {
                 let map_addr = tile_map_base + map_offset;
                 self.last_vram_addr = map_addr;
                 self.last_vram_bank = 0;
-                self.tile_num = mmio.read_vram_bank(0, map_addr);
-                // DMG bus-glitch OR-read: mid-read map-select transition drives
-                // both map addresses within the read dot; the latched tile
-                // number is the union of both cells' 1-bits. The corrupted
-                // number feeds this tile's data reads (hardware pipeline latch).
-                if let Some(l2) = lcdc_state.or_lcdc {
-                    let alt_base = if self.fetching_window {
-                        self.get_window_tile_map_base(l2)
-                    } else {
-                        self.get_tile_map_base(l2)
-                    };
-                    if alt_base != tile_map_base {
-                        self.tile_num |= mmio.read_vram_bank(0, alt_base + map_offset);
-                    }
-                }
-
-                // In CGB mode, read tile attributes from VRAM bank 1
-                self.tile_attributes = if mmio.is_cgb_features_enabled() {
-                    mmio.read_vram_bank(1, map_addr)
+                if glitched {
+                    // GET_TILE_T2 never runs, so the tile number and the
+                    // attributes stay at the last real fetch's values. Both
+                    // tile-DATA reads below still run, addressed by this stale
+                    // tile number at the live tile row.
+                    self.tile_num = self.glitch_tile_num;
+                    self.tile_attributes = self.glitch_attrs;
                 } else {
-                    0 // No attributes in DMG mode
-                };
+                    self.tile_num = mmio.read_vram_bank(0, map_addr);
+                    // DMG bus-glitch OR-read: mid-read map-select transition drives
+                    // both map addresses within the read dot; the latched tile
+                    // number is the union of both cells' 1-bits. The corrupted
+                    // number feeds this tile's data reads (hardware pipeline latch).
+                    if let Some(l2) = lcdc_state.or_lcdc {
+                        let alt_base = if self.fetching_window {
+                            self.get_window_tile_map_base(l2)
+                        } else {
+                            self.get_tile_map_base(l2)
+                        };
+                        if alt_base != tile_map_base {
+                            self.tile_num |= mmio.read_vram_bank(0, alt_base + map_offset);
+                        }
+                    }
+
+                    // In CGB mode, read tile attributes from VRAM bank 1
+                    self.tile_attributes = if mmio.is_cgb_features_enabled() {
+                        mmio.read_vram_bank(1, map_addr)
+                    } else {
+                        0 // No attributes in DMG mode
+                    };
+                }
 
                 self.state = State::TileDataLow;
                 Some(FetcherDebugEvent {
@@ -515,6 +559,7 @@ impl Fetcher {
                 }
                 self.tile_index = self.tile_index.wrapping_add(1);
                 self.state = State::TileNumber;
+                self.wx0_glitch_fetches = self.wx0_glitch_fetches.saturating_sub(1);
                 // Deferred WE-off revert: the last extra window tile has now
                 // been pushed; revert to BG for subsequent fetches.
                 if self.window_revert_at_push {
