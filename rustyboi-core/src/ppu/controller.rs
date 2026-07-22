@@ -8230,6 +8230,21 @@ impl Ppu {
                     }
                     self.win_fetch_anchor =
                         Some(self.ticks.wrapping_sub(chop as u128));
+                } else if wx < 7 {
+                    // EXPERIMENT — CGB window left-clip chop (window_wx0..6):
+                    // a WX<7 window activates at LX==0 with chop = 7-WX
+                    // pixels of its first tile off the left edge. SameBoy
+                    // (CGB-C/E) and docboy DRAW the window's own chopped
+                    // leading pixels; rustyboi currently drew the full
+                    // first window tile and shifted the content one tile
+                    // right (window_wx1..6 / window_wx0_scx0 leftmost
+                    // columns render BG-ish instead of window). Pop the
+                    // chopped leading window pixels through the x==0
+                    // prologue (win_first_tile_chop); the CGB fetcher fills
+                    // on the normal cadence, so no DMG-style fetch-anchor
+                    // phase-lock is needed. Leaves the WX=0+SCX fine-scroll
+                    // discard (win_x0_locked / m3_window_timing_wx_0) intact.
+                    self.win_first_tile_chop = 7 - wx;
                 }
                 // The post-window sprite group restarts the BG-tile grid
                 // (hardware resets the previous sprite tile number to none after

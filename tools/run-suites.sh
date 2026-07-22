@@ -181,7 +181,7 @@ threshold() {
         # docboy_transcode.py (DOCBOY_WRONG / DOCBOY_WRONG_CGB), so a floor's
         # denominator is already the honest, artifact-free reference set.
         docboy_diff_dmg)          echo "512 15" ;;  # 512/531; 46 docboy-wrong refs excluded
-        docboy_diff_cgb)          echo "46 15" ;;   # 46/96; 17 docboy-wrong refs excluded (SameBoy CGB-C+E)
+        docboy_diff_cgb)          echo "54 15" ;;   # 54/96; +8 CGB window left-clip chop (window_wx1..6 / wx0_scx0) + 17 docboy-wrong refs excluded (SameBoy CGB-C+E)
         docboy_diff_cgb_dmg_mode) echo "283 15" ;;  # 283/444; 6 docboy-wrong refs excluded
         *)                  echo "" ;;
     esac
