@@ -1,34 +1,53 @@
 # Known Failures — every failing ROM, with proof
 
-42 test cases fail across the 28 suites: 4 in gbmicrotest, 9 in gambatte, 29 in gbc_hw_tests. Every one of the 42 is adjudicated below. Entries make **no assumptions**: every claim is tagged with its provenance, reproducible claims include the command that re-verifies them against this tree, and claims that outrun their evidence are labelled **PROVISIONAL** rather than dressed up.
+16 test cases fail across the 28 suites: 3 in gbmicrotest, 9 in gambatte, 4 in gbc_hw_tests. Every one of the 16 is adjudicated below. Entries make **no assumptions**: every claim is tagged with its provenance, reproducible claims include the command that re-verifies them against this tree, and claims that outrun their evidence are labelled **PROVISIONAL** rather than dressed up.
 
-Counts measured at `87e29aa3` after an explicit `cargo build --release -p rustyboi-test-runner` (this tree has a documented stale-binary trap that has produced false PASS, false FAIL *and* a committed false README count — never quote a number produced without a rebuild) **[R]**:
+Counts measured at `9297ac9b` after an explicit `cargo build --release -p rustyboi-test-runner` (this tree has a documented stale-binary trap that has produced false PASS, false FAIL *and* a committed false README count — never quote a number produced without a rebuild) **[R]**:
 
 ```sh
 $ cargo build --release -p rustyboi-test-runner   # MANDATORY: never skip
 $ RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 tools/run-suites.sh gbc_hw_tests
 Ran 342 total tests.
-29 total failures.
+4 total failures.
 Ran 301 CGB tests.
-29 CGB failures.
+4 CGB failures.
 Ran 41 DMG tests.
 0 DMG failures.
-PASS  gbc_hw_tests         passed=313/342 (floor: passed>=313)
+PASS  gbc_hw_tests         passed=338/342 (floor: passed>=338)
 ```
+
+**This is a large change from the 313/342 the previous revision of this file
+documented, and the direction is worth stating up front.** In the interval a run
+of revision-gated PPU/timer fixes closed **25 of the 29 gbc_hw_tests rows** that
+revision recorded — including *every* row it had filed as `ORACLE-CONFLICT` under
+`lcd_frame_timings` (21), `dma_timing_lcd_on` (2) and `lcd/mode3` (2). Those were
+**not** resolved by establishing silicon provenance, the way that revision
+predicted they would have to be; they were fixed in the emulator, gated on the
+CGB-D/E double-speed phase, without regressing any counter-oracle. Their entries
+are **deleted**, not left describing green tests. This is the same lesson the
+`oam_echo_ram` conflict taught earlier — an "irreducible" oracle conflict
+dissolving under a closer look — at 25× the scale; read every remaining
+`ORACLE-CONFLICT` verdict below with that precedent in mind.
 
 Note **342**, not the 343 earlier revisions of this file quote: `tac_set_enabled`'s CGB
 column was removed from the manifest after adjudication — its capture is
 structurally defective (DMG-shaped 15364 bytes where every other CGB capture of
 that ROM family is 31748), so the row count itself dropped by one. **The whole
-DMG column is now green.**
+DMG column is green.**
 
-The other two suites are unchanged at this revision **[R]**:
+The other two failure-carrying suites **[R]**:
 
 ```sh
 $ RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 tools/run-suites.sh gbmicrotest gambatte
 PASS  gbmicrotest          passed=509/512 (floor: passed>=509)
 PASS  gambatte             passed=5248/5257 failed=9 (floor: failed<=9)
 ```
+
+gambatte is unchanged at 9 failures. gbmicrotest carries 3 failures over 512
+rows: `temp.gb` was excluded from the manifest (it writes no verdict of any kind
+— see the gbmicrotest section), which is why the total is 512 not 513, and why
+the three failure-carrying suites now sum to 3 + 9 + 4 rather than the
+temp-inclusive 4 an earlier header line carried.
 
 Two suites are cited repeatedly below as *counter-oracles* — the ones that a
 "fix" for a contested gbc_hw_tests row would break. Both are green **[R]**:
@@ -39,12 +58,12 @@ PASS  mooneye              passed=193/193 (floor: passed>=193)
 PASS  age                  passed=56/56 (floor: passed>=56)
 ```
 
-So the three suites that carry failures stand at 4 + 9 + 29 = **42**. The corpus
-total is **6842** (the previous revision's 6843 less the one retired
-`tac_set_enabled` CGB row); that total is *derived*, not re-measured here,
-because re-running the full 28-suite battery was out of scope for this pass.
-Treat 6842 as arithmetic on the three measured suites plus an unchanged
-remainder, and re-measure before quoting it as a headline.
+So the three suites that carry failures stand at 3 + 9 + 4 = **16**. The full
+28-suite battery was **not** re-run for this doc-only pass; the corpus case total
+is **6841** (the previous revision's 6842 less the now-excluded gbmicrotest
+`temp.gb`), of which 16 fail. That figure is *derived*, not re-measured here — it
+is arithmetic on the three measured suites plus an unchanged remainder, and it
+must be re-measured before quoting as a headline.
 
 > **The README suite table is regenerated separately and is not the source here.** This document's arithmetic comes only from the runs pasted above. Fixing or confirming the README is a separate change and is out of scope for this file.
 
@@ -59,7 +78,7 @@ Provenance tags:
 Verdict classes:
 
 - **LOGIC-IMPOSSIBLE** — real-hardware captures pin the *same physical quantity* to different values in different capture sessions. A deterministic emulator must pick one value, so for each such family the failure count is forced by arithmetic, not by a modeling gap.
-- **ORACLE-CONFLICT** — two *different* real-hardware oracles, each independently credible, demand incompatible answers for the same behaviour. Distinct from LOGIC-IMPOSSIBLE, which is one oracle disagreeing with *itself* across sessions: here each oracle is internally consistent, so the failure is not forced by arithmetic — it is forced by a choice about *which oracle is authoritative*, and that choice cannot be made from the captures alone. Resolving one requires establishing provenance (which silicon revision, which physical unit, which capture is intact) — not emulator work. **As of 2026-07-21 this is the single largest class in the document**: it covers 25 of the 29 gbc_hw_tests rows. Note that an ORACLE-CONFLICT can dissolve: the former `oam_echo_ram` conflict was resolved as a **revision mismatch** once both sides' `rev=` pins were compared, and both oracles now pass simultaneously (its entry has since been deleted, the family being green). That precedent is live for §1b.
+- **ORACLE-CONFLICT** — two *different* real-hardware oracles, each independently credible, demand incompatible answers for the same behaviour. Distinct from LOGIC-IMPOSSIBLE, which is one oracle disagreeing with *itself* across sessions: here each oracle is internally consistent, so the failure is not forced by arithmetic — it is forced by a choice about *which oracle is authoritative*, and that choice cannot be made from the captures alone. **This class has proven the most reversible in the document, and the reader should treat every instance below as provisional-until-disproven.** The previous revision filed 25 of its 29 gbc_hw_tests rows here and called the arithmetic "firm"; a later run of revision-gated PPU fixes then closed all 25 — the conflicts were not between two same-silicon oracles at all, but artifacts of applying one offset globally instead of gating it on the CGB-D/E double-speed phase. Once gated, both "conflicting" oracles pass at once. That is the second time an ORACLE-CONFLICT here has dissolved: the earlier `oam_echo_ram` conflict resolved as a **revision mismatch** once both sides' `rev=` pins were compared. So while resolving a *genuine* one requires provenance work (which silicon revision, which physical unit, which capture is intact) rather than emulator work, the standing lesson is that most rows filed here were mis-filed. Only the 2 `hdma_timing_fine` rows still carry this class, and even they name the specific missing measurement that would settle them (§1).
 - **BLOCKED-ON-ORACLE** — a hardware-correct answer exists in principle, but no captured/documented value exists anywhere; grading the emulator's own output would assert nothing. Unblockable with real hardware.
 - **UN-GRADEABLE** — the ROM writes no stable verdict anywhere.
 - **ANALOG** — the behavior has no register-level correlate; reproducing the value without a physical derivation would be a single-observable fit.
@@ -229,35 +248,40 @@ The `srcC000` twin **passes**. Poking C113=F7 flips which of the two passes — 
 
 ---
 
-## gbc_hw_tests — 29 failures (313/342)
+## gbc_hw_tests — 4 failures (338/342)
 
 Adopted from AntonioND/gbc-hw-tests (real-device SRAM captures; see SUITES.md
 for grading provenance and the revision caveat). Each ROM is graded per
 *column*: CGB (`rev=cgbe`, vs `real_gbc.sav`), AGB (`rev=agb`, vs `real_gba.sav`
 where the dir ships one, else `real_gba_sp.sav`), and for DMG-flagged ROMs a DMG
-column. A "row" below is one (ROM, column) case, which is what the 29 counts.
+column. A "row" below is one (ROM, column) case, which is what the 4 counts. The
+runner prints these rows as `CGB` because they all run on CGB-mode silicon; the
+`#agb` rows differ only in carrying `rev=agb` and grading against an AGB capture.
 
-**This section was rewritten on 2026-07-21 after a large day of fixes took the
-suite 284/343 → 313/342** (59 failures → 29, and one row retired). Every family
-the previous revision described as failing that is now green has had its entry
-**deleted**, not left standing. Those are:
+**This section was reconciled to the 338/342 live state.** The previous revision
+documented 29 failures at 313/342 and filed 25 of them as `ORACLE-CONFLICT`; a
+run of revision-gated PPU/timer fixes then closed all 25. Every family that is
+now green has had its entry **deleted**, not left describing a passing test:
 
-| retired family | rows | how it closed |
+### What closed since 313/342
+
+| closed family | rows | how it closed |
 |---|---:|---|
-| `dma/hdma_halt` | 2 | manifest `skip=` extended to `0x3-0x6,0x9-0xA` — the previous revision's own recommendation |
-| `timers/tac_set_enabled` (CGB) | 1 | column removed from the manifest (defective capture); this is why the suite is 342, not 343 |
-| `timers/tac_set_enabled` (AGB) | 1 | fixed |
-| `dma/dma_valid_sources_dmg_mode` | 1 | fixed — the DMG column is now green |
-| `memory/oam_echo_ram_lcd_on` | 2 | fixed (OAM-lock assertion window) |
-| `lcd/mode2` | 2 | fixed (4-cell OAM-lock edge) |
-| `lcd/lcd_frame_timings/*` | 21 | 42 → 21 rows across the day's PPU/IF/timer fixes |
+| `lcd/lcd_frame_timings/*` | 21 | fixed — the CGB-D/E double-speed STAT mode-bit and LY=LYC coincidence work (commits `81419a5e`, `102f3733`, `12a88ae3`, `d0230e38`, `140864f4`, `98bcb076`, `af94f21b`, `25c09e6d`), gated on the post-C double-speed phase so mooneye/age/gambatte were untouched |
+| `dma/dma_timing_lcd_on` | 2 | fixed — the non-serviced-HALT-woken OAM read resolved on the CPU M-cycle grid (`58398084`) |
+| `lcd/mode3` | 2 | fixed — the DS mode-3 STAT-read boundary put 3 dots below m0 on CGB-D/E + AGB (`102f3733`, `140864f4`) |
 
-The single largest structural change is that **`lcd/mode3`, `dma/hdma_timing_fine`
-and the bulk of `lcd/lcd_frame_timings` have all converged onto the same shape**:
-a small, uniform, *fully characterized* offset that we can close at will — and
-that closing it craters an independent, currently-passing real-silicon suite.
-They are ORACLE-CONFLICTs, not modelling gaps, and they are now the majority of
-what remains.
+**The headline correction this makes to its predecessor:** those 25 rows were
+filed as unfixable oracle conflicts — "we can produce the demanded value at will,
+and doing so craters an independent real-silicon suite" — and the prediction was
+that only silicon-provenance work could move them. It was wrong. The fixes were
+emulator-side, gated on the CGB-D/E double-speed phase rather than applied as a
+global offset, and the counter-oracles stayed green throughout
+(`mooneye 193/193`, `age 56/56`, `gambatte failed=9` — all still green **[R]**,
+verified above). The conflict was never between two same-silicon oracles; it was
+between one blunt global constant and the phase-gated behaviour the hardware
+actually shows. Read the two `ORACLE-CONFLICT` rows that remain (§1) with that in
+mind.
 
 ### Method — the runner diagnoses this itself now
 
@@ -291,7 +315,7 @@ $ RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 RB_SRAM_VERBOSE=1 RB_SRAM_TRACE=tac_set_disabl
     tools/run-suites.sh gbc_hw_tests 2>&1 | grep SRAM_BLAME
 SRAM_BLAME off=0x638E want=0xFD got=0xFC pc=0x0342 cc=4193676 src=A from=FF05(TIMA) sym=Main.loop+0xEE
 SRAM_BLAME off=0x6796 want=0xFF got=0xFE pc=0x03D4 cc=4288716 src=A from=FF05(TIMA) sym=Main.loop+0x180
-SRAM_BLAME off=0x6B94 want=0x01 got=0x00 pc=0x0085 cc=1787896 src=A from=-        sym=memset+0x1
+SRAM_BLAME off=0x6B94 want=0x01 got=0x00 pc=0x0085 cc=1787896 src=A from=- sym=memset+0x1
 ```
 
 **This tool is the reason several verdicts in this section are firm rather than
@@ -334,42 +358,27 @@ for ln in open(sys.argv[1]):
         rows.append(m.groups())
 def fam(rom):
     p = rom.replace('gb-test-roms/gbc-hw-tests/', '')
-    if 'lcd_frame_timings' in p:
-        return 'lcd/lcd_frame_timings/' + p.split('lcd_frame_timings/')[1].split('/')[0]
     return '/'.join(p.split('/')[:2])
 agg = collections.defaultdict(lambda: [0, 0])
-xor = collections.Counter()
 for rom, ref, nd, cells in rows:
     a = agg[fam(rom)]; a[0] += 1; a[1] += int(nd)
-    if 'lcd_frame_timings' in rom:
-        for c in cells.split():
-            w, g = re.match(r'0x[0-9A-F]+:want=0x([0-9A-F]+),got=0x([0-9A-F]+)', c).groups()
-            xor[int(w, 16) ^ int(g, 16)] += 1
 print("%-40s %5s %8s" % ("family", "rows", "cells"))
 for k in sorted(agg):
     print("%-40s %5d %8d" % (k, agg[k][0], agg[k][1]))
 print("%-40s %5d %8d" % ("TOTAL", sum(v[0] for v in agg.values()), sum(v[1] for v in agg.values())))
-t = sum(xor.values())
-print("\nlcd_frame_timings XOR(want^got): %s" % dict(xor.most_common()))
-print("  touches STAT mode bits (&0x03): %d of %d" % (sum(v for k, v in xor.items() if k & 3), t))
-print("  touches LYC bit        (&0x04): %d of %d" % (sum(v for k, v in xor.items() if k & 4), t))
 PY
 $ python3 /tmp/fams.py /tmp/verbose.txt
 family                                    rows    cells
-dma/dma_timing_lcd_on                        2       90
 dma/hdma_timing_fine                         2       64
-lcd/lcd_frame_timings/ly_equals_lyc          8      378
-lcd/lcd_frame_timings/mode1                  7      159
-lcd/lcd_frame_timings/mode2                  6      642
-lcd/mode3                                    2       22
 serial/sc_change_freq_gbc                    1     1895
 timers/tac_set_disabled                      1        3
-TOTAL                                       29     3253
-
-lcd_frame_timings XOR(want^got): {3: 746, 1: 208, 2: 189, 4: 31, 6: 4, 5: 1}
-  touches STAT mode bits (&0x03): 1148 of 1179
-  touches LYC bit        (&0x04): 36 of 1179
+TOTAL                                        4     1962
 ```
+
+(The previous revision's `fams.py` carried an extra `lcd_frame_timings`
+`want^got` XOR histogram used to split that family's STAT-mode-bit and LY=LYC
+defects; with the family green there is nothing left for it to bin, so it has
+been dropped from the helper.)
 
 ### Three measurement traps that invalidate naive triage
 
@@ -379,13 +388,14 @@ document*. Read this before quoting any cell count.
 **Trap 1 — a mismatch count at the default budget is not a proximity metric.**
 The suite runs a flat 800-frame budget. A ROM that has not finished writing its
 result table by frame 800 shows its unwritten tail as mismatches, and those
-counts swamp the real ones. `lcd/mode3` was the live example: it read **647**
-diffs at 800 frames and **11** at 4000, because 636 of the 647 were bytes the ROM
-had simply not written yet. A previous revision read those 647 cells as "a value
-error" and built a whole verdict on truncation noise. The manifest now carries
-`frames=3000` on both `lcd/mode3` rows **[R]**, so the family reports its true 11
-cells per row — but the trap is general: **if a family's diff count is large,
-check for unwritten `0xFF` before theorising.**
+counts swamp the real ones. `lcd/mode3` was the example that exposed this: it
+read **647** diffs at 800 frames and **11** at 4000, because 636 of the 647 were
+bytes the ROM had simply not written yet. A previous revision read those 647
+cells as "a value error" and built a whole verdict on truncation noise. The
+manifest now carries `frames=3000` on both `lcd/mode3` rows **[R]**, which cut it
+to its true 11 cells per row; those 11 were subsequently fixed and the family is
+**green** — but the trap is general: **if a family's diff count is large, check
+for unwritten `0xFF` before theorising.**
 
 ```sh
 $ grep -c 'frames=' rustyboi-test-runner/suites/gbc_hw_tests.manifest
@@ -411,254 +421,138 @@ registers. It is now mechanically checkable — `RB_SRAM_TRACE`'s `from=` field
 names the source register — and that is the first thing to run on any unfamiliar
 cell block.
 
-### Family breakdown (rows sum to 29)
+### Family breakdown (rows sum to 4)
 
 | # | Family | Rows | Cells | Verdict | Confidence |
 |---|---|---:|---:|---|---|
-| 1 | `lcd/lcd_frame_timings/*` | 21 | 1179 | ORACLE-CONFLICT (1148 mode-bit cells) + OPEN-TARGET (31 LYC-bit cells) | firm arithmetic; **provenance OPEN** |
-| 2 | `serial/sc_change_freq_gbc#agb` | 1 | 1895 | LOGIC-IMPOSSIBLE (AGB dither) | **provisional** |
-| 3 | `dma/dma_timing_lcd_on` | 2 | 90 | ORACLE-CONFLICT (vs `age/oam-read-cgbE`) | **provisional** |
-| 4 | `dma/hdma_timing_fine` | 2 | 64 | ORACLE-CONFLICT (vs 13 gambatte rows) | firm |
-| 5 | `lcd/mode3` | 2 | 22 | ORACLE-CONFLICT (vs mooneye sprite timing) — **closed** | firm |
-| 6 | `timers/tac_set_disabled#agb` | 1 | 3 | OPEN-TARGET | firm |
+| 1 | `dma/hdma_timing_fine` (CGB + AGB) | 2 | 64 | ORACLE-CONFLICT (vs 13 gambatte rows); the clean fix is BLOCKED-ON-ORACLE | firm arithmetic |
+| 2 | `serial/sc_change_freq_gbc#agb` | 1 | 1895 | BLOCKED-ON-ORACLE (AGB dither, undecidable from one capture) | **provisional** |
+| 3 | `timers/tac_set_disabled#agb` | 1 | 3 | OPEN-TARGET (2 AGB `TIMA` cells) + un-reached fill (1 cell) — **potentially fixable, flagged** | **provisional** |
 
-21+1+2+2+2+1 = **29** rows, 1179+1895+90+64+22+3 = **3253** cells — both match
-the `fams.py` roll-up above **[R]**.
+2+1+1 = **4** rows, 64+1895+3 = **1962** cells — both match the `fams.py` roll-up
+above **[R]**.
 
-Firmly adjudicated: families 1 (arithmetic), 4, 5, 6 — **26 of 29 rows**.
-Provisional: families 2 and 3 — **3 rows**. Family 1 carries an additional open
-*provenance* question that is not about the emulator at all; see §1b.
+**None of the 4 is a settled, uncontested modelling gap the way this section once
+carried dozens.** The one that comes closest is §3: 2 of its 3 cells are a genuine
+`TIMA`-increment gap on the AGB, corroborated by *both* physical AGB units, and
+that is the single item flagged below as **potentially fixable rather than
+floored** — with the caveat that the surrounding AGB-TAC-write behaviour is a
+device-dependent race the manifest header explicitly warns against fitting. §1
+(2 rows) is a live oracle conflict whose clean resolution needs a measurement no
+capture in-tree provides; §2 (1 row) is undecidable from the single GBA-SP
+capture that exists. Every cell count here is the live `fams.py` roll-up; every
+verdict is re-derived below, not carried over.
 
-**Exactly 1 of the 29 rows is a plain modelling gap** — family 6, and within it
-only the 2 `TIMA` cells. The other 28 are either forced by a conflict between two
-credible real-silicon oracles (25 rows), or unfittable/unproven (3 rows). That is
-a materially different situation from the previous revision, where 42 rows sat
-under a single mischaracterized OPEN-TARGET.
+### 1. `dma/hdma_timing_fine` — 2 rows, 32 cells each — ORACLE-CONFLICT (firm); clean fix BLOCKED-ON-ORACLE
 
-### 1. `lcd/lcd_frame_timings/*` — 21 rows, 1179 cells — ORACLE-CONFLICT + OPEN-TARGET
-
-8 rows under `ly_equals_lyc/`, 7 under `mode1/`, 6 under `mode2/` **[R:
-`fams.py`]**. Down from 42 rows.
-
-**These cells really are STAT reads — verified, not assumed [R].** Given Trap 3,
-this is checked rather than presumed; every failing cell in a swept row is an
-`FF41(STAT)` read:
+Both columns of the one ROM fail identically: the CGB row (vs `real_gbc.sav`) and
+the AGB row (`#agb`, vs `real_gba_sp.sav`). Failing in both columns means this is
+not AGB-specific — it is one unmodelled behaviour, imaged twice. It is the
+cleanest signature in the section: every cell is `want = got + 2`, at every odd
+offset, one delta bucket **[R]**:
 
 ```sh
-$ RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 RB_SRAM_TRACE=stat_timings_lyc_0_gbc_mode \
-    tools/run-suites.sh gbc_hw_tests 2>&1 | grep SRAM_BLAME | head -3
-SRAM_BLAME off=0x2257 want=0x84 got=0x87 pc=0x44B2 cc=3098985 src=A from=FF41(STAT) sym=stat_read_test_delay_gbc_0+0x4AF
-SRAM_BLAME off=0x2290 want=0x80 got=0x83 pc=0x4524 cc=3099897 src=A from=FF41(STAT) sym=stat_read_test_delay_gbc_0+0x521
-SRAM_BLAME off=0x22C9 want=0x80 got=0x83 pc=0x4596 cc=3100809 src=A from=FF41(STAT) sym=stat_read_test_delay_gbc_0+0x593
+$ RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 RB_SRAM_VERBOSE=1 \
+    tools/run-suites.sh gbc_hw_tests 2>&1 | grep 'hdma_timing_fine.*CGB real_gbc' \
+  | python3 -c 'import sys,re; c=re.findall(r"0x([0-9A-F]+):want=0x([0-9A-F]+),got=0x([0-9A-F]+)",sys.stdin.read()); print("n=%d deltas(want-got)=%s all_odd=%s" % (len(c),{int(w,16)-int(g,16) for _,w,g in c},all(int(o,16)%2 for o,_,_ in c)))'
+n=32 deltas(want-got)={2} all_odd=True
 ```
 
-**The family contains two independent defects, and this is the key structural
-finding — a fix for either one alone flips zero rows.** The XOR histogram
-separates them cleanly **[R: `fams.py`]**:
+`SRAM_BLAME` attributes all 64 cells (both rows) to `sym=lcd_func+0x8`, `from=-`
+— a computed HDMA byte-count result, not an IO register read.
 
-| `want ^ got` | cells | meaning |
-|---|---:|---|
-| `0x03` / `0x01` / `0x02` | 746 / 208 / 189 | STAT **mode bits** — 1148 cells (97.4%) |
-| `0x04` | 31 | STAT **LY=LYC coincidence bit**, alone |
-| `0x06` / `0x05` | 4 / 1 | both bits at once |
+**We can close this at will, and the cost is 13 gambatte rows.** Zeroing the
+LCD-on HDMA fudge makes both rows byte-exact (+2 rows) and breaks 13
+currently-passing gambatte rows **[V: session]**. No structural discriminator
+exists: the at-risk gambatte rows take the *same code path*, with `kick=false`
+and LCD on. Two independent agent passes split the 13 consumers into 6 that are
+read-phase-sensitive and 7 that behave like elapsed time, with **no block-local
+predicate** that separates them.
 
-So **1148 of 1179 cells touch the mode bits and 36 touch the LYC bit**. A row
-goes green only when *both* are right, which is why mode-bit work has repeatedly
-shown a 0-row delta. Representative LYC cells **[R: `RB_SRAM_VERBOSE`]**:
+**The correction is provably a read-phase effect, not elapsed time — this is the
+load-bearing finding, and it is now re-derivable in-tree [R].** The LCD-on branch
+of the HDMA block-cost path returns `base + 6` (the `else { 6 }` fudge), and
+`sm83.rs` charges that value to the CPU as a stall **raw, with no M-cycle
+rounding** (`return dma_stall;`):
 
+```sh
+$ sed -n '3702,3704p;3717,3718p' rustyboi-core/src/memory/mmio.rs
+        } else {
+            6
+        };
+        let base = if self.is_double_speed_mode() { 68 } else { 36 };
+        base + prefetch_fudge
+$ sed -n '144,146p' rustyboi-core/src/cpu/sm83.rs
+        let dma_stall = mmio.take_dma_stall();
+        if dma_stall > 0 {
+            return dma_stall;
 ```
-ly_equals_lyc/stat_timings_lyc_0_gbc_mode        off=0x2995 want=0x85 got=0x81
-ly_equals_lyc/stat_timings_lyc_152_153_gbc_mode  off=0x295B want=0x85 got=0x81
-```
 
-#### 1a. The mode-bit half (1148 cells) — ORACLE-CONFLICT at one degree of freedom
+So the single-speed LCD-on block costs `36 + 6 = 42` cc = **10.5 M-cycles**. A
+CPU stall that is genuine elapsed transfer time must be a **whole** number of
+M-cycles (the bases 36 = 9 M-cycles and 68 = 17 M-cycles both are). 10.5 cannot
+be elapsed time; the `+6` is a downstream read-phase correction wearing a stall's
+clothing. `hdma_timing_fine` measures the block cost *immediately* and so wants
+the M-cycle-aligned 36; the 13 gambatte consumers read their value further
+downstream, and at least 7 of them need the `+6`.
 
-`get_stat_mode3to0_at_cc` (`rustyboi-core/src/ppu/controller.rs:10487`) resolves
-the mode-3→0 boundary as a pure function of `d = m0t − cc`, with **exactly one
-degree of freedom** — the comparison offset. Two same-silicon oracles pin it to
-different values on *plain* double-speed geometry (`scx=0`, no sprites), so no
-single constant satisfies both **[V: session experiment, not reproducible at this
-revision — the core is unmodified]**:
+**The obvious fix is structurally impossible [V: session].** The natural move —
+carry the correction in `prefetch_stat_bias` — cannot work, because **8 of the 13
+at-risk gambatte rows never read STAT at all**; they read `FF55`. A STAT-keyed
+bias has no way to reach them. Any real fix has to model the read-phase distance
+directly.
 
-| oracle | needs | implies |
-|---|---|---|
-| `age` `spsw-mode0-cgbBCE` | `d=3` → mode 3 | offset ≤ 2 |
-| gbc-hw `stat_timings` | `d=4` → mode 0 | offset ≥ 4 |
+**Verdict: ORACLE-CONFLICT (firm on the arithmetic); the clean resolution is
+BLOCKED-ON-ORACLE.** +2 gbc_hw_tests for −13 gambatte is not a defensible trade,
+so the rows stand. What would unblock a fix that satisfies *both* oracles is a
+single CGB ROM measuring one HDMA block's cost **both immediately and ≥1 frame
+later on the same silicon** — the experiment that pins the read-phase distance and
+splits the 13 consumers. No such capture exists in-tree, which is why the clean
+fix, not just the trade, is blocked.
 
-Setting offset 4 fixes **all** the mode-bit errors and takes `gambatte` 9 → 146
-failures and `age` 56 → 52. A geometry-gated resolver was tried and also fails
-(`age` 55/56), which **falsifies** the natural hypothesis that this is an
-`scx`/sprite-penalty effect — it is not. Both counter-oracles are green at this
-revision **[R]** (`mooneye 193/193`, `age 56/56`, `gambatte failed=9`), so the
-conflict is live, not historical.
+### 2. `serial/sc_change_freq_gbc#agb` — 1 row, 1895 cells — BLOCKED-ON-ORACLE (**provisional**)
 
-**The residual shape [V: session].** Hardware splits its mode-3 runs 50/50
-between 22- and 21-probe; we produce 75/25 — always one probe too long. And the
-**entire single-speed half of every capture is byte-perfect; every error is in
-double-speed.** Consistent with that, the failing offsets in a swept row begin at
-`0x2257` in a 62082-byte capture — everything before is exact **[R:
-`RB_SRAM_VERBOSE`]**. The single/double-speed attribution itself comes from the
-session's table decode and is **attributed, not re-derived here** (upstream
-`.asm` is not in-tree).
+The CGB column passes; only the AGB column (`#agb`, graded against the emitted
+GBA-SP prefix) fails, at 1895 cells **[R: `fams.py`]**. `SRAM_BLAME` places every
+one of them at `pc=0x0058`, `from=-` — a tight result-store loop, not an IO read.
 
-#### 1b. The provenance question — **OPEN, not resolved**
+**The claim is that this row cannot be fitted by *any* deterministic model, and
+the honest label for that is BLOCKED-ON-ORACLE, not LOGIC-IMPOSSIBLE [V: session,
+PROVISIONAL — not re-derived here].** The AGB serial dither is reported to be
+*not* a function of the divider: identical divider inputs at sweep iterations
+**1096 and 1104** produce different values *within the same capture*. If that
+holds, the single GBA-SP capture that exists cannot separate two explanations —
+analog clock drift (unfittable) versus a real dependence on some higher-order bit
+the decode is not tracking (fittable, if identified). One capture cannot choose
+between them, so the row is **undecidable from the evidence in hand** — which is
+BLOCKED-ON-ORACLE. The previous revision filed it as LOGIC-IMPOSSIBLE (one oracle
+contradicting *itself*); that is the stronger claim and it is **not** established,
+because a hidden-bit dependence is not ruled out. Downgraded here on purpose.
 
-The conflict above assumes both oracles describe the same silicon. **That
-assumption is not established, and if it is wrong the conflict may dissolve
-entirely.**
+This is **provisional** on top of that: the iteration-level decode (which capture
+offset corresponds to iterations 1096 / 1104) was not reproduced against this
+tree — it needs the upstream `.asm`, which `sync_gbchwtests_roms` does not copy
+in. Treat "1895 cells" as measured **[R]** and the 1096/1104 finding as
+attributed.
 
-- Our `rev=cgbe` pin on AntonioND's captures is an **inference**, taken from
-  SameBoy-built-from-source, whose gate is `model <= CGB_C`. That establishes
-  only **"post-C"** — it does not distinguish CGB-D from CGB-E. AntonioND
-  documents no revision at all.
-- `age`'s corpus names its units `{cgbBCE, cgbE, cgbBC, cgb}` — with **no D
-  anywhere**.
-
-If AntonioND's unit is a **CGB-D**, the two oracles are simply describing
-different steppings and both can be satisfied by a revision-gated resolver. This
-is being investigated separately and **must not be recorded as adjudicated in
-either direction**. Note the precedent: an earlier revision's `oam_echo_ram`
-ORACLE-CONFLICT dissolved exactly this way, as a revision mismatch, once both
-sides' `rev=` pins were compared.
-
-#### 1c. The LYC half (31 cells) — OPEN-TARGET (firm)
-
-A second, independent defect: the LY=LYC coincidence bit is clear where hardware
-sets it. Small, uniform, and unentangled with §1a's conflict — this is genuine,
-tractable accuracy work, and it is a prerequisite for *any* of these 21 rows
-flipping.
-
-#### 1d. Near-green rows
-
-5 of the 7 `mode1/` rows fail on **one or two cells** each **[R:
-`RB_SRAM_VERBOSE`]** — `mode1_disablestat_end_dmg_mode` (1),
-`mode1_disablestat_gbc_mode` (1), `mode1_disablevbl_gbc_mode` (1),
-`vbl_mode1_lcdoff_dmg_mode` (1), `vbl_mode1_lcdoff_gbc_mode` (2). These are the
-cheapest rows in the section and are worth triaging on their own rather than as
-part of the 21.
-
-### 2. `serial/sc_change_freq_gbc#agb` — 1 row, 1895 cells — LOGIC-IMPOSSIBLE (**provisional**)
-
-The CGB column passes. The AGB column remains.
-
-**The claim is that this row is unfittable by design [V: session, PROVISIONAL —
-not re-derived here].** The AGB serial dither is *provably not a function of the
-divider*: identical inputs at sweep iterations **1096 and 1104** produce
-different values *within the same capture*. If that holds, a single GBA-SP
-capture cannot separate clock drift from a real dependence, and no deterministic
-model can satisfy the table — which is LOGIC-IMPOSSIBLE (one oracle disagreeing
-with itself) rather than a conflict between two oracles.
-
-This is labelled **provisional** because the iteration-level decode was not
-reproduced against this tree; verifying it needs the upstream `.asm` to map sweep
-iterations onto capture offsets. Until then, treat "1895 cells" as measured **[R:
-`fams.py`]** and the verdict as attributed.
+**Unblock:** a second independent GBA-SP capture. If iterations 1096 and 1104
+read the same values they did before, the dither is a fixed function of
+*something* and may be fittable; if they read differently, it is drift and the
+row is a true floor.
 
 This row grades against an in-tree emitted prefix
 (`rustyboi-test-runner/suites/refs/gbc-hw-tests/serial/sc_change_freq_gbc.gbasp.sav`)
 because the upstream capture is a raw 128K card dump; see the manifest header's
-"Grading window" note for why that is a trimmed real capture and never an
-emulator output.
+"Grading window" note for why that is a trimmed real capture and never an emulator
+output.
 
-### 3. `dma/dma_timing_lcd_on` — 2 rows, 45 cells each — ORACLE-CONFLICT (**provisional**)
+### 3. `timers/tac_set_disabled#agb` — 1 row, 3 cells — OPEN-TARGET (2 cells) + un-reached fill (1 cell) — **potentially fixable, flagged**
 
-**First, this family is independent of §1 — proven, and worth stating because it
-was previously lumped in.** Sweeping the double-speed STAT offset leaves this
-family at a constant diff count at *every* value **[V: session]**, and its diffs
-are not mode bits at all: all 45 are **distinct** XOR masks of DMA data **[R:
-`RB_SRAM_VERBOSE`]**, against §1's 6-value histogram and §5's single mask.
-
-```
-dma_timing_lcd_on   real_gbc.sav   n=45
-    delta(want-got) histogram: {-252: 1, 247: 1, -206: 1, 190: 1, -149: 1, ...}
-    distinct XOR masks       : 45
-```
-
-**Two independent edges, each ~5 cc late [V: session]:** the open edge sits
-uniformly at `cc − m0t = −4`; the close edge uniformly at `lcat=447, lc=452`. A
-uniform **+5** takes the CGB row to **0 diffs** — and breaks `age/oam-read-cgbE`,
-whose reads sit in the *same phase class, at the same `d`, on the same revision*,
-demanding the opposite answer. `age` is green at this revision **[R]**, so that
-is a real trade, not a hypothetical.
-
-**Provisional** because the edge characterization is a session result not
-re-derived here, and because the paired-displacement signature (marker missing at
-one offset, present 5–16 cells later) has a *non-constant* stride, which a single
-displaced write index would not produce. More than one effect may be present.
-
-### 4. `dma/hdma_timing_fine` — 2 rows, 32 cells each — ORACLE-CONFLICT (firm)
-
-The cleanest signature in the section, and fully characterized **[R:
-`RB_SRAM_VERBOSE`]** — every cell is `want = got + 2`, at every odd offset, one
-delta bucket:
-
-```
-hdma_timing_fine   real_gbc.sav   n=32
-    delta(want-got) histogram: {2: 32}
-    distinct XOR masks       : 2
-    offsets parity           : all odd
-```
-
-**We can close this at will, and the cost is 13 gambatte rows.** Setting
-`fudge=0` makes both rows byte-exact (+2 rows) and breaks 13 currently-passing
-gambatte rows **[V: session]**. No structural discriminator exists: the at-risk
-gambatte rows take the *same code path*, with `kick=false` and LCD on. The real
-difference is downstream **read distance**, which means the `+6` is a
-**read-phase correction miscast as elapsed time**.
-
-**The obvious fix is structurally impossible, and this is the load-bearing
-finding [V: session].** The natural move — carry the correction in
-`prefetch_stat_bias` — cannot work, because **8 of the 13 at-risk gambatte rows
-never read STAT at all**; they read `FF55`. A STAT-keyed bias has no way to reach
-them. Any real fix has to model the read-phase dependence directly.
-
-Net: +2 gbc_hw_tests for −13 gambatte is not a defensible trade, so the rows
-stand. Firm.
-
-### 5. `lcd/mode3` — 2 rows, 11 cells each — ORACLE-CONFLICT, **closed** (firm)
-
-The previous revision's truncation artifact is gone (`frames=3000`, Trap 1). What
-remains is uniform and unambiguous **[R: `RB_SRAM_VERBOSE`]** — 11 cells, one
-delta bucket, one XOR mask (`0x03`, the STAT mode bits): every cell is
-`want=0xC4 got=0xC7`, i.e. we report **mode 3 where hardware reports mode 0**.
-
-```
-lcd/mode3   real_gbc.sav   n=11
-    delta(want-got) histogram: {-3: 11}
-    distinct XOR masks       : 1
-```
-
-**This is closed as a genuine oracle conflict, and our side is the
-positively-validated one.** Our sprite cost `6N+3` is not a fitted constant: it
-is independently confirmed by mooneye's `intr_2_mode0_timing_sprites`, which
-**sweeps every residue at the same distance-2 geometry** — the exact
-discriminating experiment — and passes on both DMG and CGB **[R]**:
-
-```sh
-$ grep -n 'intr_2_mode0_timing_sprites' rustyboi-test-runner/suites/mooneye.manifest
-77:...intr_2_mode0_timing_sprites.gb|dmg|mooneye|...
-78:...intr_2_mode0_timing_sprites.gb|cgb|mooneye|...
-$ RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 tools/run-suites.sh mooneye age
-PASS  mooneye              passed=193/193 (floor: passed>=193)
-PASS  age                  passed=56/56 (floor: passed>=56)
-```
-
-Both levers that satisfy the gbc-hw capture crater the counter-oracles — `age`
-53/56 and mooneye 191/193 **[V: session]**. Trading a broad residue sweep plus 3
-`age` rows for 2 rows against an undocumented-revision capture is not defensible.
-**These 2 rows are expected to stay red**, and that is the correct outcome unless
-the §1b provenance work reclassifies AntonioND's unit.
-
-### 6. `timers/tac_set_disabled#agb` — 1 row, 3 cells — OPEN-TARGET (firm)
-
-The CGB column passes. The AGB column is now graded against `real_gba_sp.sav`
-(manifest line 403), which **sidesteps the 1145-cell inter-unit conflict** the
-previous revision documented at length: the two physical AGB units disagree at
-1145 of 31748 bytes, and grading against the SP capture avoids all of them.
-
-**Correcting the framing this row is usually given:** the 3 surviving cells are
-*not* excused by that disagreement. All 3 sit at offsets where the two units
-**agree** **[R]**:
+The CGB column passes. The AGB column (`#agb`) grades against `real_gba_sp.sav`
+(manifest line 414), which sidesteps a 1145-cell inter-unit conflict: the two
+physical AGB units (plain GBA vs GBA-SP) disagree at 1145 of 31748 bytes, and the
+SP capture is the complete one. **All 3 surviving cells sit where the two AGB
+units *agree* [R]** — a behaviour both units show, not a unit-selection artifact:
 
 ```sh
 $ python3 - <<'PY'
@@ -668,32 +562,55 @@ n=min(len(gba),len(sp)); dis={i for i in range(n) if gba[i]!=sp[i]}
 print("the two AGB units disagree at:", len(dis), "of", n)
 ours=[0x638E,0x6796,0x6B94]
 print("our 3 cells inside the disagreement:", [hex(x) for x in ours if x in dis])
-print("our 3 cells where the units AGREE  :", [hex(x) for x in ours if x not in dis])
-print("disagreement cells in 0x6000-0x6FFF:", len([i for i in dis if 0x6000<=i<0x7000]))
+print("our 3 cells where both AGB units AGREE:", [(hex(x), hex(gba[x])) for x in ours if x not in dis])
 PY
 the two AGB units disagree at: 1145 of 31748
 our 3 cells inside the disagreement: []
-our 3 cells where the units AGREE  : ['0x638e', '0x6796', '0x6b94']
-disagreement cells in 0x6000-0x6FFF: 317
+our 3 cells where both AGB units AGREE: [('0x638e', '0xfd'), ('0x6796', '0xff'), ('0x6b94', '0x1')]
 ```
 
-So the *surrounding block* is contaminated (317 disagreeing cells in
-`0x6000-0x6FFF`, which is why a fit derived from neighbouring cells would be
-unreliable) but the three graded cells themselves are agreed by both units.
-**These are genuinely ours.**
+Both AGB units read N+1 at these three; we, and the CGB unit, read N.
+`SRAM_BLAME` splits the three into two different classes **[R]**:
 
-`SRAM_BLAME` splits them into two different classes — and this only became
-visible with the trace **[R: the `RB_SRAM_TRACE` output in Method]**:
+```sh
+$ RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 RB_SRAM_VERBOSE=1 RB_SRAM_TRACE=tac_set_disable \
+    tools/run-suites.sh gbc_hw_tests 2>&1 | grep SRAM_BLAME
+SRAM_BLAME off=0x638E want=0xFD got=0xFC pc=0x0342 cc=4193676 src=A from=FF05(TIMA) sym=Main.loop+0xEE
+SRAM_BLAME off=0x6796 want=0xFF got=0xFE pc=0x03D4 cc=4288716 src=A from=FF05(TIMA) sym=Main.loop+0x180
+SRAM_BLAME off=0x6B94 want=0x01 got=0x00 pc=0x0085 cc=1787896 src=A from=- sym=memset+0x1
+```
 
-- `0x638E`, `0x6796` — `from=FF05(TIMA)`, `sym=Main.loop+…`: real TIMA reads,
-  each exactly **one count short**. The same `+1`-glitch-one-step-out signature
-  that the retired `tac_set_enabled` AGB column showed. **OPEN-TARGET, and the
-  most tractable genuine gap left in the section.**
+- `0x638E`, `0x6796` — `from=FF05(TIMA)`, `sym=Main.loop+…`: real TIMA reads, each
+  exactly **one count short**. Both AGB units agree they should be N+1; we produce
+  N, matching the CGB unit. This is a **genuine unmodelled AGB TIMA increment** —
+  the same `+1`-glitch-one-step-out signature the retired `tac_set_enabled` AGB
+  column showed. **OPEN-TARGET, and the single item in this section flagged as
+  potentially fixable rather than floored.**
 - `0x6B94` — `from=-`, `sym=memset+0x1`, `cc=1787896` against the others'
-  `cc≈4.2M`: this byte's **last writer is the ROM's `memset`**, not a result
-  store. We never wrote a result there at all. That is a different defect (the
-  ROM's table not reaching that offset in our run) and should not be lumped in
-  with the TIMA cells; it is unproven whether more frames would close it.
+  `cc≈4.2M`: this byte's **last writer in our run is the ROM's `memset`**, not a
+  result store. We never wrote a result there at all; the capture holds 0x01 and
+  we hold the memset 0x00. A **different defect** (the ROM's table not reaching
+  that offset in our run), unproven whether more frames would close it. It should
+  not be lumped in with the two TIMA cells.
+
+**Why this is flagged "potentially fixable" and not "fix it now."** The manifest
+header (its `DO NOT model … tac_set_when_inc` note) documents that the AGB
+TAC-write increment is, in general, a **device-dependent race**: the two AGB
+units disagree by 1145 bytes on this very ROM "in exactly that ±1 TIMA shape", and
+TCAGBD 5.5 calls it a race that "cannot be predicted for every device". An
+AGB-only TAC quirk was added once on no oracle and removed when a capture
+contradicted it. What makes *these two cells* different is that both units agree
+on them, so a fix pinned to them is not obviously keyed to one unit — but a
+deterministic `+1` rule must not silently re-break the sibling `tac_set_when_inc`
+rows or the retired columns. One earlier framing went further and called the row
+**LOGIC-IMPOSSIBLE**, arguing the glitch fires at TAC alias `b=12` but not `b=4`
+(which differ only in bit 3, nominally a don't-care) — a same-run
+self-contradiction *if* bit 3 is truly unused. That argument is **not re-derived
+here**, and its load-bearing premise (bit 3 unused on the AGB timer) is exactly
+what an AGB extra-increment rule might disprove; it is recorded as an unverified
+alternative, not adopted. **Net: 2 cells are an open, tractable AGB accuracy item
+— land a fix only with the sibling AGB timer rows and both retired columns
+re-checked.**
 
 ---
 
@@ -701,29 +618,35 @@ visible with the trace **[R: the `RB_SRAM_TRACE` output in Method]**:
 
 - **gbmicrotest:** 509/512 is the maximum for any register-level emulator without inventing oracles (`temp` is now excluded as un-gradeable — it writes no verdict, so it was never a real fail). +2 (`500-scx-timing`, `minimal`) become gradeable the day a hardware capture of the absolute byte exists; `halt_op_dupe_delay` requires characterizing analog die physics.
 - **gambatte:** 7 (residue tail) + 1 (fexx) + 1 (C113) = **9 is the permanent minimum for any deterministic emulator, including a perfect gate-level one** — every failing byte is pinned oppositely by a *currently-passing* capture of the same physical quantity, and the exhaustive subset search confirms the current choices are globally optimal.
-- **gbc_hw_tests:** 313/342 is a ratcheted progress floor. It is no longer "nothing like a proven ceiling" — the day's work moved most of what remains *out* of the fixable class. Sorting the 29 by what actually blocks them:
-  - **2 cells, in 1 row, are a plain modelling gap.** `tac_set_disabled#agb`'s two `FF05(TIMA)` cells are each exactly one count short (§6). This is the only unambiguous, uncontested accuracy work left in the suite, and closing it flips 1 row (the row's third cell is a `memset` fill, a different defect).
-  - **31 cells across the 21 `lcd_frame_timings` rows are a plain modelling gap** — the LY=LYC coincidence bit (§1c). Closing it flips **zero rows on its own**, because each of those rows also carries mode-bit cells; it is a *prerequisite*, not a win.
-  - **25 of the 29 rows are ORACLE-CONFLICT** — `lcd_frame_timings` (21, §1a), `hdma_timing_fine` (2, §4), `lcd/mode3` (2, §5). In each case we can produce the demanded value at will, and in each case doing so breaks a currently-passing real-silicon suite by more than it gains: offset 4 costs gambatte 137 rows and age 4; `fudge=0` costs 13 gambatte rows; the mode3 levers cost age 3 and mooneye 2. **No emulator change resolves these. They need provenance, not code** — specifically §1b's CGB-D-vs-E question, which is the single highest-leverage open item in this document because it gates 21 rows.
-  - **The remaining 3 rows are unfittable or unproven** — `sc_change_freq_gbc#agb` (1, LOGIC-IMPOSSIBLE if the AGB-dither finding holds, §2) and `dma_timing_lcd_on` (2, an oracle conflict against `age/oam-read-cgbE` whose edge characterization is not re-derived here, §3).
-- 4 + 9 + 29 = 42: every gbmicrotest and gambatte failure is accounted for byte by byte, and every gbc_hw_tests failure carries a family, a verdict class and a confidence label — with **26 of its 29 rows firmly adjudicated** and 3 (`dma_timing_lcd_on` ×2, `sc_change_freq_gbc#agb` ×1) marked provisional.
+- **gbc_hw_tests:** 338/342 is a ratcheted progress floor, **not** a proven ceiling — and the last time this file called most of the remainder "no emulator change resolves these", 25 of those rows were then resolved by emulator changes. Read this list as "what currently blocks each row", not "what can never move":
+  - **2 cells, in 1 row, are the closest thing to a plain modelling gap left.** `tac_set_disabled#agb`'s two `FF05(TIMA)` cells are each exactly one count short (§3), both physical AGB units agree on the value we miss, and this is the one row **flagged as potentially fixable rather than floored** — with the standing caveat that the broader AGB-TAC-write increment is a device-dependent race the manifest warns against fitting. The row's third cell is a `memset` fill (a different, un-reached-table defect).
+  - **2 rows are ORACLE-CONFLICT** — `hdma_timing_fine` (§1). We can produce the demanded value at will (`fudge=0`), but doing so breaks 13 currently-passing gambatte rows, and the `+6` is provably a read-phase correction (`42 cc = 10.5 M-cycles` cannot be an elapsed stall), so it cannot simply move to a STAT-keyed bias — 8 of the 13 consumers never read STAT. The clean fix is BLOCKED-ON-ORACLE: it needs a CGB capture of one block's cost measured both immediately and ≥1 frame later, which does not exist in-tree.
+  - **1 row is unfittable-from-one-capture** — `sc_change_freq_gbc#agb` (§2), BLOCKED-ON-ORACLE: the single GBA-SP capture cannot separate analog dither from a hidden-bit dependence. (Downgraded from the predecessor's LOGIC-IMPOSSIBLE, which over-claimed.)
+- 3 + 9 + 4 = 16: every gbmicrotest and gambatte failure is accounted for byte by byte, and every one of the 4 gbc_hw_tests failures carries a family, a verdict class and a confidence label — 1 row firm (`hdma_timing_fine` arithmetic) and 3 rows (`sc_change_freq_gbc#agb`, `tac_set_disabled#agb`) provisional, with the tac row explicitly flagged as the one that may yet be closable.
 
-**The shape of the remaining work has inverted, and that is the headline.** The
-previous revision's 59 failures were dominated by one large, mischaracterized
-OPEN-TARGET. After the fixes, 25 of 29 rows are cases where **we already know how
-to produce the expected bytes and have measured that doing so is a net loss**.
-The bottleneck is no longer modelling; it is silicon provenance — whose unit,
-which revision, which capture. That is bench work, not emulator work.
+**The shape of the remaining work inverted twice, and the second inversion is the
+correction this reconciliation records.** The revision before last had 59
+failures dominated by one mischaracterized OPEN-TARGET. The last revision cut
+that to 29 and re-filed 25 of them as ORACLE-CONFLICTs that "need provenance, not
+code" — the single highest-leverage open item, it said, was a CGB-D-vs-E
+provenance question gating 21 rows. **That framing was wrong.** All 25 closed with
+emulator changes, gated on the CGB-D/E double-speed phase rather than applied
+globally, and no counter-oracle moved. The provenance question did not have to be
+settled at the bench; the behaviour just had to be phase-gated instead of pinned
+to one constant. What is left is genuinely small — 4 rows — but the lesson is the
+opposite of the last revision's headline: an `ORACLE-CONFLICT` verdict here has a
+poor track record of surviving contact with a phase-aware fix, so the two that
+remain (§1) are stated with the specific missing measurement that would settle
+them, not as settled floors.
 
 **Corrections this revision makes to its predecessor**, recorded because each was
 stated as settled and each was wrong:
 
-1. §1's global one-M-cycle-displacement claim was an artifact of conditioning the statistic on mismatching cells; the unconditioned test refutes it (5297 → 52573 under the shift). Generalized as **Trap 2**.
-2. The predecessor's §3 claimed `tac_set_disabled#agb`'s residue sat *inside* the two AGB units' disagreement. Re-measured here against the now-graded `real_gba_sp.sav`: **all 3 surviving cells sit where the units agree** (§6). The 1145-cell conflict is real but is now sidestepped by the reference change, and it does not excuse the residue.
-3. `lcd/mode3` was twice described as a value error of 647 cells. It is 11 cells, and it is an oracle conflict our side wins on independent evidence (§5). Generalized as **Trap 1**.
+1. The predecessor filed 25 of 29 rows as ORACLE-CONFLICT and predicted only silicon-provenance work could move them (`lcd_frame_timings` 21, `dma_timing_lcd_on` 2, `lcd/mode3` 2). All 25 were closed by revision-gated PPU/timer fixes with every counter-oracle still green. The conflict was between a global constant and a phase-gated behaviour, not between two same-silicon oracles.
+2. The predecessor's §1b named a CGB-D-vs-E provenance question as "the single highest-leverage open item … because it gates 21 rows". Those 21 rows are now green without that question being answered; it was not load-bearing.
+3. `sc_change_freq_gbc#agb` was filed LOGIC-IMPOSSIBLE (one oracle contradicting itself). With only one capture, a hidden-bit dependence cannot be ruled out, so the honest class is BLOCKED-ON-ORACLE (§2). Downgraded.
 
-All three survived a full write-up because a plausible mechanism was fitted to a
-statistic that could not discriminate. The three measurement traps documented at
-the top of the gbc_hw_tests section are the generalization, and `RB_SRAM_TRACE`
-(§ Method) is the tool that makes the third one mechanically checkable rather
-than a matter of judgement.
+The three measurement traps documented at the top of the gbc_hw_tests section,
+and `RB_SRAM_TRACE` (§ Method), remain the tools that keep a plausible mechanism
+from being fitted to a statistic that cannot discriminate — the failure mode that
+produced every one of the corrections above.
