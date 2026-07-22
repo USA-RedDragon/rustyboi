@@ -65,6 +65,12 @@ const LOGO_SUM_VF001_LOH: u32 = 4593;
 const VF001_STUB_OFFSET: usize = 0x32FC;
 const VF001_STUB: [u8; 6] = [0x11, 0x80, 0x70, 0x3E, 0x9A, 0x12];
 
+/// CRC32 (reflected IEEE) of the 48-byte Vast Fame secondary logo at $0184 on
+/// LiCheng / Niutoude boards. mGBA's `_detectUnlMBC` keys on these values and
+/// has shipped them with no licensed-cart false positives; a 48-byte CRC32
+/// window cannot collide with licensed header code in practice.
+const LICHENG_LOGO_CRC32: [u32; 2] = [0xD2B5_7657, 0x20D0_92E2];
+
 // Lock-phase values shared by the Sachen and Rocket boot state machines
 // (the board powers up locked and unlocks in DMG -> CGB -> unlocked phases).
 const UNL_LOCKED_DMG: u8 = 0;
@@ -137,6 +143,14 @@ pub enum UnlMapper {
     /// A trailing command write of $31 closes each sequence. Reads that match
     /// no armed command fall through to normal cart RAM, so saves work.
     Vf001(Vf001State),
+    /// LiCheng / Niutoude (Vast Fame family): electrically a plain MBC5 wearing
+    /// an MBC1 header ($01), with no data or address scrambling. The one
+    /// deviation from MBC5 is that the board ignores bank-register writes in
+    /// $2101-$2FFF: the games spray garbage there that would otherwise corrupt
+    /// MBC5's low-8 ROM-bank register (mGBA `_GBLiCheng`). Detected from the
+    /// $0184 secondary-logo CRC32; kept last so existing variant indices (and
+    /// thus every other cart's savestate layout) stay unchanged.
+    LiCheng,
 }
 
 /// Protection register-file state for `UnlMapper::Vf001`. Carried inside the
@@ -799,6 +813,12 @@ impl Cartridge {
             // truthful); only the $6000-$7FFF write / $A000-$BFFF read
             // intercepts differ, so fall through to the header type.
             UnlMapper::Vf001(_) => {}
+            // LiCheng's MBC1 header ($01) is a lie: the board is electrically
+            // MBC5+RAM+BATTERY. Only the $2101-$2FFF bank-write ignore (in the
+            // write dispatch) differs; reads and bank math are plain MBC5.
+            UnlMapper::LiCheng => {
+                return CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
+            }
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -853,6 +873,7 @@ impl Cartridge {
             Mapper::Camera(m) => m.ram_enabled,
             Mapper::NtOld(m) => m.ram_enabled,
             Mapper::Vf001(m) => m.ram_enabled,
+            Mapper::LiCheng(m) => m.ram_enabled,
             _ => false,
         }
     }
@@ -1694,6 +1715,16 @@ impl memory::Addressable for Cartridge {
                             0xFF
                         }
                     }
+                    // LiCheng is electrically MBC5+RAM; RAM reads are plain.
+                    Mapper::LiCheng(m) => {
+                        if m.ram_enabled
+                            && let Some(offset) = self.banked_ram_offset(addr)
+                        {
+                            self.ram_data[offset]
+                        } else {
+                            0xFF
+                        }
+                    }
                     Mapper::Mbc7(m) => {
                         // MBC7 exposes registers, not RAM. They only respond
                         // when BOTH enable stages are unlocked, and only in
@@ -1863,6 +1894,7 @@ impl memory::Addressable for Cartridge {
                 Mapper::Mbc3(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 Mapper::Mbc5(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 Mapper::Vf001(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
+                Mapper::LiCheng(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 // MBC7 stage-1 unlock (stage 2 is 0x40 to 0x4000-0x5FFF).
                 Mapper::Mbc7(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 // HuC1 IR select: $0E maps the IR transceiver, else RAM (no disable).
@@ -1880,6 +1912,13 @@ impl memory::Addressable for Cartridge {
                 Mapper::NtOld(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
                 _ => {}
             },
+            // LiCheng/Niutoude: the games spray garbage bank numbers across
+            // $2101-$2FFF that would corrupt MBC5's low-8 bank register; the
+            // board drops them (mGBA `_GBLiCheng`). $2000-$2100 (low bank) and
+            // $3000-$3FFF (high bit) still latch through the generic arm below.
+            ROM_BANK_SELECT_START..=ROM_BANK_SELECT_END
+                if self.unl_mapper == UnlMapper::LiCheng
+                    && (0x2101..=0x2FFF).contains(&addr) => {}
             // ROM Bank Number (0x2000-0x3FFF)
             ROM_BANK_SELECT_START..=ROM_BANK_SELECT_END => match &mut self.mapper {
                 Mapper::Mbc1(m) => m.rom_bank_low = (value & 0x1F).max(1), // 5 bits, min 1
@@ -1893,6 +1932,15 @@ impl memory::Addressable for Cartridge {
                     }
                 }
                 Mapper::Vf001(m) => {
+                    if addr <= 0x2FFF {
+                        m.regs.rom_bank_low = value;
+                    } else {
+                        m.regs.rom_bank_high = value & 0x01;
+                    }
+                }
+                // LiCheng is plain MBC5 here; the $2101-$2FFF garbage-write
+                // ignore is a guarded arm above this match.
+                Mapper::LiCheng(m) => {
                     if addr <= 0x2FFF {
                         m.regs.rom_bank_low = value;
                     } else {
@@ -1932,6 +1980,7 @@ impl memory::Addressable for Cartridge {
                         m.regs.ram_bank = value; // 4 bits used
                     }
                     Mapper::Vf001(m) => m.regs.ram_bank = value,
+                    Mapper::LiCheng(m) => m.regs.ram_bank = value,
                     // MBC7 stage-2 unlock: exactly 0x40 enables.
                     Mapper::Mbc7(m) => m.state.ram_enabled2 = value == 0x40,
                     Mapper::HuC1(m) => m.state.ram_bank = value,
@@ -2031,6 +2080,7 @@ impl memory::Addressable for Cartridge {
                     Mapper::Mbc3(m) => Ext::Mbc3Rtc(m.ram_enabled && m.timer, m.ram_bank),
                     Mapper::Mbc5(m) => Ext::Banked(m.has_ram && m.ram_enabled),
                     Mapper::Vf001(m) => Ext::Banked(m.ram_enabled),
+                    Mapper::LiCheng(m) => Ext::Banked(m.ram_enabled),
                     Mapper::Mbc7(m) => Ext::Mbc7(m.ram_enabled && m.state.ram_enabled2),
                     Mapper::HuC1(m) => Ext::HuC1(m.state.ir_mode),
                     Mapper::Camera(m) => {
@@ -2238,6 +2288,59 @@ mod tests {
         let mut wrong_logo = make_vf001_rom();
         wrong_logo[0x184] = wrong_logo[0x184].wrapping_add(1);
         assert_eq!(Cartridge::detect_unl_mapper(&wrong_logo), UnlMapper::None);
+    }
+
+    // Clean-room 48-byte stand-in for the Vast Fame secondary logo: a plain
+    // ASCII banner (44 bytes) plus a 4-byte suffix computed so the block's
+    // CRC32 equals LICHENG_LOGO_CRC32[0] (0xD2B5_7657). No copyrighted logo
+    // bytes; the same block is embedded in the licheng_banking test ROM.
+    const LICHENG_LOGO: [u8; 48] =
+        *b"RUSTYBOI LICHENG NIUTOUDE CLEANROOM STANDIN!\xC9\x37\x57\x41";
+
+    /// 1MB image carrying the LiCheng signature: the MBC1 header lie ($01), the
+    /// $0184 logo whose CRC32 keys detection, a real Nintendo logo, and bank
+    /// markers at banks 1 and 0x21 (the latter only reachable via MBC5's 8-bit
+    /// low bank register).
+    fn make_licheng_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x100000]; // 64 banks
+        rom[CARTRIDGE_TYPE_OFFSET] = 0x01; // MBC1 header (the lie)
+        rom[ROM_SIZE_OFFSET] = 0x05; // 1MB
+        rom[RAM_SIZE_OFFSET] = 0x01; // 2KB
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+        rom[0x184..0x1B4].copy_from_slice(&LICHENG_LOGO);
+        rom[0x4000] = 0xB1; // bank 1, offset 0
+        rom[0x21 * 0x4000] = 0xA5; // bank 33, offset 0
+        rom
+    }
+
+    #[test]
+    fn licheng_detects_and_ignores_garbage_bank_writes() {
+        let rom = make_licheng_rom();
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::LiCheng);
+
+        // Electrically MBC5 despite the MBC1 header byte.
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(cart.get_cartridge_type(), CartridgeType::MBC5 { .. }));
+
+        // MBC5 8-bit bank select: a single write of 0x21 reaches bank 33. A
+        // plain MBC1 decode would 5-bit-mask it to bank 1 (0xB1).
+        cart.write(0x2000, 0x21);
+        assert_eq!(cart.read(0x4000), 0xA5);
+
+        // Garbage bank write inside the ignored $2101-$2FFF window: the board
+        // drops it, so bank 33 stays selected (a plain MBC5 would clobber it).
+        cart.write(0x2500, 0xC3);
+        assert_eq!(cart.read(0x4000), 0xA5);
+
+        // The honored $2000-$2100 window still latches (we didn't over-ignore).
+        cart.write(0x2000, 0x01);
+        assert_eq!(cart.read(0x4000), 0xB1);
+
+        // A one-byte perturbation of the $0184 block changes its CRC32 -> the
+        // rule no longer matches (detection is a 48-byte CRC32, not a sum).
+        let mut perturbed = rom.clone();
+        perturbed[0x184] ^= 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&perturbed), UnlMapper::None);
     }
 
     /// Write the correct boot-ROM header checksum into $014D.

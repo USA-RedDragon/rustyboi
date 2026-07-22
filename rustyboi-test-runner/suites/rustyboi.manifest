@@ -25,6 +25,7 @@ boot-licensee_boot_div-cgbecompat_l00|cgb|mooneye|test-roms/build/boot/licensee_
 boot-licensee_boot_div-cgbecompat_l01|cgb|mooneye|test-roms/build/boot/licensee_boot_div.cgbecompat_l01.mooneye.gb|rev=cgbe
 boot-licensee_boot_div-cgbecompat_l33|cgb|mooneye|test-roms/build/boot/licensee_boot_div.cgbecompat_l33.mooneye.gb|rev=cgbe
 boot-licensee_boot_div-cgbecompat_l33n01|cgb|mooneye|test-roms/build/boot/licensee_boot_div.cgbecompat_l33n01.mooneye.gb|rev=cgbe
+cartridge-licheng_banking-cgb|cgb|mooneye|test-roms/build/cartridge/licheng_banking.cgb.mooneye.gbc
 cartridge-vf001_protection-cgb|cgb|mooneye|test-roms/build/cartridge/vf001_protection.cgb.mooneye.gbc
 dma-hdma_ff55_cancel_after_block-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_cancel_after_block.cgb.mooneye.gbc
 dma-hdma_ff55_countdown_ds-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_countdown_ds.cgb.mooneye.gbc

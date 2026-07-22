@@ -157,6 +157,21 @@ impl Cartridge {
             return UnlMapper::Vf001(Vf001State::default());
         }
 
+        // LiCheng / Niutoude (Vast Fame family): keyed on the CRC32 of the
+        // 48-byte secondary logo at $0184 (mGBA `_detectUnlMBC`). The guard
+        // mirrors mGBA's: an MBC1 header ($01) OR a file size that disagrees
+        // with the header's declared size -- both mark a spoofed cart, so a
+        // correctly-dumped MBC5 cart of the declared size is never touched.
+        // (All known LiCheng dumps carry the $01 header, so this passes on
+        // type alone; the size clause is the belt-and-suspenders half.)
+        let logo_crc32 = crate::checksum::crc32(&data[0x184..0x1B4]);
+        let claimed_size = 0x8000usize.checked_shl(u32::from(rom_size_code)).unwrap_or(0);
+        if LICHENG_LOGO_CRC32.contains(&logo_crc32)
+            && (data[CARTRIDGE_TYPE_OFFSET] == 0x01 || data.len() != claimed_size)
+        {
+            return UnlMapper::LiCheng;
+        }
+
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
         // banked-size file) the publisher string in the ROM. The
         // string+type+size gate already implies the blank-header shape in
@@ -458,6 +473,29 @@ impl Banking for Vf001 {
     }
 }
 
+/// LiCheng / Niutoude: electrically a plain MBC5+RAM. The only deviation is the
+/// $2101-$2FFF bank-write ignore, handled in the write dispatch; the bank math
+/// is identical to MBC5.
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct LiCheng {
+    pub ram_enabled: bool,
+    pub regs: Mbc5State,
+}
+
+impl Banking for LiCheng {
+    fn rom_bankn(&self, g: Geom) -> usize {
+        let bank =
+            (self.regs.rom_bank_low as usize) | ((self.regs.rom_bank_high as usize & 0x01) << 8);
+        bank % g.rom_banks
+    }
+    fn rom_bank0(&self, _g: Geom) -> usize {
+        0
+    }
+    fn ram_bank(&self, g: Geom) -> usize {
+        (self.regs.ram_bank & 0x0F) as usize % g.ram_banks.max(1)
+    }
+}
+
 
 // --- state ---------------------------------------------------------------
 
@@ -525,4 +563,3 @@ pub(super) struct M161State {
     pub(super) bank: u8,
     pub(super) mapped: bool,
 }
-
