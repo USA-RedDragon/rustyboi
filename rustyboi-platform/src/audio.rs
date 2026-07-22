@@ -63,9 +63,6 @@ mod cpal_backend {
         stream: Option<cpal::Stream>,
         prod: Option<HeapProd<f32>>,
         scratch: Vec<f32>,
-        /// Cumulative stereo pairs pushed (including the startup silence), for
-        /// the `RB_LOG_FPS` consumption diagnostics.
-        pushed_pairs: u64,
         /// Raw f32 samples the callback zero-filled because the ring was empty.
         underrun_samples: Arc<AtomicU64>,
     }
@@ -76,7 +73,6 @@ mod cpal_backend {
                 stream: None,
                 prod: None,
                 scratch: Vec::new(),
-                pushed_pairs: 0,
                 underrun_samples: Arc::new(AtomicU64::new(0)),
             })
         }
@@ -94,19 +90,6 @@ mod cpal_backend {
         pub(crate) fn queued_pairs(&self) -> usize {
             self.prod.as_ref().map_or(0, |p| p.occupied_len() / 2)
         }
-
-        /// Cumulative stereo pairs the device has *consumed* (pushed minus
-        /// still-queued). Diagnostics: its rate should track 44100/s; a surge
-        /// marks a host pipeline fill / re-quantum event.
-        pub(crate) fn consumed_pairs(&self) -> u64 {
-            self.pushed_pairs.saturating_sub(self.queued_pairs() as u64)
-        }
-
-        /// Cumulative raw samples zero-filled on ring underrun (diagnostics —
-        /// the "gapless audio" acceptance signal; steady state must not grow).
-        pub(crate) fn underrun_samples(&self) -> u64 {
-            self.underrun_samples.load(Ordering::Relaxed)
-        }
     }
 
     impl AudioOutput for Output {
@@ -116,7 +99,6 @@ mod cpal_backend {
             // (see PRIME_SILENCE_FRAMES) so it can't fast-forward the game.
             let silence = vec![0.0f32; PRIME_SILENCE_FRAMES * SAMPLES_PER_FRAME * 2];
             prod.push_slice(&silence);
-            self.pushed_pairs = (silence.len() / 2) as u64;
 
             let host = cpal::default_host();
             let device = host
@@ -150,7 +132,6 @@ mod cpal_backend {
         }
 
         fn add_samples(&mut self, samples: &[(f32, f32)]) {
-            let Some(prod) = self.prod.as_mut() else { return };
             if samples.is_empty() {
                 return;
             }
@@ -160,10 +141,6 @@ mod cpal_backend {
                 self.scratch.push(left * VOLUME);
                 self.scratch.push(right * VOLUME);
             }
-            // A full ring (production outran the device) drops the excess,
-            // bounding latency.
-            let pushed = prod.push_slice(&self.scratch);
-            self.pushed_pairs += (pushed / 2) as u64;
         }
     }
 }

@@ -247,11 +247,6 @@ impl Regulator {
         self.stretch
     }
 
-    /// Banked frame credit (diagnostics — the `RB_LOG_FPS` line).
-    pub fn tokens(&self) -> f64 {
-        self.tokens
-    }
-
     /// Seconds until the bank matures its next whole token at the nominal
     /// rate — the ideal tick-timer delay for platforms that schedule their own
     /// ticks (the web worker). Sleeping exactly this long keeps wakeups at

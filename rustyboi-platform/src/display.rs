@@ -642,7 +642,6 @@ fn run_gui_loop(
         last_tick: Instant::now(),
         tick_interval_ema: 1.0 / 60.0,
         occluded: false,
-        diag_ticks: 0,
     };
     event_loop.run_app(&mut gui).map_err(PlatformError::from_display)
 }
@@ -714,8 +713,6 @@ struct GuiApp<'c> {
     /// Wayland Fifo hidden-block hazard) — while emulation + audio keep
     /// running on the throttle clock.
     occluded: bool,
-    /// `RB_LOG_FPS` diagnostics: ticks since the last log line.
-    diag_ticks: u32,
 }
 
 impl ApplicationHandler for GuiApp<'_> {
@@ -1077,7 +1074,6 @@ impl GuiApp<'_> {
         if !self.occluded {
             self.draw_frame(&window, event_loop);
         }
-        self.diag_ticks += 1;
 
         self.app.note_frames(now, emulated);
 
@@ -1193,40 +1189,6 @@ impl GuiApp<'_> {
 
         if let Some(title) = self.app.title_if_due() {
             window.set_title(&title);
-            // Headless-observable pacing check: mirrors the title (which carries
-            // the FPS readout) to stdout at its existing twice-a-second cadence,
-            // plus the regulator's state. `drift` is the proof of "locked":
-            // cumulative emulated frames minus a perfect 59.7275fps timeline —
-            // it must oscillate within a couple of frames and mean-revert; a
-            // walk means the rate is wrong no matter what the fps readout says.
-            // On Android there is no env/stdout — the line goes to logcat at
-            // DEBUG level, silent under android_main's Info filter; flip that
-            // filter to Debug when diagnosing pacing on-device.
-            #[cfg(target_os = "android")]
-            let diag = true;
-            #[cfg(not(target_os = "android"))]
-            let diag = std::env::var_os("RB_LOG_FPS").is_some();
-            if diag {
-                let now = self.pacing_epoch.elapsed().as_secs_f64();
-                let backlog = self.audio.as_ref().map(|a| a.queued_pairs());
-                let consumed = self.audio.as_ref().map(|a| a.consumed_pairs());
-                // Note: underruns also tick while paused (the ring legitimately
-                // drains to silence); "gapless" means the count doesn't grow
-                // during active play.
-                let underruns = self.audio.as_ref().map(|a| a.underrun_samples());
-                let line = format!(
-                    "{title} | t={now:.2} drift={:+.2} tokens={:.2} stretch={:.4} backlog_pairs={backlog:?} consumed_pairs={consumed:?} underrun_samples={underruns:?} ticks={}",
-                    self.app.drift_frames(now),
-                    self.regulator.tokens(),
-                    self.regulator.audio_stretch(),
-                    self.diag_ticks
-                );
-                #[cfg(target_os = "android")]
-                log::debug!("{line}");
-                #[cfg(not(target_os = "android"))]
-                println!("{line}");
-                self.diag_ticks = 0;
-            }
         }
 
         // Keep the render surface locked to the live window size *before* laying

@@ -290,8 +290,6 @@ fn canonical_hardware(cart: &Cartridge) -> Hardware {
     }
 }
 
-/// One audio duration second at the DMG dot rate — sample count / this = seconds.
-const AUDIO_RATE: u32 = 44100;
 /// GB frame rate as an exact rational (master clock / dots-per-frame).
 const FPS_NUM: u64 = 4_194_304;
 const FPS_DEN: u64 = 70_224;

@@ -557,9 +557,6 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         // require held buttons (gbc-hw-tests joy_interrupt_manual_delay's
         // results.txt: "Keep any button pressed when initing the ROM").
         let mut input = InputScript::new(&case.input);
-        // Diagnostic (RB_SRAM_TRACE): attribute each SRAM byte to the store that
-        // wrote it. `None` unless the env var selects this case, and the loop
-        // below is then byte-for-byte the original one.
         while cycles_run < cycle_budget {
             input.poll(&mut gb, cycles_run);
             let (_breakpoint_hit, cycles) = gb.step_instruction(false);
