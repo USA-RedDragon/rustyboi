@@ -1,6 +1,8 @@
 # First-party rustyboi test ROMs (RGBDS; mooneye/png grading). GENERATED
 # from test-roms/build/<cat>/<name>.<model>.<grading>.{gb,gbc} — the filename
 # carries the model + grading. Build with `make -C test-roms`; do not hand-edit.
+apu-ch4_delayed_start-dmg|dmg|mooneye|test-roms/build/apu/ch4_delayed_start.dmg.mooneye.gb
+apu-ch4_delayed_start-sgb|dmg|mooneye|test-roms/build/apu/ch4_delayed_start.sgb.mooneye.gb|rev=sgb
 apu-len_extra_clock-cgb|cgb|mooneye|test-roms/build/apu/len_extra_clock.cgb.mooneye.gbc
 apu-len_extra_clock-dmg|dmg|mooneye|test-roms/build/apu/len_extra_clock.dmg.mooneye.gb
 apu-postboot_len_no_write-cgb|cgb|mooneye|test-roms/build/apu/postboot_len_no_write.cgb.mooneye.gbc
