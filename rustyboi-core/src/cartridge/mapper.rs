@@ -9,10 +9,13 @@
 //! camera capture, HuC-3 command MCU) are reached through the container so this
 //! module carries only banking + register state.
 
-use super::{
-    CameraState, HuC1State, HuC3State, M161State, Mbc5State, Mbc7State, NtState, RocketState,
-    SachenState, UnlMapper,
-};
+use super::camera::CameraState;
+use super::huc1::HuC1State;
+use super::huc3::HuC3State;
+use super::mbc5::Mbc5State;
+use super::mbc7::Mbc7State;
+use super::unlicensed::{M161State, NtState, RocketState, SachenState};
+use super::UnlMapper;
 use super::{
     HUC1_RAM_BATTERY, HUC3, MBC1, MBC1_RAM, MBC1_RAM_BATTERY, MBC2, MBC2_BATTERY, MBC3, MBC3_RAM,
     MBC3_RAM_BATTERY, MBC3_TIMER_BATTERY, MBC3_TIMER_RAM_BATTERY, MBC5, MBC5_RAM, MBC5_RAM_BATTERY,
@@ -20,6 +23,11 @@ use super::{
     POCKET_CAMERA, ROM_RAM, ROM_RAM_BATTERY,
 };
 use serde::{Deserialize, Serialize};
+use super::{
+    camera::Camera, huc1::HuC1, huc3::HuC3, mbc1::Mbc1, mbc2::Mbc2, mbc3::Mbc3, mbc5::Mbc5,
+    mbc7::Mbc7, nombc::NoMbc,
+    unlicensed::{M161, NtOld, Rocket, Sachen, Vf001, WisdomTree},
+};
 
 /// ROM/RAM geometry the bank math needs, passed by value (Copy).
 #[derive(Clone, Copy)]
@@ -40,355 +48,64 @@ pub(super) trait Banking {
 
 // --- MBC1 ------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Mbc1 {
-    pub ram_enabled: bool,
-    pub rom_bank_low: u8, // 5 bits (0x01-0x1F), zero remapped to one at write time
-    pub bank2: u8,        // 2 bits (BANK2): RAM bank or ROM bank bits 5-6
-    pub mode: u8,         // 0 = ROM banking, 1 = RAM banking
-    pub has_ram: bool,
-    pub multicart: bool,
-}
 
-impl Banking for Mbc1 {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        // (BANK2 << shift) | BANK1, regardless of mode. BANK1's zero->one remap
-        // is applied at write time, so banks 0x20/0x40/0x60 stay inaccessible.
-        let bank = if self.multicart {
-            ((self.bank2 as usize) << 4) | (self.rom_bank_low as usize & 0x0F)
-        } else {
-            ((self.bank2 as usize) << 5) | (self.rom_bank_low as usize)
-        };
-        bank % g.rom_banks
-    }
-    fn rom_bank0(&self, g: Geom) -> usize {
-        if self.mode == 1 {
-            let bank = if self.multicart {
-                (self.bank2 as usize) << 4
-            } else {
-                (self.bank2 as usize) << 5
-            };
-            bank % g.rom_banks
-        } else {
-            0
-        }
-    }
-    fn ram_bank(&self, g: Geom) -> usize {
-        if self.mode == 1 {
-            (self.bank2 as usize) % g.ram_banks.max(1)
-        } else {
-            0
-        }
-    }
-}
 
 // --- MBC2 ------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Mbc2 {
-    pub ram_enabled: bool,
-    pub rom_bank_low: u8, // low 4 bits
-}
 
-impl Banking for Mbc2 {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        let bank = (self.rom_bank_low & 0x0F) as usize;
-        if bank == 0 { 1 } else { bank % g.rom_banks }
-    }
-    fn rom_bank0(&self, _g: Geom) -> usize {
-        0
-    }
-    fn ram_bank(&self, _g: Geom) -> usize {
-        0 // MBC2 has built-in RAM, no banking
-    }
-}
 
 // --- MBC3 ------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Mbc3 {
-    pub ram_enabled: bool,
-    pub rom_bank_low: u8, // 7 bits (8 on MBC30)
-    pub ram_bank: u8,     // 0x00-0x03 RAM (0x07 on MBC30), 0x08-0x0C RTC
-    pub has_ram: bool,
-    pub timer: bool,
-}
 
-impl Mbc3 {
-    /// MBC30 wires an extra ROM- and RAM-bank bit (>2 MB ROM / >32 KB RAM).
-    pub fn is_mbc30(&self, g: Geom) -> bool {
-        g.rom_banks > 128 || g.ram_banks > 4
-    }
-}
 
-impl Banking for Mbc3 {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        let mask = if self.is_mbc30(g) { 0xFF } else { 0x7F };
-        let bank = (self.rom_bank_low & mask) as usize;
-        if bank == 0 { 1 } else { bank % g.rom_banks }
-    }
-    fn rom_bank0(&self, _g: Geom) -> usize {
-        0
-    }
-    fn ram_bank(&self, g: Geom) -> usize {
-        let mask = if self.is_mbc30(g) { 0x07 } else { 0x03 };
-        (self.ram_bank & mask) as usize % g.ram_banks.max(1)
-    }
-}
 
 // --- MBC5 ------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Mbc5 {
-    pub ram_enabled: bool,
-    pub regs: Mbc5State,
-    pub has_ram: bool,
-    pub rumble: bool,
-    #[serde(skip, default)]
-    pub rumble_motor: bool,
-}
 
-impl Banking for Mbc5 {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        let bank =
-            (self.regs.rom_bank_low as usize) | ((self.regs.rom_bank_high as usize & 0x01) << 8);
-        bank % g.rom_banks
-    }
-    fn rom_bank0(&self, _g: Geom) -> usize {
-        0
-    }
-    fn ram_bank(&self, g: Geom) -> usize {
-        (self.regs.ram_bank & 0x0F) as usize % g.ram_banks.max(1)
-    }
-}
 
 // --- MBC7 ------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Mbc7 {
-    pub ram_enabled: bool,
-    pub state: Mbc7State,
-}
 
-impl Banking for Mbc7 {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        (self.state.rom_bank as usize) % g.rom_banks
-    }
-    fn rom_bank0(&self, _g: Geom) -> usize {
-        0
-    }
-    fn ram_bank(&self, _g: Geom) -> usize {
-        0 // no banked RAM (serial EEPROM)
-    }
-}
 
 // --- HuC-1 -----------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct HuC1 {
-    pub state: HuC1State,
-}
 
-impl Banking for HuC1 {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        (self.state.rom_bank as usize) % g.rom_banks
-    }
-    fn rom_bank0(&self, _g: Geom) -> usize {
-        0
-    }
-    fn ram_bank(&self, g: Geom) -> usize {
-        (self.state.ram_bank as usize) % g.ram_banks.max(1)
-    }
-}
 
 // --- HuC-3 -----------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct HuC3 {
-    pub state: HuC3State,
-}
 
-impl Banking for HuC3 {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        (self.state.rom_bank as usize) % g.rom_banks
-    }
-    fn rom_bank0(&self, _g: Geom) -> usize {
-        0
-    }
-    fn ram_bank(&self, g: Geom) -> usize {
-        (self.state.ram_bank as usize) % g.ram_banks.max(1)
-    }
-}
 
 // --- Pocket Camera ---------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Camera {
-    pub ram_enabled: bool,
-    pub state: CameraState,
-}
 
-impl Banking for Camera {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        (self.state.rom_bank as usize) % g.rom_banks
-    }
-    fn rom_bank0(&self, _g: Geom) -> usize {
-        0
-    }
-    fn ram_bank(&self, g: Geom) -> usize {
-        (self.state.ram_bank as usize) % g.ram_banks.max(1)
-    }
-}
 
 // --- No MBC ----------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct NoMbc {
-    pub battery: bool,
-}
 
-impl Banking for NoMbc {
-    fn rom_bankn(&self, _g: Geom) -> usize {
-        1 // bankless cart always maps bank 1 to the upper area
-    }
-    fn rom_bank0(&self, _g: Geom) -> usize {
-        0
-    }
-    fn ram_bank(&self, _g: Geom) -> usize {
-        0
-    }
-}
 
 // --- Unlicensed: Wisdom Tree ----------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct WisdomTree {
-    pub bank: u8, // 6-bit whole-32KB latch
-}
 
-impl Banking for WisdomTree {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        (self.bank as usize * 2 + 1) % g.rom_banks
-    }
-    fn rom_bank0(&self, g: Geom) -> usize {
-        (self.bank as usize * 2) % g.rom_banks
-    }
-    fn ram_bank(&self, _g: Geom) -> usize {
-        0
-    }
-}
 
 // --- Unlicensed: Rocket Games ---------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Rocket {
-    pub state: RocketState,
-}
 
-impl Banking for Rocket {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        (((self.state.outer as usize & 0x0F) << 4) | (self.state.rom_bank as usize)) % g.rom_banks
-    }
-    fn rom_bank0(&self, g: Geom) -> usize {
-        ((self.state.outer as usize & 0x0F) << 4) % g.rom_banks
-    }
-    fn ram_bank(&self, _g: Geom) -> usize {
-        0
-    }
-}
 
 // --- Unlicensed: Sachen ----------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Sachen {
-    pub state: SachenState,
-    pub mmc2: bool,
-}
 
-impl Banking for Sachen {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        (((self.state.bank & !self.state.mask) | (self.state.base & self.state.mask)) as usize)
-            % g.rom_banks
-    }
-    fn rom_bank0(&self, g: Geom) -> usize {
-        ((self.state.base & self.state.mask) as usize) % g.rom_banks
-    }
-    fn ram_bank(&self, _g: Geom) -> usize {
-        0
-    }
-}
 
 // --- Unlicensed: NT/Makon "old" -------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct NtOld {
-    pub state: NtState,
-    pub v2: bool,
-    pub ram_enabled: bool, // MBC3-style RAM gate ($0A to $0000-$1FFF)
-}
 
-impl Banking for NtOld {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        // The $5003 bit-swap is combinational on the bank lines; the $5002
-        // bank-count mask and the $5001 base (32KB units) apply after it.
-        let mut bank = self.state.bank;
-        if self.state.swapped {
-            let table = if self.v2 { &super::NT_OLD2_REORDER } else { &super::NT_OLD1_REORDER };
-            bank = super::Cartridge::reorder_bits(bank, table);
-        }
-        if self.state.bank_mask != 0 {
-            bank &= self.state.bank_mask;
-        }
-        (bank as usize + self.state.base as usize * 2) % g.rom_banks
-    }
-    fn rom_bank0(&self, g: Geom) -> usize {
-        (self.state.base as usize * 2) % g.rom_banks
-    }
-    fn ram_bank(&self, _g: Geom) -> usize {
-        0
-    }
-}
 
 // --- Unlicensed: M161 ------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct M161 {
-    pub state: M161State,
-}
 
-impl Banking for M161 {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        ((self.state.bank as usize) | 1) & (g.rom_banks - 1)
-    }
-    fn rom_bank0(&self, g: Geom) -> usize {
-        (self.state.bank as usize) & (g.rom_banks - 2)
-    }
-    fn ram_bank(&self, _g: Geom) -> usize {
-        0
-    }
-}
 
 // --- Unlicensed: Vast Fame VF001 (electrically MBC5) ----------------------
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Vf001 {
-    pub ram_enabled: bool,
-    pub regs: Mbc5State,
-}
 
-impl Banking for Vf001 {
-    fn rom_bankn(&self, g: Geom) -> usize {
-        let bank =
-            (self.regs.rom_bank_low as usize) | ((self.regs.rom_bank_high as usize & 0x01) << 8);
-        bank % g.rom_banks
-    }
-    fn rom_bank0(&self, _g: Geom) -> usize {
-        0
-    }
-    fn ram_bank(&self, g: Geom) -> usize {
-        (self.regs.ram_bank & 0x0F) as usize % g.ram_banks.max(1)
-    }
-}
 
 // --- The sum ---------------------------------------------------------------
 
