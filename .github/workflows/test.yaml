@@ -121,6 +121,26 @@ jobs:
           - { os: macos, arch: armv7 }
           - { os: wasm, arch: aarch64 }
           - { os: wasm, arch: armv7 }
+          # docboy is a deterministic, platform-independent differential: its
+          # output is a pure function of the (portable) core, so a platform bug
+          # would already trip the hardware suites that run cross-platform.
+          # Restrict each docboy suite to the one cell that carries signal --
+          # linux/x86_64 -- by excluding every other os and every other arch.
+          - { suite: docboy_diff_dmg, os: windows }
+          - { suite: docboy_diff_dmg, os: macos }
+          - { suite: docboy_diff_dmg, os: wasm }
+          - { suite: docboy_diff_dmg, arch: aarch64 }
+          - { suite: docboy_diff_dmg, arch: armv7 }
+          - { suite: docboy_diff_cgb, os: windows }
+          - { suite: docboy_diff_cgb, os: macos }
+          - { suite: docboy_diff_cgb, os: wasm }
+          - { suite: docboy_diff_cgb, arch: aarch64 }
+          - { suite: docboy_diff_cgb, arch: armv7 }
+          - { suite: docboy_diff_cgb_dmg_mode, os: windows }
+          - { suite: docboy_diff_cgb_dmg_mode, os: macos }
+          - { suite: docboy_diff_cgb_dmg_mode, os: wasm }
+          - { suite: docboy_diff_cgb_dmg_mode, arch: aarch64 }
+          - { suite: docboy_diff_cgb_dmg_mode, arch: armv7 }
         include:
           - { os: linux, arch: x86_64, runs-on: ubuntu-24.04, name: linux-x86_64 }
           - { os: linux, arch: aarch64, runs-on: ubuntu-24.04-arm, name: linux-aarch64 }
