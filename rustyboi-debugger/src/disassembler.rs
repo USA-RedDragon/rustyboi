@@ -1,3 +1,9 @@
+//! SM83 instruction disassembly for the debugger UIs.
+//!
+//! Decoding is purely static — it never touches the emulator — so a caller
+//! supplies a byte reader and gets back a mnemonic plus the instruction length
+//! to advance by.
+
 pub struct Disassembler;
 
 impl Disassembler {
@@ -8,7 +14,9 @@ impl Disassembler {
         F: FnMut(u16) -> u8,
     {
         let opcode = read_fn(addr);
-        Self::disassemble_opcode(opcode, addr, |offset| read_fn(addr + offset))
+        // Operand fetches wrap like the bus does: code can run up to 0xFFFE, and
+        // a non-wrapping add would panic there in debug builds.
+        Self::disassemble_opcode(opcode, addr, |offset| read_fn(addr.wrapping_add(offset)))
     }
 
     /// Internal helper to disassemble an opcode using a read function
@@ -16,7 +24,6 @@ impl Disassembler {
     where
         F: FnMut(u16) -> u8,
     {
-
         match opcode {
             0x00 => ("NOP".to_string(), 1),
             0x01 => {
@@ -50,7 +57,10 @@ impl Disassembler {
                 (format!("LD C, ${:02X}", imm), 2)
             },
             0x0F => ("RRCA".to_string(), 1),
-            0x10 => ("STOP".to_string(), 1),
+            // STOP is encoded `10 nn` and the core skips the operand byte by
+            // default (`cpu::opcodes::stop`); only the button-held-with-pending-
+            // interrupt case is 1 byte, which static decoding cannot see.
+            0x10 => ("STOP".to_string(), 2),
             0x11 => {
                 let low = read_fn(1);
                 let high = read_fn(2);
@@ -555,17 +565,8 @@ impl Disassembler {
 
     /// Helper function to get register name for CB instructions
     fn get_register_name(reg_index: u8) -> &'static str {
-        match reg_index {
-            0 => "B",
-            1 => "C",
-            2 => "D",
-            3 => "E",
-            4 => "H",
-            5 => "L",
-            6 => "(HL)",
-            7 => "A",
-            _ => "??",
-        }
+        const NAMES: [&str; 8] = ["B", "C", "D", "E", "H", "L", "(HL)", "A"];
+        NAMES[(reg_index & 0x07) as usize]
     }
 }
 
@@ -574,12 +575,11 @@ mod tests {
     use super::Disassembler;
 
     // Disassemble `prog` as if it were laid down starting at `addr`. The reader
-    // is handed ABSOLUTE addresses (`addr + offset`), so index back into the
-    // slice with `a - addr`. `addr + 2` must stay <= 0xFFFF or the reader's
-    // `addr + offset` overflows (debug panics) — targets wrap via signed offset,
-    // not via a high `addr`.
+    // is handed ABSOLUTE addresses (`addr.wrapping_add(offset)`), so index back
+    // into the slice with the matching `wrapping_sub` — operand fetches wrap past
+    // 0xFFFF into 0x0000 exactly as they do on the bus.
     fn dis_at(prog: &[u8], addr: u16) -> (String, u16) {
-        Disassembler::disassemble_with_reader(addr, |a| prog[(a - addr) as usize])
+        Disassembler::disassemble_with_reader(addr, |a| prog[a.wrapping_sub(addr) as usize])
     }
 
     fn dis(prog: &[u8]) -> (String, u16) {
@@ -599,6 +599,28 @@ mod tests {
         assert_eq!(dis_at(&[0x28, 0x10], 0x0100).0, "JR Z, $0112");
         assert_eq!(dis_at(&[0x30, 0x10], 0x0100).0, "JR NC, $0112");
         assert_eq!(dis_at(&[0x38, 0x10], 0x0100).0, "JR C, $0112");
+    }
+
+    // Operand fetches at the very top of the address space must wrap, not
+    // overflow: the CPU panel walks instructions forward from a live PC and code
+    // legitimately runs in HRAM up to 0xFFFE. Debug builds panic on `addr +
+    // offset` there, release silently wraps — so this asserts the wrapping form.
+    #[test]
+    fn operand_fetches_wrap_at_the_top_of_the_address_space() {
+        // LD BC, $1234 at 0xFFFF: operands live at 0x0000 and 0x0001.
+        assert_eq!(dis_at(&[0x01, 0x34, 0x12], 0xFFFF), ("LD BC, $1234".to_string(), 3));
+        // LD BC, $1234 at 0xFFFE: the high operand byte wraps to 0x0000.
+        assert_eq!(dis_at(&[0x01, 0x34, 0x12], 0xFFFE), ("LD BC, $1234".to_string(), 3));
+        // Two-byte forms at the same addresses.
+        assert_eq!(dis_at(&[0x06, 0x42], 0xFFFF), ("LD B, $42".to_string(), 2));
+        assert_eq!(dis_at(&[0xCB, 0x47], 0xFFFF), ("BIT 0, A".to_string(), 2));
+        // A relative jump whose own PC+2 wraps as well.
+        assert_eq!(dis_at(&[0x18, 0x02], 0xFFFF).0, "JR $0003");
+        // Every opcode must survive being read at 0xFFFF.
+        for op in 0u16..=0xFF {
+            let (mnemonic, _len) = dis_at(&[op as u8, 0x00, 0x00], 0xFFFF);
+            assert!(!mnemonic.is_empty(), "opcode {op:#04X} at 0xFFFF");
+        }
     }
 
     #[test]
@@ -628,6 +650,8 @@ mod tests {
         // A representative single-byte op.
         assert_eq!(dis(&[0x00]), ("NOP".to_string(), 1));
         assert_eq!(dis(&[0x76]), ("HALT".to_string(), 1));
+        // STOP is `10 nn`; the operand is ignored but still consumed.
+        assert_eq!(dis(&[0x10, 0x00]), ("STOP".to_string(), 2));
     }
 
     #[test]
@@ -660,10 +684,10 @@ mod tests {
     ];
 
     // The base opcodes carrying one operand byte — an 8-bit immediate, a signed
-    // relative offset, or the CB prefix (length 2).
-    const LEN2: [u8; 26] = [
-        0x06, 0x0E, 0x16, 0x18, 0x1E, 0x20, 0x26, 0x28, 0x2E, 0x30, 0x36, 0x38, 0x3E, 0xC6, 0xCB,
-        0xCE, 0xD6, 0xDE, 0xE0, 0xE6, 0xE8, 0xEE, 0xF0, 0xF6, 0xF8, 0xFE,
+    // relative offset, the CB prefix, or STOP's ignored operand (length 2).
+    const LEN2: [u8; 27] = [
+        0x06, 0x0E, 0x10, 0x16, 0x18, 0x1E, 0x20, 0x26, 0x28, 0x2E, 0x30, 0x36, 0x38, 0x3E, 0xC6,
+        0xCB, 0xCE, 0xD6, 0xDE, 0xE0, 0xE6, 0xE8, 0xEE, 0xF0, 0xF6, 0xF8, 0xFE,
     ];
 
     fn expected_len(op: u8) -> u16 {
@@ -703,6 +727,7 @@ mod tests {
     // The reader contract: a length-N op touches exactly the opcode byte (offset
     // 0) plus operand offsets 1..N and nothing beyond. In particular a 1-byte op
     // never reads an operand, and a 3-byte op reads exactly offsets 1 and 2.
+    // (STOP is the one exception: its operand is counted but never read.)
     #[test]
     fn reader_reads_exactly_the_operand_bytes() {
         let addr = 0x0100u16;
