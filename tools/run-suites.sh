@@ -914,24 +914,35 @@ case "$1" in
     build)     build; exit 0 ;;
 esac
 
-# report-update is the pre-commit hook (always_run): keep it FAST and SAFE.
-# Regenerate the README table (and ratchet the threshold() floors up to the
-# measured counts) only when the staged change could actually move a pass count
-# (emulator source or a suite manifest); never download ROMs during a commit --
-# skip silently if the binary/ROM set isn't ready (CI keeps the table honest
-# regardless). The one build it will do is the staleness rebuild below.
-# update_readme_report stages its own edits, so the table and ratchet land in
-# the same commit rather than aborting it.
+# report-update regenerates the README table (and ratchets the threshold()
+# floors up to the measured counts). It has two callers with OPPOSITE needs,
+# told apart by an EXPLICIT flag rather than by guessing from ambient state:
 #
-# The fast-skip keys off "something is staged, but nothing that moves counts",
-# not off PRE_COMMIT (which pre-commit does not reliably export -- a tools-only
-# commit used to run the whole battery). A manual `report-update` on a clean
-# tree has nothing staged and must still regenerate, or it is a silent no-op.
+#   * `make report-update`      -- MANUAL. The user asked for a fresh table, so
+#                                  it ALWAYS regenerates. Deciding whether to run
+#                                  from what happens to be staged is exactly the
+#                                  silent no-op this has regressed into twice:
+#                                  once the skip fired on a clean tree, then once
+#                                  it fired whenever ANY non-core file was staged
+#                                  (the normal mid-work state). No flag -> run.
+#   * `make report-update-hook` -- the pre-commit hook (always_run), which passes
+#                                  --pre-commit. Fast-skip when no core/manifest
+#                                  change is staged, so a docs/tooling commit does
+#                                  not pay ~60s of suites for counts that cannot
+#                                  have moved.
+#
+# The flag is reliable because WE pass it from .pre-commit-config.yaml; it does
+# not depend on pre-commit exporting PRE_COMMIT (which it did not do dependably).
+# Never download ROMs during a commit -- skip if the binary/ROM set isn't ready
+# (CI keeps the table honest regardless; the one build it will do is the
+# staleness rebuild below). update_readme_report stages its own edits, so the
+# table and ratchet land in the same commit rather than aborting it.
 if [ "$1" = "report-update" ]; then
-    if ! git diff --cached --quiet 2>/dev/null \
+    if [ "${2:-}" = "--pre-commit" ] \
         && git diff --cached --quiet -- rustyboi-core rustyboi-test-runner/suites 2>/dev/null; then
         exit 0  # committing, but no source/manifest change staged -> counts can't have moved
     fi
+    log "report-update: regenerating the README suite table (grading suites)"
     # Staleness guard: a runner binary older than the staged core/runner
     # sources grades the PREVIOUS tree and writes confidently wrong counts into
     # README (it has happened repeatedly: false 205 and 215 gbc_hw rows). This
@@ -978,6 +989,13 @@ if [ "$1" = "report-update" ]; then
                     || die "report-update: refusing to publish a stale docboy tripwire block"
                 echo "run-suites: docboy tripwire refresh skipped"
             fi
+        fi
+        # Say what happened -- the whole battery runs silently for ~60s, so a
+        # "no change" result is otherwise indistinguishable from a broken no-op.
+        if git -C "$ROOT" diff --cached --quiet -- README.md 2>/dev/null; then
+            log "report-update: README table already current (nothing to change)"
+        else
+            log "report-update: README table updated and staged"
         fi
     else
         echo "run-suites: report-update skipped (binary or ROM set not present)"

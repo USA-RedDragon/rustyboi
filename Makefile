@@ -52,7 +52,7 @@ COVW_LCOV    := rustyboi-web.lcov
 
 .PHONY: help libretro native runner web android ios pgo targets \
         pgo-gen pgo-flags pgo-path pgo-clean \
-        setup build-runner suite suites suites-list report report-update \
+        setup build-runner suite suites suites-list report report-update report-update-hook \
         coverage coverage-web bench manifests roms \
         $(COV_RUNNER) $(COV_PROFDATA)
 
@@ -325,8 +325,11 @@ suites-list: ## Print the known suites + pass floors
 report: ## Print the markdown progress table
 	@./tools/run-suites.sh report
 
-report-update: ## Regenerate the README table + ratchet floors (pre-commit hook)
+report-update: ## Regenerate the README table + ratchet floors (always runs)
 	@./tools/run-suites.sh report-update
+
+report-update-hook: ## pre-commit entry: fast-skip unless core/manifest is staged
+	@./tools/run-suites.sh report-update --pre-commit
 
 # ---------------------------------------------------------------------------
 # Coverage / bench / manifests / first-party ROMs.

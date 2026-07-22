@@ -20,7 +20,7 @@ repos:
     hooks:
       - id: suite-progress-readme
         name: suite progress -> README
-        entry: make report-update
+        entry: make report-update-hook
         language: system
         pass_filenames: false
         require_serial: true
