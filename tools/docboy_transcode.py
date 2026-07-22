@@ -46,11 +46,26 @@ THE COLOR PROBLEM (solved for DMG here):
     rank) so tests using <4 shades still land on the correct shade.
 
     CGB / cgb_dmg_mode output is COLOR (a DMG cart on CGB uses the compat
-    palette), and docboy applies its own CGB color correction, which is NOT
-    bucket-identical to rustyboi's Linear conversion for mid-tones. That needs a
-    15-bit-palette bucket comparison, not a shade fold; those framebuffers are
-    deferred until that method is validated. serial/memory anchored entries are
-    color-independent and are emitted for every model.
+    palette). This is solved WITHOUT a transcode by grading at the PPU's 15-bit
+    palette level, which is invariant to color correction:
+
+      * rustyboi's `ColorCorrection::Linear` emits `floor(v5*255/31)` per channel;
+        the runner's 0xF8 compare mask keeps the top 5 bits, and
+        `floor(v5*255/31) >> 3 == v5` for every v5 in 0..31 -- so Linear+0xF8
+        recovers the exact 5-bit RGB555 palette entry the PPU chose.
+      * docboy stores the SAME palette entry: its LCD is RGB565 (R/B are the raw
+        5 bits; G is `round(g5*63/31)` expanded to 6), then 565->888 for the PNG.
+        Masking docboy's PNG to the top 5 bits recovers the identical 15-bit
+        value (`round(g5*63/31)` and `floor(g5*255/31)` share their top 5 bits
+        for all 32 shades).
+
+    So the EXISTING `png`/`png_fixed` oracle (already Linear+0xF8 for CGB) is a
+    correction-invariant 15-bit palette compare -- proven bucket-exact over all
+    32768 colors and every color in the corpus (2866 distinct), and validated
+    10/10 pass WITH vs 0/10 (~full-frame noise) under the runner's `--csp-raw`
+    control (Lcd curve + exact compare). CGB references are therefore emitted
+    AS-IS (docboy's original PNG); no green fold. serial/memory anchored entries
+    are color-independent and are emitted for every model.
 
 Idempotent: the same corpus produces byte-identical outputs.
 """
@@ -90,6 +105,7 @@ MODEL_MODE = {
 
 CYCLES_PER_FRAME = 70224
 FIB = [3, 5, 8, 13, 21, 34]
+GB_W, GB_H = 160, 144
 
 # docboy's default DMG palette (main.cpp DMG_PALETTE / colormap.h
 # DEFAULT_APPEARANCE), as it comes out of the reference PNGs after docboy's
@@ -159,6 +175,29 @@ def transcode_dmg_ref(src_png, dst_png):
     out.putdata([lut[p] for p in im.getdata()])
     os.makedirs(os.path.dirname(dst_png), exist_ok=True)
     out.save(dst_png, "PNG", optimize=False)
+    return True, None
+
+
+def cgb_ref_ok(src_png):
+    """A CGB / cgb_dmg_mode colour reference needs NO transcode -- unlike DMG.
+
+    docboy's screen is 15-bit CGB colour. The runner grades these with
+    `ColorCorrection::Linear` + the 0xF8 compare mask, which keeps the top 5 bits
+    of each 8-bit channel -- i.e. the exact RGB555 palette entry the PPU chose
+    (`floor(v*255/31) >> 3 == v` for all v in 0..31). docboy stores the same
+    palette entry (its LCD is RGB565: R/B are the raw 5 bits, G is
+    `round(g5*63/31)` expanded to 6, then 565->888); masking both to the top 5
+    bits recovers the identical 15-bit value on either side -- proven
+    bucket-exact over all 32768 colours and every colour in the corpus. So a CGB
+    reference is gradable AS-IS iff its geometry matches the framebuffer; there is
+    no palette to fold. Returns (True, None) or (False, reason)."""
+    try:
+        im = Image.open(src_png)
+        size = im.size
+    except (OSError, ValueError) as exc:
+        return False, f"unreadable reference PNG ({exc})"
+    if size != (GB_W, GB_H):
+        return False, f"reference is {size[0]}x{size[1]}, not {GB_W}x{GB_H}"
     return True, None
 
 
@@ -245,18 +284,7 @@ def classify(model, cat, entry, stats):
             return Row(name, mode, "png", rom, bucket="deferred", author=author,
                        reason=f"framebuffer: check_at_instruction '{cai}'")
 
-        if model != "dmg":
-            return Row(name, mode, "png", rom, bucket="deferred", author=author,
-                       reason="framebuffer: non-DMG color-space not yet validated")
-
-        # DMG: fold the green reference to canonical grayscale (shade compare).
-        rel_ref = os.path.join(REFS_DIR, model, fb_field)
-        ok, bad = transcode_dmg_ref(src_ref, rel_ref)
-        if not ok:
-            stats["dmg_palette_skips"][name] = bad
-            return Row(name, mode, "png", rom, bucket="deferred", author=author,
-                       reason=f"framebuffer: DMG palette has non-shade colors {bad}")
-        ref = os.path.relpath(rel_ref, ROOT)
+        # Grading + frame budget are common to DMG and CGB.
         grading = "png"
         tokens = []
         if "check_at_tick" in entry:
@@ -264,6 +292,27 @@ def classify(model, cat, entry, stats):
             tokens.append(f"frames={frames_for_ticks(entry['check_at_tick'])}")
         elif "max_ticks" in entry:
             tokens.append(f"frames={frames_for_ticks(entry['max_ticks'])}")
+
+        if model == "dmg":
+            # DMG: fold the green reference to canonical grayscale (shade compare).
+            rel_ref = os.path.join(REFS_DIR, model, fb_field)
+            ok, bad = transcode_dmg_ref(src_ref, rel_ref)
+            if not ok:
+                stats["dmg_palette_skips"][name] = bad
+                return Row(name, mode, "png", rom, bucket="deferred", author=author,
+                           reason=f"framebuffer: DMG palette has non-shade colors {bad}")
+            ref = os.path.relpath(rel_ref, ROOT)
+        else:
+            # CGB / cgb_dmg_mode: colour output, graded by the runner's
+            # correction-invariant 15-bit-palette compare (Linear + 0xF8 mask).
+            # No palette fold -- the reference is docboy's ORIGINAL PNG.
+            ok, reason = cgb_ref_ok(src_ref)
+            if not ok:
+                stats["cgb_ref_skips"][name] = reason
+                return Row(name, mode, "png", rom, bucket="deferred", author=author,
+                           reason=f"framebuffer: {reason}")
+            ref = os.path.relpath(src_ref, ROOT)
+
         return Row(name, mode, grading, rom, ref=ref, tokens=tokens,
                    bucket=bucket, author=author)
 
@@ -278,13 +327,21 @@ HEADERS = {
                  "existing suites -- see generated/report.json."),
     "diff": ("docboy DIFF-ONLY ({model}): graded against docboy's OWN F12 "
              "self-screenshots (no hardware provenance). Run + compare; a "
-             "disagreement is a LEAD, never a gate failure. DMG references have "
-             "been folded green->canonical-grey so the shade-index compare "
-             "cancels the palette. Run e.g.: rustyboi-test-runner --manifest "
-             "THIS --mode {mode} --frames 60 --scan-frames 240 --json out.json"),
+             "disagreement is a LEAD, never a gate failure. {color_note} Run "
+             "e.g.: rustyboi-test-runner --manifest THIS --mode {mode} --frames "
+             "60 --scan-frames 240 --json out.json"),
     "deferred": ("docboy DEFERRED ({model}): entries not yet runnable "
                  "faithfully; each row is commented with the reason. Rows are "
                  "commented out so the runner ignores them."),
+}
+
+# Per-model note about how the colour space is reconciled for framebuffer refs.
+COLOR_NOTE = {
+    "dmg": ("DMG references were folded green->canonical-grey so the shade-index "
+            "compare cancels the palette."),
+    "cgb": ("CGB references are docboy's ORIGINAL PNGs, graded by the runner's "
+            "correction-invariant 15-bit-palette compare (Linear + 0xF8 mask "
+            "recovers the RGB555 palette entry, so colour correction cancels)."),
 }
 
 
@@ -310,7 +367,7 @@ def main():
     for model in MODELS:
         cfg = load_config(model)
         buckets = {"anchored": [], "diff": [], "deferred": []}
-        stats = {"dmg_palette_skips": {}}
+        stats = {"dmg_palette_skips": {}, "cgb_ref_skips": {}}
         oracle_counts = Counter()
         anchored_authors = Counter()
         deferred_reasons = Counter()
@@ -330,7 +387,9 @@ def main():
 
         for bucket, rows in buckets.items():
             path = os.path.join(MANIFEST_DIR, f"docboy_{bucket}_{model}.manifest")
-            header = HEADERS[bucket].format(model=model, mode=MODEL_MODE[model])
+            color_note = COLOR_NOTE["dmg" if model == "dmg" else "cgb"]
+            header = HEADERS[bucket].format(
+                model=model, mode=MODEL_MODE[model], color_note=color_note)
             write_manifest(path, header, rows)
 
         # Redundancy note: anchored entries whose author maps to a suite we run.
@@ -350,6 +409,7 @@ def main():
             "deferred_reasons": dict(deferred_reasons),
             "redundant_candidates": dict(redundant),
             "dmg_palette_skips": stats["dmg_palette_skips"],
+            "cgb_ref_skips": stats["cgb_ref_skips"],
         }
         for k in ("anchored", "diff", "deferred"):
             grand[k] += len(buckets[k])
