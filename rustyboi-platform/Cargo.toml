@@ -16,7 +16,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-rustyboi-core = { workspace = true }
+rustyboi-core = { workspace = true, features = ["cli"] }
 rustyboi-frontend = { workspace = true }
 rustyboi-session = { workspace = true }
 clap = { workspace = true }

@@ -10,8 +10,15 @@ edition = "2024"
 name = "rustyboi_core_lib"
 crate-type = ["rlib"]
 
+[features]
+# CLI-argument support: derives `clap::ValueEnum` on the machine-identity enums
+# (`gb::Hardware`, `gb::Region`) so a CLI can parse them directly. Off by
+# default — the wasm, libretro, Android and session consumers embed the core and
+# would otherwise pull the whole clap parser and its proc-macros.
+cli = ["dep:clap"]
+
 [dependencies]
-clap = { workspace = true }
+clap = { workspace = true, optional = true }
 rustyboi-mix = { workspace = true }
 serde = { workspace = true }
 serde_bytes = "=0.11.19"
@@ -21,3 +28,10 @@ zip = { workspace = true, features = ["deflate64", "lzma"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "=1.1.0"
+
+# The `Hardware` analog-stage coverage test enumerates the enum through
+# `ValueEnum::value_variants`, which is exhaustive by construction (a hand-kept
+# list is not). Unit tests therefore always get the derive; see the `cfg_attr`
+# in `gb.rs`. Test-only, so it costs the embedding consumers nothing.
+[dev-dependencies]
+clap = { workspace = true }

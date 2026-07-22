@@ -88,6 +88,14 @@ impl SM83 {
         }
     }
 
+    /// Power-on state, in place. Owned here rather than field-by-field at the
+    /// `GB::reset` call site so a newly added latch (the prefetch/HALT-exit
+    /// one-shots above are all `#[serde(default)]` cross-instruction carriers)
+    /// cannot survive a reset by being forgotten there.
+    pub(crate) fn reset(&mut self) {
+        *self = Self::new();
+    }
+
     pub fn step(&mut self, mmio: &mut crate::cpu::Bus) -> u32 {
         // While stalled after a CGB STOP-speed-switch, advance peripherals in
         // small slices without fetching instructions. CPU fetch is suspended for

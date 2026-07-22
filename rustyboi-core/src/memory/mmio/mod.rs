@@ -1364,13 +1364,15 @@ impl Mmio {
     /// the console's fixed hardware identity (`is_agb`/`cgb_de`, which DO survive
     /// at this level) via the existing setters — must not change emulation.
     ///
-    /// This is the SUBSET a savestate cannot carry. It is not a whole machine
-    /// identity: `is_mgb`, `cgb_de`, the APU boot-CGB anchor, the SGB unit and
-    /// the CPU clock are all absent here because a reload gets them back through
-    /// serde. Construction and in-place reset need those too, so they go through
-    /// `GB::seed_hardware_flags`, which wraps this.
+    /// `is_mgb` and `cgb_de` do survive serde, but are re-derived here anyway so
+    /// this is the single hardware-identity derivation every path shares. What
+    /// is still absent — the APU boot-CGB anchor, the SGB unit and the CPU clock
+    /// — a reload gets back through serde; construction and in-place reset need
+    /// those too, so they go through `GB::seed_hardware_flags`, which wraps this.
     pub(crate) fn reseed_hardware_flags(&mut self, hw: crate::gb::Hardware) {
         self.set_agb(hw.is_agb());
+        self.set_mgb(matches!(hw, crate::gb::Hardware::MGB));
+        self.set_cgb_de(hw.is_cgb_d_or_later());
         self.set_apu_cgb_de(hw.is_cgb_d_or_later());
         self.set_apu_cgb_le_b(hw.is_cgb_b_or_earlier());
         self.set_apu_cgb_b(matches!(hw, crate::gb::Hardware::CGBB));
@@ -1424,9 +1426,10 @@ impl Mmio {
     }
 
     /// CGB-D/E silicon revision (CGB-D-and-later silicon), for the
-    /// PPU/timer revision gates. Seeded from `GB::new` for Hardware::CGBE, so
-    /// the extension is EXACTLY {CGBE}: AGB stays on the C side (pinned to the
-    /// AGB timing/APU diff set), mirroring `is_cgb_d_or_later`.
+    /// PPU/timer revision gates. Seeded by `reseed_hardware_flags` for
+    /// Hardware::CGBE, so the extension is EXACTLY {CGBE}: AGB stays on the C
+    /// side (pinned to the AGB timing/APU diff set), mirroring
+    /// `is_cgb_d_or_later`.
     ///
     /// A bare `is_cgb_de()` therefore routes AGB with CGB-C. That is the
     /// deliberate, oracle-backed choice for the LY-153 window, the end-of-vblank
@@ -1457,8 +1460,8 @@ impl Mmio {
     }
 
     /// Set the MGB (Game Boy Pocket) hardware flag. Only gates the undocumented
-    /// OAM-DMA-during-HALT OAM merge (`mgb_frozen_oam_entry`). Called once from
-    /// `GB::new` for Hardware::MGB.
+    /// OAM-DMA-during-HALT OAM merge (`mgb_frozen_oam_entry`). Seeded by
+    /// `reseed_hardware_flags` for Hardware::MGB.
     pub(crate) fn set_mgb(&mut self, mgb: bool) {
         self.is_mgb = mgb;
     }

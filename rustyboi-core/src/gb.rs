@@ -20,14 +20,16 @@ use std::io;
 /// an NTSC and a PAL SNES clock the same cartridge at different rates. Every
 /// other model (including the SGB2, which *does* have its own crystal) runs at
 /// the DMG's 4.194304 MHz regardless.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, clap::ValueEnum, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(any(feature = "cli", test), derive(clap::ValueEnum))]
 pub enum Region {
     #[default]
     Ntsc,
     Pal,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, clap::ValueEnum, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(any(feature = "cli", test), derive(clap::ValueEnum))]
 pub enum Hardware {
     DMG,  // Original DMG-01
     DMG0, // Very early Japanese DMG-01
@@ -453,8 +455,6 @@ impl GB {
     /// `Mmio` does not.
     fn seed_hardware_flags(mmio: &mut memory::mmio::Mmio, hardware: Hardware, region: Region) {
         mmio.reseed_hardware_flags(hardware);
-        mmio.set_mgb(matches!(hardware, Hardware::MGB));
-        mmio.set_cgb_de(hardware.is_cgb_d_or_later());
         // CGB vs DMG APU gating (NRx1-writable-while-off exception, post-boot
         // APU clock anchor, ch4 deferred-trigger fork). Seeded here — before
         // any audio write can anchor the SPU clock — so a session that runs
@@ -1797,8 +1797,6 @@ impl GB {
         // GB::new ran so timer-AGB / APU-revision behavior does not silently
         // revert to default-CGB after a load.
         self.mmio.reseed_hardware_flags(self.hardware);
-        self.mmio.set_cgb_de(self.hardware.is_cgb_d_or_later());
-        self.mmio.set_mgb(matches!(self.hardware, Hardware::MGB));
         // CPU-mirror flags (halt / STOP-window) re-derived from the serialized CPU.
         self.mmio
             .sync_cpu_mirror_flags(self.cpu.halted, self.cpu.stop_unhalt_cycles > 0);
@@ -1883,13 +1881,11 @@ impl GB {
             .is_some_and(cartridge::Cartridge::supports_sgb);
         self.mmio.set_sgb_unlocked(sgb_unlocked);
         self.ppu.reset();
-        self.cpu.halted = false;
-        self.cpu.stopped = false;
-        self.cpu.ime_enable_delay = 0;
+        // Also re-seeds `Registers::new()`, which the boot ROM path then runs
+        // from and `skip_bios` overwrites wholesale.
+        self.cpu.reset();
         if self.skip_bios {
             self.skip_bios();
-        } else {
-            self.cpu.registers = cpu::registers::Registers::new();
         }
     }
 
