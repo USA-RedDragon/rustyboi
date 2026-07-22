@@ -193,6 +193,16 @@ impl Cartridge {
             return UnlMapper::Ggb81(0);
         }
 
+        // Sintax (Vast Fame family): keyed on the CRC32 of the 48-byte $0184
+        // secondary logo (mGBA `_detectUnlMBC`), gated by mGBA's "not a fixed
+        // dump" guard -- $7FFF != 0x01. A cracked/"fixed" dump already runs as
+        // a plain MBC5, so re-applying the scramble would break it; the guard
+        // leaves those untouched. The 48-byte CRC32 window cannot collide with
+        // a licensed cart. (data.len() >= 0x8000 is guaranteed above.)
+        if SINTAX_LOGO_CRC32.contains(&logo_crc32) && data[0x7FFF] != 0x01 {
+            return UnlMapper::Sintax(SintaxState::default());
+        }
+
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
         // banked-size file) the publisher string in the ROM. The
         // string+type+size gate already implies the blank-header shape in
@@ -425,6 +435,76 @@ impl Cartridge {
             }
         }
     }
+    /// Sintax (Vast Fame family) register protocol (mGBA `_GBSintax`). The board
+    /// is electrically MBC5; three windows drive the boot-programmed scramble:
+    ///   $2000-$2FFF     bank number, bit-reordered through the active mode's
+    ///                   table into the MBC5 low-8 bank register; the RAW value's
+    ///                   low 2 bits also pick which XOR byte is active.
+    ///   $5x1x           set the 4-bit reorder mode, then re-derive the bank
+    ///                   register and XOR from the stored bank number (mGBA
+    ///                   replays a fake $2000 write with the new mode).
+    ///   $7020/30/40/50  program the four per-bank XOR bytes.
+    /// Everything else behaves as plain MBC5. The $4000-$7FFF read XOR is applied
+    /// in the read path. `st` is a copy of the `Copy` scramble payload, so `self`
+    /// stays borrowable; it is written back at the end. The MBC5 bank/RAM
+    /// registers live on the `Mapper::Sintax` board.
+    pub(super) fn sintax_write(&mut self, addr: u16, value: u8) {
+        let UnlMapper::Sintax(mut st) = self.unl_mapper else {
+            return;
+        };
+        match addr {
+            RAM_ENABLE_START..=RAM_ENABLE_END => {
+                if let Mapper::Sintax(m) = &mut self.mapper {
+                    m.ram_enabled = (value & 0x0F) == 0x0A;
+                }
+            }
+            0x2000..=0x2FFF => {
+                st.bank_no = value;
+                st.rom_bank_xor = st.xor_values[(value & 0x03) as usize];
+                let low = Self::reorder_bits(value, &SINTAX_BANK_REORDER[st.mode as usize]);
+                if let Mapper::Sintax(m) = &mut self.mapper {
+                    m.regs.rom_bank_low = low;
+                }
+            }
+            0x3000..=0x3FFF => {
+                // Bit 8 of the ROM bank -- not reordered (plain MBC5).
+                if let Mapper::Sintax(m) = &mut self.mapper {
+                    m.regs.rom_bank_high = value & 0x01;
+                }
+            }
+            // Mode select ($5x1x): any address matching `5?1?`. Metal Max writes
+            // other $5xxx addresses before battles, which must NOT be treated as
+            // mode writes -- only 5x1x is recognised (mGBA comment).
+            _ if (addr & 0xF0F0) == 0x5010 => {
+                st.mode = value & 0x0F;
+                st.rom_bank_xor = st.xor_values[(st.bank_no & 0x03) as usize];
+                let low = Self::reorder_bits(st.bank_no, &SINTAX_BANK_REORDER[st.mode as usize]);
+                if let Mapper::Sintax(m) = &mut self.mapper {
+                    m.regs.rom_bank_low = low;
+                }
+            }
+            RAM_BANK_ROM_BANK_HIGH_START..=RAM_BANK_ROM_BANK_HIGH_END => {
+                // Non-$5x1x RAM-bank register: plain MBC5.
+                if let Mapper::Sintax(m) = &mut self.mapper {
+                    m.regs.ram_bank = value;
+                }
+            }
+            0x7000..=0x7FFF => {
+                // Nibble 2 selects which XOR byte to program; the applied XOR is
+                // then recomputed for the current bank.
+                match (addr & 0x00F0) >> 4 {
+                    2 => st.xor_values[0] = value,
+                    3 => st.xor_values[1] = value,
+                    4 => st.xor_values[2] = value,
+                    5 => st.xor_values[3] = value,
+                    _ => {}
+                }
+                st.rom_bank_xor = st.xor_values[(st.bank_no & 0x03) as usize];
+            }
+            _ => {}
+        }
+        self.unl_mapper = UnlMapper::Sintax(st);
+    }
 }
 
 // --- board struct + banking ---------------------------------------------
@@ -604,6 +684,30 @@ pub(super) struct Ggb81 {
 }
 
 impl Banking for Ggb81 {
+    fn rom_bankn(&self, g: Geom) -> usize {
+        let bank =
+            (self.regs.rom_bank_low as usize) | ((self.regs.rom_bank_high as usize & 0x01) << 8);
+        bank % g.rom_banks
+    }
+    fn rom_bank0(&self, _g: Geom) -> usize {
+        0
+    }
+    fn ram_bank(&self, g: Geom) -> usize {
+        (self.regs.ram_bank & 0x0F) as usize % g.ram_banks.max(1)
+    }
+}
+
+/// Sintax: electrically MBC5+RAM. The $0000-$7FFF scramble protocol
+/// (`sintax_write`) and the $4000-$7FFF read XOR are applied around this board;
+/// the bank math itself is plain MBC5 (the reorder is done before the value
+/// reaches these registers).
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct Sintax {
+    pub ram_enabled: bool,
+    pub regs: Mbc5State,
+}
+
+impl Banking for Sintax {
     fn rom_bankn(&self, g: Geom) -> usize {
         let bank =
             (self.regs.rom_bank_low as usize) | ((self.regs.rom_bank_high as usize & 0x01) << 8);

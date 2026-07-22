@@ -127,6 +127,36 @@ const GGB81_DATA_REORDERING: [[u8; 8]; 8] = [
     [0, 2, 5, 3, 4, 6, 1, 7],
 ];
 
+/// CRC32 (reflected IEEE) of the 48-byte $0184 secondary logo on Sintax boards
+/// (mGBA `_detectUnlMBC`).
+const SINTAX_LOGO_CRC32: [u32; 2] = [0x6C1D_CF2D, 0x99E3_449D];
+
+/// Sintax ROM-bank bit-reorder tables, indexed by the 4-bit mode the game
+/// programs via a $5x1x register write (mGBA `_sintaxReordering`). A bank
+/// number written to $2xxx is permuted `out bit i = in bit table[i]` before it
+/// reaches the MBC5 low-8 bank register, so the boot code writes pre-permuted
+/// bank numbers that land on the intended bank. The identity rows are modes
+/// mGBA never observed a real game select; mode $F (identity) is the power-on
+/// default, so an un-programmed cart banks like a plain MBC5.
+const SINTAX_BANK_REORDER: [[u8; 8]; 16] = [
+    [2, 1, 4, 3, 6, 5, 0, 7],
+    [3, 2, 5, 4, 7, 6, 1, 0],
+    [0, 1, 2, 3, 4, 5, 6, 7], // unobserved
+    [0, 1, 2, 3, 4, 5, 6, 7], // unobserved
+    [0, 1, 2, 3, 4, 5, 6, 7], // unobserved
+    [4, 5, 2, 3, 0, 1, 6, 7],
+    [0, 1, 2, 3, 4, 5, 6, 7], // unobserved
+    [6, 7, 4, 5, 1, 3, 0, 2],
+    [0, 1, 2, 3, 4, 5, 6, 7], // unobserved
+    [7, 6, 1, 0, 3, 2, 5, 4],
+    [0, 1, 2, 3, 4, 5, 6, 7], // unobserved
+    [5, 4, 7, 6, 1, 0, 3, 2],
+    [0, 1, 2, 3, 4, 5, 6, 7], // unobserved
+    [2, 3, 4, 5, 6, 7, 0, 1],
+    [0, 1, 2, 3, 4, 5, 6, 7], // unobserved
+    [0, 1, 2, 3, 4, 5, 6, 7],
+];
+
 // Lock-phase values shared by the Sachen and Rocket boot state machines
 // (the board powers up locked and unlocks in DMG -> CGB -> unlocked phases).
 const UNL_LOCKED_DMG: u8 = 0;
@@ -224,6 +254,44 @@ pub enum UnlMapper {
     /// to 0 on power-on; it lives in the payload (not a `Cartridge` field) so
     /// every other cart's bincode savestate layout stays byte-identical.
     Ggb81(u8),
+    /// Sintax (Vast Fame family): electrically MBC5 plus a boot-programmed data
+    /// scramble. The board is driven by three register windows (mGBA
+    /// `_GBSintax`): $5x1x selects a 4-bit bank-reorder mode, $2xxx bank writes
+    /// are bit-permuted through that mode's table (and their low 2 bits pick one
+    /// of four XOR bytes programmed via $7020/$7030/$7040/$7050), and reads of
+    /// the switchable $4000-$7FFF window are XORed with the active byte. Bank 0
+    /// is never scrambled. Detected from the $0184 secondary-logo CRC32; carries
+    /// the small scramble state in the enum payload (as `Vf001` does) so every
+    /// other cart's bincode savestate layout stays byte-identical.
+    Sintax(SintaxState),
+}
+
+/// Boot-programmed data-scramble state for `UnlMapper::Sintax`. Held inside the
+/// enum variant (not as a `Cartridge` field) so the bincode savestate layout of
+/// every other cart stays byte-identical. Field roles mirror mGBA's
+/// `GBSintaxState`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SintaxState {
+    /// Active 4-bit bank-reorder mode (index into `SINTAX_BANK_REORDER`).
+    mode: u8,
+    /// The four XOR bytes programmed via $7020/$7030/$7040/$7050.
+    xor_values: [u8; 4],
+    /// Raw (un-permuted) value of the last $2xxx bank write; its low 2 bits
+    /// select which of `xor_values` is active, and it is replayed when the mode
+    /// changes.
+    bank_no: u8,
+    /// The active XOR byte (`xor_values[bank_no & 3]`) applied to $4000-$7FFF
+    /// reads.
+    rom_bank_xor: u8,
+}
+
+impl Default for SintaxState {
+    fn default() -> Self {
+        // Power-on: mode $F is the identity reorder and the XOR is 0, so a
+        // Sintax cart banks and reads exactly like a plain MBC5 until the boot
+        // code programs the protection (mGBA `GBMBCInit` seeds `mode = 0xF`).
+        Self { mode: 0x0F, xor_values: [0; 4], bank_no: 0, rom_bank_xor: 0 }
+    }
 }
 
 /// Bit-scramble mode state for `UnlMapper::Bbd`. Carried inside the enum
@@ -728,6 +796,9 @@ impl Cartridge {
             // GGB81's data-swap mode is volatile; power up with the identity
             // mode selected, exactly like a fresh load.
             UnlMapper::Ggb81(_) => UnlMapper::Ggb81(0),
+            // Sintax's scramble state is volatile; power up at the mode-$F
+            // identity + zero XOR so reset() matches a fresh load.
+            UnlMapper::Sintax(_) => UnlMapper::Sintax(SintaxState::default()),
             other => other,
         };
         Cartridge {
@@ -919,6 +990,12 @@ impl Cartridge {
             // MBC5+RAM+BATTERY); only the $2001 mode write and the reorder on
             // bank-window reads differ, so fall through to the header type.
             UnlMapper::Ggb81(_) => {}
+            // Sintax is electrically MBC5+RAM+BATTERY (the real carts even
+            // declare $1B truthfully); the bank reorder / read XOR are applied
+            // in the write and read paths. The decode ignores the payload.
+            UnlMapper::Sintax(_) => {
+                return CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
+            }
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -976,6 +1053,7 @@ impl Cartridge {
             Mapper::LiCheng(m) => m.ram_enabled,
             Mapper::Bbd(m) => m.ram_enabled,
             Mapper::Ggb81(m) => m.ram_enabled,
+            Mapper::Sintax(m) => m.ram_enabled,
             _ => false,
         }
     }
@@ -1750,6 +1828,9 @@ impl memory::Addressable for Cartridge {
                     UnlMapper::Ggb81(mode) => {
                         Self::reorder_bits(byte, &GGB81_DATA_REORDERING[usize::from(mode)])
                     }
+                    // Sintax XORs the switchable window with the active per-bank
+                    // key (mGBA `_GBSintaxRead`).
+                    UnlMapper::Sintax(st) => byte ^ st.rom_bank_xor,
                     _ => byte,
                 }
             }
@@ -1852,6 +1933,17 @@ impl memory::Addressable for Cartridge {
                     }
                     // GGB81 is electrically MBC5+RAM; RAM reads are plain.
                     Mapper::Ggb81(m) => {
+                        if m.ram_enabled
+                            && let Some(offset) = self.banked_ram_offset(addr)
+                        {
+                            self.ram_data[offset]
+                        } else {
+                            0xFF
+                        }
+                    }
+                    // Sintax is electrically MBC5+RAM; RAM reads are plain (only
+                    // the ROM read path is XOR-descrambled).
+                    Mapper::Sintax(m) => {
                         if m.ram_enabled
                             && let Some(offset) = self.banked_ram_offset(addr)
                         {
@@ -2022,6 +2114,18 @@ impl memory::Addressable for Cartridge {
                         m.state.bank = (value & 7) << 1;
                         m.state.mapped = true;
                     }
+            }
+            // Sintax (Vast Fame): the entire $0000-$7FFF register protocol is
+            // intercepted here -- bank writes are bit-reordered, $5x1x selects
+            // the reorder mode, $7xxx programs the XOR bytes, and $0000-$1FFF /
+            // $4000-$5FFF behave as plain MBC5 RAM-enable / RAM-bank (mGBA
+            // `_GBSintax`). Placed before the generic arms so the reorder is not
+            // bypassed; scoped to $0000-$7FFF so cart RAM ($A000-$BFFF) still
+            // flows to the external-RAM arm below.
+            RAM_ENABLE_START..=BANKING_MODE_END
+                if matches!(self.unl_mapper, UnlMapper::Sintax(_)) =>
+            {
+                self.sintax_write(addr, value);
             }
             // RAM Enable (0x0000-0x1FFF)
             RAM_ENABLE_START..=RAM_ENABLE_END => match &mut self.mapper {
@@ -2238,6 +2342,7 @@ impl memory::Addressable for Cartridge {
                     Mapper::LiCheng(m) => Ext::Banked(m.ram_enabled),
                     Mapper::Bbd(m) => Ext::Banked(m.ram_enabled),
                     Mapper::Ggb81(m) => Ext::Banked(m.ram_enabled),
+                    Mapper::Sintax(m) => Ext::Banked(m.ram_enabled),
                     Mapper::Mbc7(m) => Ext::Mbc7(m.ram_enabled && m.state.ram_enabled2),
                     Mapper::HuC1(m) => Ext::HuC1(m.state.ir_mode),
                     Mapper::Camera(m) => {
@@ -2625,6 +2730,91 @@ mod tests {
         // A one-byte perturbation of the $0184 block changes its CRC32 -> the
         // rule no longer matches (detection is a 48-byte CRC32, not a sum).
         let mut perturbed = rom.clone();
+        perturbed[0x184] ^= 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&perturbed), UnlMapper::None);
+    }
+
+    // Clean-room 48-byte stand-in for the Vast Fame secondary logo on Sintax
+    // boards: a plain ASCII banner (44 bytes) plus a 4-byte suffix computed so
+    // the block's CRC32 equals the Sintax detection constant 0x6C1DCF2D. No
+    // copyrighted logo bytes; the same block is embedded in the
+    // sintax_scramble test ROM.
+    const SINTAX_LOGO: [u8; 48] =
+        *b"RUSTYBOI SINTAX VASTFAME CLEANROOM STANDIN!!\xFE\xDF\x1B\x3C";
+
+    /// 1MB MBC5+RAM+BATTERY image carrying the Sintax signature: the real
+    /// Nintendo logo (so the boot ROM's check passes, exactly like the real
+    /// carts), the $0184 secondary logo whose CRC32 keys detection, the truthful
+    /// $1B header type, and the protected-dump guard byte at $7FFF (!= 0x01). A
+    /// distinct marker `0x10 + bank` sits at offset 0 of every bank.
+    fn make_sintax_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x100000]; // 64 banks
+        rom[CARTRIDGE_TYPE_OFFSET] = MBC5_RAM_BATTERY; // $1B, truthful
+        rom[ROM_SIZE_OFFSET] = 0x05; // 1MB
+        rom[RAM_SIZE_OFFSET] = 0x03; // 32KB
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+        rom[0x184..0x1B4].copy_from_slice(&SINTAX_LOGO);
+        rom[0x7FFF] = 0x7B; // protected dump (real dumps read 0x7B here)
+        for bank in 0..64usize {
+            rom[bank * 0x4000] = (0x10 + bank) as u8;
+        }
+        rom
+    }
+
+    #[test]
+    fn sintax_detects_scrambles_and_descrambles() {
+        let rom = make_sintax_rom();
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::Sintax(SintaxState::default())
+        );
+
+        // Electrically MBC5+RAM+BATTERY.
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(
+            cart.get_cartridge_type(),
+            CartridgeType::MBC5 { ram: true, battery: true, .. }
+        ));
+
+        // Program reorder mode 1 via a $5x1x write, then write a RAW bank
+        // number to $2xxx. The effective bank is the value permuted through
+        // the mode-1 table -- a plain MBC5 would select the raw value directly,
+        // so this read distinguishes the two.
+        let mode = 1u8;
+        let raw = 0x04u8;
+        cart.write(0x5010, mode);
+        cart.write(0x2000, raw);
+        let eff = Cartridge::reorder_bits(raw, &SINTAX_BANK_REORDER[mode as usize]) as usize;
+        assert_ne!(eff, raw as usize, "mode 1 must actually permute this value");
+        // XOR still 0, so the read is the bank marker unchanged.
+        assert_eq!(cart.read(0x4000), (0x10 + eff) as u8);
+
+        // Program XOR byte 0 (raw & 3 == 0 selects it); reads of the switchable
+        // window are now XORed, bank 0 is not.
+        cart.write(0x7020, 0x5A);
+        assert_eq!(cart.read(0x4000), (0x10 + eff) as u8 ^ 0x5A);
+        assert_eq!(cart.read(0x0000), rom[0], "bank 0 is never scrambled");
+
+        // Changing the mode replays the stored bank number under the new table
+        // (mGBA fakes a $2000 write), re-selecting a different physical bank.
+        let mode2 = 5u8;
+        cart.write(0x5010, mode2);
+        let eff2 = Cartridge::reorder_bits(raw, &SINTAX_BANK_REORDER[mode2 as usize]) as usize;
+        assert_ne!(eff2, eff);
+        assert_eq!(cart.read(0x4000), (0x10 + eff2) as u8 ^ 0x5A);
+    }
+
+    #[test]
+    fn sintax_detection_guards() {
+        // A "fixed"/cracked dump ($7FFF == 0x01) already runs as plain MBC5 and
+        // must NOT be re-scrambled (mGBA's guard).
+        let mut fixed = make_sintax_rom();
+        fixed[0x7FFF] = 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&fixed), UnlMapper::None);
+
+        // A one-byte perturbation of the $0184 block changes its CRC32 -> the
+        // rule no longer matches (detection is a 48-byte CRC32, not a sum).
+        let mut perturbed = make_sintax_rom();
         perturbed[0x184] ^= 0x01;
         assert_eq!(Cartridge::detect_unl_mapper(&perturbed), UnlMapper::None);
     }
