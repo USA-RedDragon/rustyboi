@@ -4425,7 +4425,7 @@ mod tests {
     /// MBC2's built-in RAM is physically 512 x 4 bits, so the upper nibble has
     /// no storage cell. Every load path must mask it off, or `save_ram()`
     /// exports and the streamed sidecar carry bits the silicon cannot hold —
-    /// and the two entry points must agree byte-for-byte.
+    /// and all three entry points must agree byte-for-byte.
     #[test]
     fn mbc2_save_loads_mask_to_four_bits_on_every_path() {
         let image: Vec<u8> = (0..MBC2_RAM_SIZE).map(|i| (i as u8) | 0xF0).collect();
@@ -4449,7 +4449,16 @@ mod tests {
             "attach_save_file left MBC2 upper nibbles set"
         );
 
+        // Import entry point (File -> Import Battery Save).
+        let mut via_import = Cartridge::from_bytes(&make_rom(MBC2_BATTERY, 0x00)).unwrap();
+        assert_eq!(via_import.import_save_ram(&image).unwrap(), MBC2_RAM_SIZE);
+        assert!(
+            via_import.save_ram().iter().all(|&b| b & 0xF0 == 0),
+            "import_save_ram left MBC2 upper nibbles set"
+        );
+
         assert_eq!(via_bytes.save_ram(), via_path.save_ram());
+        assert_eq!(via_bytes.save_ram(), via_import.save_ram());
         // The masking is emulation-invisible (the read path re-masks the
         // undriven upper lines), but the exported image is what the user's
         // .sav ends up holding. RAMG must be open for the array to answer.
@@ -4487,6 +4496,47 @@ mod tests {
         let mut cart = Cartridge::from_bytes(&make_rom(MBC3_RAM_BATTERY, 0x02)).unwrap();
         cart.attach_save_file(&sav).unwrap();
         assert!(cart.save_ram()[..0x2000].iter().all(|&b| b == 0x5A));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The other end of the same one-policy load: a short save file fills its
+    /// prefix and leaves the rest of the array at its power-on fill rather than
+    /// being rejected or zero-extending the cart's RAM. Both the path and the
+    /// bytes entry point must agree, and MBC2 must still mask what it did take.
+    #[test]
+    fn undersized_save_loads_prefix_and_leaves_the_tail() {
+        let dir = save_test_dir("undersize");
+
+        // Non-MBC2: 8KB array, hand it 256 bytes.
+        let sav = dir.join("mbc3.sav");
+        fs::write(&sav, vec![0x5A; 0x100]).unwrap();
+        let mut via_path = Cartridge::from_bytes(&make_rom(MBC3_RAM_BATTERY, 0x02)).unwrap();
+        via_path.attach_save_file(&sav).unwrap();
+        assert_eq!(via_path.save_ram().len(), 0x2000, "RAM was resized to the file");
+        assert!(via_path.save_ram()[..0x100].iter().all(|&b| b == 0x5A));
+        assert!(via_path.save_ram()[0x100..].iter().all(|&b| b == 0xFF));
+
+        let mut via_bytes = Cartridge::from_bytes(&make_rom(MBC3_RAM_BATTERY, 0x02)).unwrap();
+        assert_eq!(via_bytes.load_sram_bytes(&vec![0x5A; 0x100]).unwrap(), 0x100);
+        assert_eq!(via_bytes.save_ram(), via_path.save_ram());
+
+        // MBC2: 512x4 array, hand it 64 bytes with the (unstorable) upper
+        // nibbles set. The prefix is masked; the tail keeps the power-on fill.
+        let image: Vec<u8> = vec![0xA7; 64];
+        let sav = dir.join("mbc2.sav");
+        fs::write(&sav, &image).unwrap();
+        let mut cart = Cartridge::from_bytes(&make_rom(MBC2_BATTERY, 0x00)).unwrap();
+        cart.attach_save_file(&sav).unwrap();
+        assert_eq!(cart.save_ram().len(), MBC2_RAM_SIZE);
+        assert!(cart.save_ram()[..64].iter().all(|&b| b == 0x07));
+        assert!(cart.save_ram()[64..].iter().all(|&b| b == 0xFF));
+
+        let mut via_bytes = Cartridge::from_bytes(&make_rom(MBC2_BATTERY, 0x00)).unwrap();
+        assert_eq!(via_bytes.load_sram_bytes(&image).unwrap(), 64);
+        assert_eq!(via_bytes.save_ram(), cart.save_ram());
+        assert_eq!(via_bytes.import_save_ram(&image).unwrap(), 64);
+        assert_eq!(via_bytes.save_ram(), cart.save_ram());
 
         fs::remove_dir_all(&dir).ok();
     }
