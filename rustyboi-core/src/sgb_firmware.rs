@@ -494,13 +494,11 @@ pub(crate) mod firmware_test {
             match std::fs::read(root.join(name)) {
                 Ok(d) => out.push(d),
                 Err(e) => {
-                    assert!(
-                        false,
+                    panic!(
                         "{}/{name} is unreadable ({e}): the \
                          firmware-backed tests cannot run.",
                         root.display()
                     );
-                    return Vec::new();
                 }
             }
         }
