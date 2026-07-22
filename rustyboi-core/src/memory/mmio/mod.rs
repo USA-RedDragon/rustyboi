@@ -1144,6 +1144,12 @@ pub struct Mmio {
     cart_rtc_kind: cartridge::RtcTickKind,
     #[serde(skip, default)]
     cart_has_camera: bool,
+    // Cached alongside the two above: the inserted board takes its BANK
+    // register writes through the cart-RAM window ($A000-$BFFF) instead of
+    // $0000-$7FFF (TAMA5 is the only one). Those writes must drop the
+    // passive-read page table too, or the CPU keeps fetching the previous bank.
+    #[serde(skip, default)]
+    cart_banks_via_ram_window: bool,
     // AGB (GBA-in-GBC-mode) hardware flag. AGB behaves like CGB everywhere
     // except a small, well-defined set of timing/APU diffs.
     // Set once at construction from Hardware::AGB; never toggled by cart compat
@@ -1276,6 +1282,7 @@ impl Mmio {
             cart_has_clock: false,       // Set on insert_cartridge
             cart_rtc_kind: cartridge::RtcTickKind::None,
             cart_has_camera: false,
+            cart_banks_via_ram_window: false,
             is_agb: false,
             cgb_de: false,
             is_mgb: false,
@@ -1318,6 +1325,7 @@ impl Mmio {
         self.cart_has_clock = cartridge.needs_clock_tick();
         self.cart_rtc_kind = cartridge.rtc_kind();
         self.cart_has_camera = cartridge.has_camera();
+        self.cart_banks_via_ram_window = cartridge.banks_via_ram_window();
         self.cartridge = Some(cartridge);
         // If a boot ROM is already loaded, hand its logo to the (possibly Rocket)
         // cartridge; load_bios does the same when the order is reversed.
@@ -1334,6 +1342,8 @@ impl Mmio {
             .as_ref()
             .map_or(cartridge::RtcTickKind::None, |c| c.rtc_kind());
         self.cart_has_camera = self.cartridge.as_ref().is_some_and(|c| c.has_camera());
+        self.cart_banks_via_ram_window =
+            self.cartridge.as_ref().is_some_and(|c| c.banks_via_ram_window());
     }
 
     /// Re-attach the ROM image to the serde-restored cartridge (whose `rom_data`
@@ -4137,8 +4147,14 @@ impl memory::Addressable for Mmio {
 
     fn write(&mut self, addr: u16, value: u8) {
         // Cart-register writes switch banks; SVBK moves the D page; FF50
-        // unmaps the boot overlay: drop the passive-read page table.
-        if addr < 0x8000 || addr == REG_SVBK || addr == REG_BOOT_OFF {
+        // unmaps the boot overlay: drop the passive-read page table. TAMA5
+        // keeps its bank register in the cart-RAM window instead of
+        // $0000-$7FFF, so that window counts as a cart-register write there.
+        if addr < 0x8000
+            || addr == REG_SVBK
+            || addr == REG_BOOT_OFF
+            || (self.cart_banks_via_ram_window && (0xA000..0xC000).contains(&addr))
+        {
             self.passive_pages_valid = false;
         }
         // Any IO write may move HDMA-relevant state (FF40 LCD off, FF55 kick,

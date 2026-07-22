@@ -89,8 +89,13 @@ pub(super) const HUC1_RAM_BATTERY: u8 = 0xFF;
 // implies RAM+BATTERY.
 pub(super) const POCKET_CAMERA: u8 = 0xFC;
 
-// Remaining unimplemented mapper families (fall through to NoMBC):
-//   0xFD BANDAI TAMA5.
+// BANDAI TAMA5: the licensed three-chip Tamagotchi board (TAMA5 gate array +
+// TAMA6 MCU/RTC + TAMA7 mask ROM), used only by the three "Game de Hakken!!
+// Tamagotchi" carts. Unlike every other licensed mapper its register file is
+// reached through the cart-RAM window $A000-$BFFF, not $0000-$7FFF, so nothing
+// in the $0000-$7FFF write dispatch applies to it. The type byte implies
+// RAM+BATTERY+RTC. See `tama5.rs` for the protocol.
+pub(super) const TAMA5: u8 = 0xFD;
 
 /// Byte sum of the 48-byte Nintendo logo at its usual $0104 location. Also
 /// consulted by the unlicensed-board detection in the container module.

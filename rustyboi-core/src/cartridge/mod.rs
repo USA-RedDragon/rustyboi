@@ -33,6 +33,7 @@ mod mbc3;
 mod mbc5;
 mod huc1;
 mod nombc;
+mod tama5;
 use self::mapper::*;
 use self::rtc::{HuC3Rtc, Mbc3Rtc};
 // ---------------------------------------------------------------------------
@@ -491,6 +492,8 @@ pub(crate) enum CartridgeType {
     HuC1,
     HuC3,
     PocketCamera,
+    /// Bandai TAMA5 ($FD): the Tamagotchi board (implies RAM+BATTERY+RTC).
+    Tama5,
     // Unlicensed boards (selected via UnlMapper content detection, never via
     // the header type byte alone).
     WisdomTree,
@@ -862,6 +865,11 @@ impl Cartridge {
         let ram_banks = if unl_mapper == UnlMapper::ForceMbc1 { 0 } else { ram_banks };
         let ram_data = if cartridge_type == MBC7_SENSOR_RUMBLE_RAM_BATTERY {
             vec![0xFF; 256]
+        } else if cartridge_type == TAMA5 {
+            // TAMA5 declares RAM size $00 too: its save RAM is the 32 bytes the
+            // register file can address (see `tama5.rs`), allocated from the
+            // type byte so the battery-save path covers it.
+            vec![0xFF; tama5::TAMA5_RAM_SIZE]
         } else {
             vec![0xFF; Self::compute_ram_len(ram_size_code, ram_banks)]
         };
@@ -1176,6 +1184,7 @@ impl Cartridge {
             HUC1_RAM_BATTERY => CartridgeType::HuC1,
             HUC3 => CartridgeType::HuC3,
             POCKET_CAMERA => CartridgeType::PocketCamera,
+            TAMA5 => CartridgeType::Tama5,
             // Bankless carts: RAM presence comes from the header RAM-size
             // byte, so $00 ROM ONLY and $08 ROM+RAM decode identically; $09
             // adds the battery. But a bankless header on a >32KB ROM is
@@ -1192,6 +1201,14 @@ impl Cartridge {
             ROM_RAM_BATTERY => CartridgeType::NoMBC { battery: true },
             _ => CartridgeType::NoMBC { battery: false },
         }
+    }
+
+    /// True when the board's ROM-BANK register lives in the cart-RAM window
+    /// ($A000-$BFFF) rather than $0000-$7FFF. Only TAMA5 does this; the bus
+    /// needs to know because a write there must invalidate its cached ROM page
+    /// map exactly like a $0000-$7FFF cart-register write.
+    pub(crate) fn banks_via_ram_window(&self) -> bool {
+        matches!(self.mapper, Mapper::Tama5(_))
     }
 
     /// Whether external RAM is currently enabled, from whichever board carries
@@ -1457,10 +1474,13 @@ impl Cartridge {
             // MBC7's EEPROM is inherently non-volatile; HuC-3 ($FE) implies
             // RAM+BATTERY+RTC, HuC-1 ($FF) implies RAM+BATTERY, and POCKET
             // CAMERA ($FC) implies RAM+BATTERY (the photo album).
+            // TAMA5 ($FD) implies RAM+BATTERY+RTC (the TAMA6 keeps the pet
+            // alive with the machine off).
             CartridgeType::MBC7
             | CartridgeType::HuC1
             | CartridgeType::HuC3
-            | CartridgeType::PocketCamera => true,
+            | CartridgeType::PocketCamera
+            | CartridgeType::Tama5 => true,
             // No known cart on these unlicensed boards has battery-backed RAM.
             CartridgeType::WisdomTree
             | CartridgeType::Rocket
@@ -1535,6 +1555,7 @@ impl Cartridge {
             HuC1 => "HuC1+RAM+Battery",
             HuC3 => "HuC3+RTC+RAM+Battery",
             PocketCamera => "Pocket Camera",
+            Tama5 => "Bandai TAMA5",
             WisdomTree => "Wisdom Tree",
             Rocket => "Rocket Games",
             Sachen { mmc2: false } => "Sachen MMC1",
@@ -2225,6 +2246,8 @@ impl memory::Addressable for Cartridge {
                             _ => 0xFF,
                         }
                     }
+                    // TAMA5 exposes its whole register file here, not RAM.
+                    Mapper::Tama5(m) => self.tama5_read(addr, &m.state),
                     Mapper::NoMbc(_) => {
                         // Pan Docs "No MBC": optional RAM (up to 8KB) is wired
                         // straight through at A000-BFFF -- no banking, no
@@ -2526,6 +2549,7 @@ impl memory::Addressable for Cartridge {
                     HuC1(bool),
                     Camera(bool, bool),
                     HuC3(u8),
+                    Tama5,
                     Unbanked,
                     Nt(bool),
                     None,
@@ -2548,6 +2572,7 @@ impl memory::Addressable for Cartridge {
                         Ext::Camera(m.state.regs_selected, m.ram_enabled && !m.state.running)
                     }
                     Mapper::HuC3(m) => Ext::HuC3(m.state.mode),
+                    Mapper::Tama5(_) => Ext::Tama5,
                     Mapper::NoMbc(_) | Mapper::Rocket(_) | Mapper::Sachen(_) => Ext::Unbanked,
                     Mapper::NtOld(m) => Ext::Nt(m.ram_enabled),
                     _ => Ext::None,
@@ -2643,6 +2668,9 @@ impl memory::Addressable for Cartridge {
                         0xD if value & 0x01 == 0 => self.huc3_execute_command(),
                         _ => {}
                     },
+                    // TAMA5's register-file protocol (the board's only write
+                    // port; it has none in $0000-$7FFF).
+                    Ext::Tama5 => self.tama5_write(addr, value),
                     // NoMBC / Rocket / Sachen: straight-through, ungated.
                     Ext::Unbanked => {
                         if let Some(offset) = self.unbanked_ram_offset(addr) {
@@ -3101,11 +3129,63 @@ mod tests {
             (MBC5_RUMBLE_RAM_BATTERY, "MBC5+Rumble+RAM+Battery"),
             (HUC1_RAM_BATTERY, "HuC1+RAM+Battery"),
             (POCKET_CAMERA, "Pocket Camera"),
+            (TAMA5, "Bandai TAMA5"),
         ];
         for &(ty, name) in cases {
             let cart = Cartridge::from_bytes(&make_rom(ty, 0x02)).unwrap();
             assert_eq!(cart.mapper_name(), name, "type {ty:#04x}");
         }
+    }
+
+    /// TAMA5's save RAM and battery come from the TYPE byte, not the header
+    /// RAM-size byte (which the real carts leave at $00) — the same shape as
+    /// MBC7's EEPROM. Host-side identity only; the bus protocol is pinned by
+    /// test-roms/src/cartridge/tama5_banking.dmg.mooneye.asm.
+    #[test]
+    fn tama5_allocates_save_ram_from_the_type_byte() {
+        let cart = Cartridge::from_bytes(&make_sized_rom(TAMA5, 0x04, 0x80000)).unwrap();
+        assert_eq!(cart.ram_size_bytes(), tama5::TAMA5_RAM_SIZE);
+        assert!(cart.has_battery());
+        // The bus must invalidate its cached ROM page map on cart-RAM-window
+        // writes for this board: its bank register lives there.
+        assert!(cart.banks_via_ram_window());
+    }
+
+    /// The nibble register file: an 8-bit bank assembled from BANK_LO/BANK_HI,
+    /// the ACTIVE readiness flag, and a save-RAM byte round-tripping through
+    /// the WRITE_LO/WRITE_HI + ADDR_HI/ADDR_LO command path.
+    #[test]
+    fn tama5_register_file_banks_and_round_trips_ram() {
+        let mut cart = Cartridge::from_bytes(&make_sized_rom(TAMA5, 0x04, 0x80000)).unwrap();
+        // `put(reg, nibble)`: select on the odd address, payload on the even one.
+        let put = |cart: &mut Cartridge, reg: u8, value: u8| {
+            cart.write(0xA001, reg);
+            cart.write(0xA000, value);
+        };
+        // ACTIVE reads the readiness flag; the odd half of the window is open bus.
+        cart.write(0xA001, 0x0A);
+        assert_eq!(cart.read(0xA000), 0xF1);
+        assert_eq!(cart.read(0xA001), 0xFF);
+
+        // BANK_HI really is the high nibble: bank $12, not bank $02.
+        put(&mut cart, 0x0, 0x2);
+        put(&mut cart, 0x1, 0x1);
+        assert_eq!(cart.read(0x5000), 0x12, "bank $12 must be mapped at $4000");
+
+        // Write $A9 to save-RAM address $15 (ADDR_HI bit 0 is address bit 4).
+        put(&mut cart, 0x4, 0x9);
+        put(&mut cart, 0x5, 0xA);
+        put(&mut cart, 0x6, 0x1);
+        put(&mut cart, 0x7, 0x5);
+        assert_eq!(cart.save_ram()[0x15], 0xA9);
+
+        // Read it back as two nibble halves, upper nibble driven high.
+        put(&mut cart, 0x6, 0x3); // command 1 (RAM read), address bit 4 set
+        put(&mut cart, 0x7, 0x5);
+        cart.write(0xA001, 0x0C);
+        assert_eq!(cart.read(0xA000), 0xF9);
+        cart.write(0xA001, 0x0D);
+        assert_eq!(cart.read(0xA000), 0xFA);
     }
 
     #[test]

@@ -14,18 +14,19 @@ use super::huc1::HuC1State;
 use super::huc3::HuC3State;
 use super::mbc5::Mbc5State;
 use super::mbc7::Mbc7State;
+use super::tama5::Tama5State;
 use super::unlicensed::{M161State, NtState, RocketState, SachenState};
 use super::UnlMapper;
 use super::{
     HUC1_RAM_BATTERY, HUC3, MBC1, MBC1_RAM, MBC1_RAM_BATTERY, MBC2, MBC2_BATTERY, MBC3, MBC3_RAM,
     MBC3_RAM_BATTERY, MBC3_TIMER_BATTERY, MBC3_TIMER_RAM_BATTERY, MBC5, MBC5_RAM, MBC5_RAM_BATTERY,
     MBC5_RUMBLE, MBC5_RUMBLE_RAM, MBC5_RUMBLE_RAM_BATTERY, MBC7_SENSOR_RUMBLE_RAM_BATTERY,
-    POCKET_CAMERA, ROM_ONLY, ROM_RAM, ROM_RAM_BATTERY,
+    POCKET_CAMERA, ROM_ONLY, ROM_RAM, ROM_RAM_BATTERY, TAMA5,
 };
 use serde::{Deserialize, Serialize};
 use super::{
     camera::Camera, huc1::HuC1, huc3::HuC3, mbc1::Mbc1, mbc2::Mbc2, mbc3::Mbc3, mbc5::Mbc5,
-    mbc7::Mbc7, nombc::NoMbc,
+    mbc7::Mbc7, nombc::NoMbc, tama5::Tama5,
     unlicensed::{
         Bbd, Ggb81, Hitek, LiCheng, M161, NtOld, Rocket, Sachen, Sintax, Vf001, WisdomTree,
     },
@@ -133,6 +134,7 @@ pub(super) enum Mapper {
     Ggb81(Ggb81),
     Sintax(Sintax),
     Hitek(Hitek),
+    Tama5(Tama5),
 }
 
 impl Banking for Mapper {
@@ -272,6 +274,7 @@ impl Mapper {
             }
             HUC1_RAM_BATTERY => Mapper::HuC1(HuC1 { state: HuC1State::default() }),
             HUC3 => Mapper::HuC3(HuC3 { state: HuC3State::default() }),
+            TAMA5 => Mapper::Tama5(Tama5 { state: Tama5State::default() }),
             POCKET_CAMERA => Mapper::Camera(Camera { ram_enabled: false, state: CameraState::default() }),
             ROM_RAM => Mapper::NoMbc(NoMbc { battery: false }),
             ROM_RAM_BATTERY => Mapper::NoMbc(NoMbc { battery: true }),
@@ -305,6 +308,7 @@ impl Mapper {
             Mapper::Ggb81(m) => f(m),
             Mapper::Sintax(m) => f(m),
             Mapper::Hitek(m) => f(m),
+            Mapper::Tama5(m) => f(m),
         }
     }
 }
