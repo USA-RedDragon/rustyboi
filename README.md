@@ -17,7 +17,7 @@ adjudication.
 <!-- SUITE-PROGRESS:START -->
 | Suite | Passing | Total |
 | :--- | ---: | ---: |
-| rustyboi | 48 | 48 |
+| rustyboi | 50 | 50 |
 | acid2 | 3 | 3 |
 | cgb_acid_hell | 1 | 1 |
 | mealybug | 51 | 51 |
@@ -45,7 +45,7 @@ adjudication.
 | sketchtests | 6 | 6 |
 | gbc_hw_tests | 338 | 342 |
 | gambatte | 5248 | 5257 |
-| **Total** | **6848** | **6864** |
+| **Total** | **6850** | **6866** |
 <!-- SUITE-PROGRESS:END -->
 
 The table above is the **hardware-graded** regression gate. The one below is a
