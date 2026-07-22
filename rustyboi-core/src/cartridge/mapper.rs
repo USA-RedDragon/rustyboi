@@ -20,7 +20,7 @@ use super::{
     HUC1_RAM_BATTERY, HUC3, MBC1, MBC1_RAM, MBC1_RAM_BATTERY, MBC2, MBC2_BATTERY, MBC3, MBC3_RAM,
     MBC3_RAM_BATTERY, MBC3_TIMER_BATTERY, MBC3_TIMER_RAM_BATTERY, MBC5, MBC5_RAM, MBC5_RAM_BATTERY,
     MBC5_RUMBLE, MBC5_RUMBLE_RAM, MBC5_RUMBLE_RAM_BATTERY, MBC7_SENSOR_RUMBLE_RAM_BATTERY,
-    POCKET_CAMERA, ROM_RAM, ROM_RAM_BATTERY,
+    POCKET_CAMERA, ROM_ONLY, ROM_RAM, ROM_RAM_BATTERY,
 };
 use serde::{Deserialize, Serialize};
 use super::{
@@ -146,7 +146,15 @@ impl Mapper {
     /// boards override the header byte), but yields a live board with power-on
     /// registers rather than a descriptor. Vast Fame VF001 gets its own variant
     /// (electrically MBC5) so the protection intercepts have somewhere to hang.
-    pub(super) fn from_header(unl: UnlMapper, cartridge_type: u8, multicart: bool) -> Mapper {
+    /// `rom_banks`/`ram_banks` are the decoded geometry, needed only to infer
+    /// MBC1 for an oversized bankless header (see the `ROM_ONLY` arm below).
+    pub(super) fn from_header(
+        unl: UnlMapper,
+        cartridge_type: u8,
+        multicart: bool,
+        rom_banks: usize,
+        ram_banks: usize,
+    ) -> Mapper {
         let mbc1 = |has_ram| {
             Mapper::Mbc1(Mbc1 {
                 ram_enabled: false,
@@ -203,6 +211,11 @@ impl Mapper {
             MBC5_RAM | MBC5_RAM_BATTERY => mbc5(true, false),
             MBC5_RUMBLE => mbc5(false, true),
             MBC5_RUMBLE_RAM | MBC5_RUMBLE_RAM_BATTERY => mbc5(true, true),
+            // A bankless header ($00/$08/$09) on a >32KB ROM is physically
+            // impossible, so infer the era-standard MBC1 (see
+            // `decode_cartridge_type`) with the header's RAM bit; a live board,
+            // not just a relabel, so the upper banks are actually reachable.
+            ROM_ONLY | ROM_RAM | ROM_RAM_BATTERY if rom_banks > 2 => mbc1(ram_banks > 0),
             MBC7_SENSOR_RUMBLE_RAM_BATTERY => {
                 Mapper::Mbc7(Mbc7 { ram_enabled: false, state: Mbc7State::default() })
             }

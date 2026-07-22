@@ -635,7 +635,7 @@ impl Cartridge {
             ram_banks,
             rom_path: None,
             save_file: None,
-            mapper: Mapper::from_header(unl_mapper, cartridge_type, mbc1_multicart),
+            mapper: Mapper::from_header(unl_mapper, cartridge_type, mbc1_multicart, rom_banks, ram_banks),
             mbc1_multicart,
             sram_cs_lazy: false,
             mbc2_ram: vec![0xFF; MBC2_RAM_SIZE],
@@ -823,8 +823,16 @@ impl Cartridge {
             POCKET_CAMERA => CartridgeType::PocketCamera,
             // Bankless carts: RAM presence comes from the header RAM-size
             // byte, so $00 ROM ONLY and $08 ROM+RAM decode identically; $09
-            // adds the battery. Unknown/unimplemented types fall through to
-            // NoMBC too.
+            // adds the battery. But a bankless header on a >32KB ROM is
+            // physically impossible - the upper banks are unreachable without an
+            // MBC - so the header simply wasn't finalized (DMG-era betas/protos).
+            // Infer the era-standard MBC1, keeping the header's RAM/battery bits.
+            ROM_ONLY | ROM_RAM | ROM_RAM_BATTERY if self.rom_banks > 2 => {
+                CartridgeType::MBC1 {
+                    ram: self.ram_banks > 0,
+                    battery: self.cartridge_type == ROM_RAM_BATTERY,
+                }
+            }
             ROM_RAM => CartridgeType::NoMBC { battery: false },
             ROM_RAM_BATTERY => CartridgeType::NoMBC { battery: true },
             _ => CartridgeType::NoMBC { battery: false },
@@ -2256,6 +2264,37 @@ mod tests {
             let cart = Cartridge::from_bytes(&make_rom(ty, 0x02)).unwrap();
             assert_eq!(cart.mapper_name(), name, "type {ty:#04x}");
         }
+    }
+
+    #[test]
+    fn oversized_bankless_header_infers_mbc1() {
+        // A DMG-era beta/proto whose header type byte was left at $00 ROM ONLY
+        // but whose file is 128KB: a bankless header on a >32KB board is
+        // physically impossible, so the decode infers MBC1 and its banking must
+        // actually reach the upper banks (not just relabel the mapper).
+        let mut rom = make_sized_rom(0x00, 0x02, 0x20000); // type $00, 128KB
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert_eq!(cart.mapper_name(), "MBC1");
+        assert!(matches!(
+            cart.get_cartridge_type(),
+            CartridgeType::MBC1 { ram: false, battery: false }
+        ));
+
+        // Power-on: fixed bank 0 low, switchable window defaults to bank 1.
+        assert_eq!(cart.read(0x1000), 0);
+        assert_eq!(cart.read(0x5000), 1);
+        // A BANK1 write ($2000-$3FFF) moves the switchable window to a higher
+        // bank -- proves banking is live, not merely the label.
+        cart.write(0x2000, 0x05);
+        assert_eq!(cart.read(0x5000), 5);
+
+        // A genuine 32KB ROM ONLY cart is untouched (no regression).
+        let cart = Cartridge::from_bytes(&make_rom(0x00, 0x00)).unwrap();
+        assert_eq!(cart.mapper_name(), "ROM ONLY");
+        assert!(matches!(cart.get_cartridge_type(), CartridgeType::NoMBC { .. }));
     }
 
     #[test]

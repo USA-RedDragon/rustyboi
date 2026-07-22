@@ -40,11 +40,11 @@ pub(super) const MBC1_RAM_BATTERY: u8 = 0x03;
 pub(super) const MBC2: u8 = 0x05;
 pub(super) const MBC2_BATTERY: u8 = 0x06;
 
-// Bankless ROM+RAM carts (Pan Docs "No MBC": "Optionally up to 8 KiB of RAM
-// could be connected at $A000-BFFF"): the RAM chip is wired straight through,
-// with no banking and no enable gate. $09 adds a battery. No licensed cart is
-// known to use these type bytes, but homebrew, test ROMs and mis-headered
-// dumps do.
+// Bankless carts (Pan Docs "No MBC"): the ROM is wired straight to the bus and
+// the optional RAM chip at $A000-BFFF has no banking or enable gate. $00 is
+// ROM ONLY, $08 adds RAM, $09 adds a battery. No licensed cart is known to use
+// these type bytes, but homebrew, test ROMs and mis-headered dumps do.
+pub(super) const ROM_ONLY: u8 = 0x00;
 pub(super) const ROM_RAM: u8 = 0x08;
 pub(super) const ROM_RAM_BATTERY: u8 = 0x09;
 
