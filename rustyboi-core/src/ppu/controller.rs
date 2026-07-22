@@ -3148,9 +3148,13 @@ impl Ppu {
 
     #[inline(always)]
     fn begin_window_draw(&mut self, window_x: u8) {
+        self.begin_window_draw_at_tile(window_x, 0);
+    }
+
+    fn begin_window_draw_at_tile(&mut self, window_x: u8, start_tile: u8) {
         self.win_y_pos = self.win_y_pos.wrapping_add(1);
         self.win_draw_started = true;
-        self.fetcher.start_window(window_x);
+        self.fetcher.start_window_at_tile(window_x, start_tile);
         self.we_glitch_tile_starts = [None; 2];
         self.win_kill_tap_late = true;
         self.window_started_this_line = true;
@@ -8131,12 +8135,46 @@ impl Ppu {
             // mid-prologue) and the window does not start this line.
             // WX=0 and CGB keep the immediate x==0 start.
             let is_dmg = !is_cgb;
+            let scx_fine = if self.m3_discard_target >= 0 {
+                self.m3_discard_target as u8
+            } else {
+                mmio.read(SCX) & 0x07
+            };
+            // CGB WX=0 with a fine SCX scroll: the window's takeover of the
+            // pixel stream is two tile-fetches late. The window grid is
+            // anchored at screen x = -(8 + scx&7) exactly as on DMG, but its
+            // first two columns never reach the LCD -- the BACKGROUND keeps
+            // supplying pixels through them, so the window becomes visible at
+            // x = 8 - scx&7 starting from its tile column 2. scx&7 == 7
+            // behaves as 6 (one prologue pixel fewer is consumed while the
+            // window is being fetched).
+            // Evidence: SameBoy-from-source (CGB-C and CGB-E agree) on the
+            // docboy window_wx0_scxN ROMs widened to a 6-tile window marker:
+            // scx1..6 render 8-scx BG pixels then 32 window pixels (window
+            // columns 2..5), scx7 renders 2 then 32; DMG renders 48-(8+scx)
+            // window pixels from x0 with no BG. scx&7 == 0 keeps the plain
+            // 7-WX chop on both models.
+            let cgb_wx0_fine = is_cgb && wx == 0 && scx_fine != 0;
+            let cgb_wx0_fine_x = 8 - scx_fine.min(6);
+            // DMG WX=0 with a fine SCX scroll: same anchor, but the window
+            // takes the stream over immediately, so window column 1 pixel
+            // scx&7 is what lands at x0 -- the first fetched column is 1, not
+            // 0. This is a COLUMN advance, not extra discard pops: the
+            // prologue's dot budget is unchanged (mealybug m3_window_timing_wx_0
+            // measures exactly that budget through a mid-line BGP write).
+            // Not modelled: the scx&7 == 7 one-pixel case. SameBoy shortens the
+            // prologue by a dot there, which would move mealybug's BGP edge;
+            // rustyboi keeps the plain column advance and stays one pixel off
+            // on docboy window_wx0_scx7 (DMG only).
+            let dmg_wx0_fine = is_dmg && wx == 0 && scx_fine != 0;
             // DMG one-dot-late activation (the position+6 check):
             // when the exact x+7==WX dot did not activate (the comparator
             // read the WE-off pulse), the very next dot still matches via
             // WX == x+6 and starts the window one pixel late (at WX-6).
             let should_start_window = wx_allowed
-                && if wx < 7 {
+                && if cgb_wx0_fine {
+                    self.x == cgb_wx0_fine_x
+                } else if wx < 7 {
                     self.x == 0 && !(is_dmg && (1..7).contains(&wx))
                 } else {
                     self.x + 7 == wx || (is_dmg && self.x >= 1 && self.x + 6 == wx)
@@ -8149,11 +8187,7 @@ impl Ppu {
                 && !is_cgb
                 && wx == 0
                 && !self.win_wx0_delayed
-                && (if self.m3_discard_target >= 0 {
-                    self.m3_discard_target as u8
-                } else {
-                    mmio.read(SCX) & 0x07
-                }) != 0
+                && scx_fine != 0
             {
                 self.win_wx0_delayed = true;
                 return true;
@@ -8168,8 +8202,15 @@ impl Ppu {
                     return true;
                 }
                 // Window draw-start (the mode-3-start window checkpoint /
-                // plot win_draw_start).
-                self.begin_window_draw(self.x);
+                // plot win_draw_start). The deferred CGB WX=0 fine-scroll
+                // start skips the two window columns the BG covered for.
+                if cgb_wx0_fine {
+                    self.begin_window_draw_at_tile(self.x, 2);
+                } else if dmg_wx0_fine {
+                    self.begin_window_draw_at_tile(self.x, 1);
+                } else {
+                    self.begin_window_draw(self.x);
+                }
                 // DMG: hardware restarts the fetcher ON the trigger dot
                 // (TileNumber now; low/high/push at t+2/t+4/t+6), so the
                 // first window pixel pops exactly 6 dots after the
@@ -8231,8 +8272,8 @@ impl Ppu {
                     }
                     self.win_fetch_anchor =
                         Some(self.ticks.wrapping_sub(chop as u128));
-                } else if wx < 7 {
-                    // EXPERIMENT — CGB window left-clip chop (window_wx0..6):
+                } else if wx < 7 && !cgb_wx0_fine {
+                    // CGB window left-clip chop (window_wx0..6):
                     // a WX<7 window activates at LX==0 with chop = 7-WX
                     // pixels of its first tile off the left edge. SameBoy
                     // (CGB-C/E) and docboy DRAW the window's own chopped

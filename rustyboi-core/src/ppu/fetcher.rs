@@ -191,11 +191,6 @@ impl Fetcher {
         self.last_vram_addr = 0xFFFF;
     }
 
-    // Start fetching window tiles when WX condition is met
-    pub(super) fn start_window(&mut self, window_x: u8) {
-        self.start_window_at_tile(window_x, 0);
-    }
-
     // Start fetching window tiles from a specific window tilemap column. The
     // mid-line WX-match path starts at column 0; the M3Start::f0 line-begin
     // "already started" path (DMG wx==166 wraparound) starts at column
