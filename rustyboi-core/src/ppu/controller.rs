@@ -6706,6 +6706,7 @@ impl Ppu {
         // at that exact boundary is affected. DMG-only (CGB has no STAT-write bug).
         if ff41_written
             && self.l154_vblank_glitch_window
+            && !self.disabled
             && !mmio.is_cgb_features_enabled()
         {
             let cur_if = mmio.read(registers::INTERRUPT_FLAG);
@@ -12537,6 +12538,31 @@ mod tests {
         assert_eq!(ppu.lcdc, new_lcdc);
         assert_ne!(ppu.lcdc & (LCDCFlags::BGDisplay as u8), 0);
         assert!(!ppu.cgb_tile_index_is_tile_data);
+    }
+
+    // The DMG "line 154" STAT-write VBlank-IF glitch is a PPU-line phenomenon:
+    // line 154 only exists while the LCD is actively scanning, so the glitch
+    // cannot occur with the LCD disabled. When a game turns the LCD off while the
+    // glitch window is armed, the window freezes armed (the PPU stops before
+    // disarming it); a later FF41 write must NOT clear a still-pending VBlank IF.
+    // Without the `!disabled` gate this stranded Alfred Chicken (Europe) (Beta),
+    // which HALTs on the post-boot pending VBlank immediately after LCD-off.
+    #[test]
+    fn stat_write_with_lcd_off_keeps_pending_vblank_if() {
+        let mut mmio = mmio::Mmio::new(); // DMG: CGB features off, has the bug
+        let mut ppu = Ppu::new();
+        ppu.disabled = true;
+        ppu.l154_vblank_glitch_window = true;
+        mmio.request_interrupt(registers::InterruptFlag::VBlank);
+        let vblank = registers::InterruptFlag::VBlank as u8;
+        assert_ne!(mmio.snapshot_serial_read(registers::INTERRUPT_FLAG) & vblank, 0);
+        mmio.write(LCD_STATUS, 0x40); // arms ff41_write_pending
+        ppu.on_stat_register_write(&mut mmio);
+        assert_ne!(
+            mmio.snapshot_serial_read(registers::INTERRUPT_FLAG) & vblank,
+            0,
+            "STAT write with the LCD off must not clear the pending VBlank IF"
+        );
     }
 
     // CGB panel-persistence decay (SameBoy `frame_repeat_countdown`). Re-homed
