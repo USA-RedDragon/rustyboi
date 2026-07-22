@@ -3250,9 +3250,9 @@ mod tests {
         assert!(matches!(cart.get_cartridge_type(), CartridgeType::NoMBC { .. }));
 
         // Documented-but-unimplemented types are NOT inferred, however large:
-        // the byte names a real board (MMM01/MBC6/TAMA5), so it is evidence
-        // about the cart rather than evidence the header is garbage.
-        for ty in [0x0B, 0x20, 0xFD] {
+        // the byte names a real board (MMM01/MBC6), so it is evidence about the
+        // cart rather than evidence the header is garbage.
+        for ty in [0x0B, 0x20] {
             let mut rom = make_sized_rom(ty, 0x00, 0x10000);
             rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
             let cart = Cartridge::from_bytes(&rom).unwrap();
@@ -3261,6 +3261,13 @@ mod tests {
                 "type {ty:#04x} must not be inferred"
             );
         }
+
+        // TAMA5 ($FD) is documented AND implemented, so it decodes to its own
+        // board -- the inference must not divert it to MBC1 either.
+        let mut rom = make_sized_rom(TAMA5, 0x00, 0x10000);
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(cart.get_cartridge_type(), CartridgeType::Tama5));
     }
 
     #[test]
