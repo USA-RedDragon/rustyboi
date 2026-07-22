@@ -655,6 +655,10 @@ const WRITE_CC_OFFSET: i64 = 0;
 
 // Sentinel for "no pending wy2 update".
 fn wy2_disabled() -> u64 { u64::MAX }
+
+// Dots into a line before which the window-Y comparator's line input is not
+// yet valid, so a scheduled re-check cannot match (see `run_wy_recheck`).
+const WY_RECHECK_LY_VALID_DOT: u128 = 3;
 fn pnow_disabled() -> u64 { u64::MAX }
 fn win_y_pos_init() -> u8 { 0xFF }
 
@@ -1885,6 +1889,16 @@ pub struct Ppu {
     wy1: u8,
     #[serde(default = "wy2_disabled")]
     wy1_apply_cc: u64,
+    // Absolute clock of a pending on-write WY==LY re-comparison (hardware's
+    // scheduled window-Y check). A WY or LCDC store re-runs the comparator a
+    // few cc later instead of waiting for the next per-line checkpoint, so a
+    // WY value that is only briefly equal to the current line still arms the
+    // window. DISABLED when none; never armed once the latch is already set.
+    //
+    // At most a few dots of pending work, deliberately OUT of the savestate
+    // wire format.
+    #[serde(skip, default = "wy2_disabled")]
+    wy_recheck_cc: u64,
     #[serde(default)]
     wy1_pending: u8,
     // Delayed SCY/SCX visible to the BG fetcher during mode 3. A mid-M3 write to
@@ -2432,6 +2446,7 @@ impl Ppu {
             wy2_pending: 0,
             wy1: 0xFF,
             wy1_apply_cc: wy2_disabled(),
+            wy_recheck_cc: wy2_disabled(),
             wy1_pending: 0,
             scy_delayed: 0,
             scy_apply_cc: wy2_disabled(),
@@ -4726,6 +4741,12 @@ impl Ppu {
             }
         }
         self.lcdc = value;
+        // An LCDC store re-runs the scheduled window-Y comparison the same way
+        // a WY store does, so a window-enable that is only briefly set while
+        // WY == LY still arms the window for the rest of the frame.
+        let cc = self.write_cc(ds);
+        self.arm_wy_recheck(cc, ds, cgb_features_enabled);
+        self.stat_sched_touched();
     }
 
     /// How many further window TileNumber steps a mid-line CGB WE-off write
@@ -5565,6 +5586,7 @@ impl Ppu {
         let min_sched = self
             .wy2_apply_cc
             .min(self.wy1_apply_cc)
+            .min(self.wy_recheck_cc)
             .min(self.scy_apply_cc)
             .min(self.scx_apply_cc)
             .min(self.sched_oneshot_statirq)
@@ -5584,6 +5606,10 @@ impl Ppu {
         if self.wy1_apply_cc != wy2_disabled() && self.wy1_apply_cc <= cc {
             self.wy1 = self.wy1_pending;
             self.wy1_apply_cc = wy2_disabled();
+        }
+        if self.wy_recheck_cc != wy2_disabled() && self.wy_recheck_cc <= cc {
+            self.wy_recheck_cc = wy2_disabled();
+            self.run_wy_recheck();
         }
         if self.scy_apply_cc != wy2_disabled() && self.scy_apply_cc <= cc {
             self.scy_delayed = self.scy_pending;
@@ -5689,6 +5715,7 @@ impl Ppu {
         self.sched_min = self
             .wy2_apply_cc
             .min(self.wy1_apply_cc)
+            .min(self.wy_recheck_cc)
             .min(self.scy_apply_cc)
             .min(self.scx_apply_cc)
             .min(self.sched_oneshot_statirq)
@@ -6254,7 +6281,49 @@ impl Ppu {
         let delay = (base - ds as i64).max(0) as u64;
         self.wy2_pending = value;
         self.wy2_apply_cc = cc + delay;
+        self.arm_wy_recheck(cc, ds, mmio.is_cgb_features_enabled());
         self.stat_sched_touched();
+    }
+
+    /// Arm the hardware's scheduled window-Y comparison after a WY or LCDC
+    /// store. The comparator does not only run at the fixed per-line
+    /// checkpoints (see `update_window_y_latch`): a store re-runs it on the
+    /// next 4-dot fetch-grid boundary, so a WY value that equals the current
+    /// line for only a couple of M-cycles still arms the window for the rest
+    /// of the frame. Skipped once the latch is set (the comparison is sticky,
+    /// so a re-run can only ever set it again).
+    fn arm_wy_recheck(&mut self, cc: u64, ds: bool, cgb_features: bool) {
+        // Pre-CGB only. The comparator's line input is the raw line counter,
+        // whose phase at the line tail differs between the two cores; on CGB
+        // rustyboi's `internal_ly` does not reproduce it, and re-running the
+        // comparison there latches a line early against gambatte's cgb04c
+        // late_wy oracles (real silicon). The DMG phase is the one this models.
+        if self.disabled || self.window_y_triggered || cgb_features {
+            return;
+        }
+        // 4 dots (8 cc at double speed) after the store, quantized onto the
+        // grid the comparator runs on.
+        let step = 4u64 << (ds as u32);
+        self.wy_recheck_cc = cc + step - (cc % step);
+    }
+
+    /// Run a scheduled window-Y comparison (see `arm_wy_recheck`).
+    fn run_wy_recheck(&mut self) {
+        if self.disabled
+            || self.window_y_triggered
+            || !self.lcdc_has(LCDCFlags::WindowDisplayEnable)
+        {
+            return;
+        }
+        // The comparison value is the line counter as the comparator sees it,
+        // which is not yet valid in the first dots of a line (hardware feeds
+        // it an out-of-range value there, so no match is possible).
+        if self.ticks < WY_RECHECK_LY_VALID_DOT {
+            return;
+        }
+        if self.wy1 == self.internal_ly() {
+            self.window_y_triggered = true;
+        }
     }
 
     /// FF47 (BGP) write hook. The CPU readback is immediate (handled by mmio), but
