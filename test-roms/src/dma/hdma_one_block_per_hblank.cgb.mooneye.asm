@@ -16,8 +16,11 @@
 ; bit7=0) at the START of line K=8 — after the HBlanks of lines 0..7 fired blocks
 ; 0..7, and before line 8's HBlank could fire block 8. The cancel simply stops
 ; the transfer, moving no further block (the sibling hdma_ff55_cancel_after_block
-; pins that a cancel copies no spurious block; a plain LCD-off does flush one, so
-; it is deliberately NOT used here). The frozen destination is read back in the
+; pins that a cancel copies no spurious block; a plain LCD-off would instead
+; transfer block K first — hardware correctly fires one block on LCD-off during an
+; active HBlank DMA, SameBoy GB_lcd_off / SameSuite hdma_lcd_off — so it would move
+; the freeze point and is deliberately NOT used here). The frozen destination is
+; read back in the
 ; following VBlank: blocks 0..7 must hold their per-block source markers
 ; ($A0..$A7) and block 8 must STILL HOLD THE SENTINEL ($E5):
 ;

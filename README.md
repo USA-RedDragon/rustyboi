@@ -45,7 +45,7 @@ adjudication.
 | sketchtests | 6 | 6 |
 | gbc_hw_tests | 338 | 342 |
 | gambatte | 5248 | 5257 |
-| **Total** | **6841** | **6857** |
+| **Total** | **6838** | **6854** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core

@@ -5166,12 +5166,26 @@ impl Mmio {
         let now_off = value & de == 0;
         self.io_registers.write(ppu::LCD_CONTROL, value);
         self.stat_register_write_pending = true;
-        // On hardware, disabling the LCD while an
-        // HDMA is armed flags an HDMA request directly.
-        // With the LCD off the HDMA period is permanently active, so the latched block
-        // fires on the next `step_hdma` (the LCD-off arming paths there require
-        // `lcd_on`, so without this edge the block would never arm — hdma_disable_display).
-        if was_on && now_off && self.cgb_features_enabled && self.hdma.enabled {
+        // Hardware fires one HDMA block when the LCD is disabled during an active
+        // HBlank DMA — SameBoy `GB_lcd_off` runs a block on
+        // `hdma_on_hblank && (STAT & 3)`, and SameSuite `dma/hdma_lcd_off` (captured
+        // on real hardware) confirms a single tile copies. With the LCD off the HDMA
+        // period is permanently active, so the latched block fires on the next
+        // `step_hdma` (the LCD-off arming paths there require `lcd_on`, so without
+        // this edge the block would never arm). SameBoy gates this on
+        // `(STAT & 3) != 0` — i.e. it does NOT fire when the LCD is disabled during
+        // an HBlank whose block already ran (that would double-fire the period).
+        // `block_done_this_period` is rustyboi's equivalent serviced-tracker (it
+        // survives the LCD-off transition, unlike `block_fired_this_hblank` which is
+        // cleared while the display is off), so an owed block still fires on LCD-off
+        // but a serviced one does not. See `lcd_off_during_active_hblank_dma_*` and
+        // `lcd_off_after_serviced_hblank_does_not_double_fire`.
+        if was_on
+            && now_off
+            && self.cgb_features_enabled
+            && self.hdma.enabled
+            && !self.hdma.block_done_this_period
+        {
             self.hdma.req_pending = true;
         }
     }
@@ -6457,6 +6471,58 @@ mod hblank_dma_tests {
             m.read(REG_HDMA5),
             0xAC,
             "FF55 reads back 0x80 | written ($2C), not the remaining count"
+        );
+    }
+
+    /// Disabling the LCD during an ACTIVE HBlank DMA fires exactly one block —
+    /// documented hardware behavior, NOT a spurious rustyboi block. SameBoy
+    /// `GB_lcd_off` runs a block on `hdma_on_hblank && (STAT & 3)`, and SameSuite
+    /// `dma/hdma_lcd_off` (real hardware) confirms a single tile copies. With the
+    /// LCD off the HDMA period is permanently active, so entering it services one
+    /// owed block and then stops — it does not keep transferring.
+    #[test]
+    fn lcd_off_during_active_hblank_dma_fires_one_block() {
+        let mut m = armed_at_hblank_edge();
+        // Mid-frame, drawing (mode 3): not a serviced HBlank — the case SameBoy's
+        // `(STAT & 3) != 0` gate fires on.
+        m.io_registers.write(ppu::LCD_STATUS, 3);
+        m.hdma.prev_stat_mode = 3;
+        m.hdma.prev_period = false;
+        m.hdma.block_fired_this_hblank = false;
+        m.hdma.block_done_this_period = false;
+        let before = m.hdma.length;
+        m.write_lcd_control(0); // LCD off
+        m.step_hdma(None);
+        assert_eq!(
+            m.hdma.length,
+            before - 1,
+            "LCD-off during an active HBlank DMA fires exactly one block"
+        );
+        // The permanent off-period must not keep firing (SameSuite: one tile).
+        m.step_hdma(None);
+        m.step_hdma(None);
+        assert_eq!(
+            m.hdma.length,
+            before - 1,
+            "only ONE block fires on LCD-off, not continuously"
+        );
+    }
+
+    /// SameBoy fires on LCD-off only when `(STAT & 3) != 0` — i.e. NOT when the
+    /// current HBlank's block already fired. rustyboi's `block_done_this_period`
+    /// guard stands in for that gate: LCD-off in an already-serviced HBlank adds
+    /// no second block. (Equivalence check for the two double-fire guards.)
+    #[test]
+    fn lcd_off_after_serviced_hblank_does_not_double_fire() {
+        let mut m = armed_at_hblank_edge();
+        m.step_hdma(None); // block0 fires via the mode-0 fallback, marks the period serviced
+        let after_one = m.hdma.length;
+        assert!(m.hdma.block_done_this_period, "this HBlank's block is serviced");
+        m.write_lcd_control(0); // LCD off in the same, already-serviced HBlank
+        m.step_hdma(None);
+        assert_eq!(
+            m.hdma.length, after_one,
+            "no second block on LCD-off after this HBlank's block already fired"
         );
     }
 
