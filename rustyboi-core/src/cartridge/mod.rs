@@ -110,13 +110,24 @@ const NEWGBHK_STUB_CRC32: u32 = 0x53C0_8E9D;
 /// 6127 = "SOUL" (the Gedou Jian Shen / Soul Falchion pair). Keyed on the CRC32
 /// of the same 48-byte window (mGBA-style, strictly more selective than the
 /// sum) so the collision-free hash alone gates detection — no licensed cart can
-/// match a 48-byte CRC32. Only the MBC5-header carts of this pair (Nv Wang, the
-/// Soul Falchion pair) are proven to boot under the current protection model;
-/// the detection is gated to MBC5-family headers so the byte-identical-logo but
-/// still-blank MBC1-header Zook Z is left on its plain-MBC1 path for now.
+/// match a 48-byte CRC32. The same two constants also gate `UnlMapper::Vf001Zook`
+/// (Zook Z), which wears the byte-identical "V.fame" logo behind a spoofed MBC1
+/// header but speaks a different protocol: the two arms are told apart by the
+/// header (MBC5-family $19-$1E here) plus, for Zook Z, its bank-select thunk.
 const VF001G_LOGO_CRC32: [u32; 2] = [
     0x42B7_73B8, // "V.fame" — Nv Wang Gedou 2000 (shared with Zook Z)
     0x906C_2263, // "SOUL"   — Gedou Jian Shen (Soul Falchion) + KF
+];
+
+/// File offset and opcode bytes of Zook Z's VF001 bank-select thunk
+/// (`ld hl,$7081; ld a,(de); ld (hl),a` x4; `ld a,($7FFF)`). Required together
+/// with the "V.fame" $0184 logo CRC32 to select `UnlMapper::Vf001Zook`, so the
+/// challenge-response dialect can never be applied to a cart that speaks
+/// hhugboy's $7000 config-register dialect (nor to any licensed cart).
+const VF001Z_THUNK_OFFSET: usize = 0x3EF5;
+const VF001Z_THUNK: [u8; 17] = [
+    0x21, 0x81, 0x70, 0x1A, 0x77, 0x13, 0x1A, 0x77, 0x13, 0x1A, 0x77, 0x13, 0x1A, 0x77, 0xFA, 0xFF,
+    0x7F,
 ];
 
 /// CRC32 (reflected IEEE) of the 48-byte Vast Fame secondary logo at $0184 on
@@ -430,6 +441,28 @@ pub enum UnlMapper {
     /// register the MBC5 board already stores, so the variant carries no
     /// payload and no other cart's savestate layout shifts.
     NewGbHk,
+    /// Vast Fame VF001, challenge-response dialect (Zook Z). The board wears
+    /// the same "V.fame" $0184 logo as `Vf001Gen` but is driven completely
+    /// differently: instead of hhugboy's $7000 config-register file, the cart
+    /// streams bytes into a single protection port in $7000-$7FFF and reads the
+    /// board's answer back out. Two transactions exist:
+    ///
+    ///   * bank select — four bytes to $7081 (thunks at $3ED9/$3EF5, reached by
+    ///     `rst $20` with the bytes inline after the call, and by `rst $30`
+    ///     walking 4-byte table entries). The board decodes them to a ROM bank
+    ///     and switches to it; the cart then reads $7FFF, whose last byte in
+    ///     every bank is that bank's own number, to shadow the result at $D300.
+    ///   * challenge-response — a byte stream to $7080/$7081 (up to 32 bytes,
+    ///     inline `ld (hl),n` or copied from a bank-0 table), then a read of
+    ///     $A080/$A180/$A280/$A380/$A680/$A880 whose value the cart compares or
+    ///     folds into a pointer. A trailing $31 closes the transaction.
+    ///
+    /// Electrically MBC5 otherwise: `rst $28` is a plain `ld ($2000),a` bank
+    /// write, so the two paths coexist. The port's shift window rides in the
+    /// payload, boxed for the same reason `Vf001Gen` is: at 34 bytes it would
+    /// otherwise set the size of an enum that is matched on every bus access,
+    /// and no other cart should pay for it in memory or in the savestate.
+    Vf001Zook(Box<Vf001zState>),
 }
 
 /// The two 8 KiB ROM-window registers of `UnlMapper::Vf8k`, carried inside the
@@ -547,6 +580,35 @@ pub struct Vf001gState {
     should_replace: bool,
     replace_start_addr: u16,
     replace_source_bank: u8,
+}
+
+/// Maximum protection-stream length the `UnlMapper::Vf001Zook` board buffers.
+/// The longest stream any Zook Z site programs is 31 table bytes plus the
+/// trailing command byte.
+const VF001Z_STREAM_MAX: usize = 32;
+
+/// Protection stream buffer for `UnlMapper::Vf001Zook`. Carried boxed inside
+/// the enum variant (not as a `Cartridge` field) so every other cart's bincode
+/// savestate layout stays byte-identical and the enum stays pointer-sized.
+/// Pure volatile logic: `power_on` rebuilds it, so `reset` powers up clean.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vf001zState {
+    /// The protection port's shift window, oldest byte first. Never cleared;
+    /// once `VF001Z_STREAM_MAX` bytes are held, each further byte shifts the
+    /// window along.
+    stream: [u8; VF001Z_STREAM_MAX],
+    /// Bytes currently held in `stream`.
+    len: u8,
+    /// Consecutive writes to the bank-select port, which frames a bank-select
+    /// challenge as "four in a row"; any write elsewhere in $6000-$7FFF resets
+    /// it.
+    port_run: u8,
+}
+
+impl Default for Vf001zState {
+    fn default() -> Self {
+        Vf001zState { stream: [0; VF001Z_STREAM_MAX], len: 0, port_run: 0 }
+    }
 }
 
 // MBC1 register ranges
@@ -1022,6 +1084,8 @@ impl Cartridge {
             // General VF001's config register file + latched protection
             // effects are volatile; power up with the config gate closed.
             UnlMapper::Vf001Gen(_) => UnlMapper::Vf001Gen(Box::default()),
+            // Zook Z's protection port is a shift register; power up empty.
+            UnlMapper::Vf001Zook(_) => UnlMapper::Vf001Zook(Box::default()),
             other => other,
         };
         Cartridge {
@@ -1229,11 +1293,15 @@ impl Cartridge {
             UnlMapper::Hitek(_) => {
                 return CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
             }
-            // General VF001 is electrically MBC5; the header type is truthful
-            // for the MBC5-family carts ($19-$1E) and a lie only on Zook Z's
-            // MBC1 header, which decodes as a bare MBC5 (its header declares no
-            // RAM). Derive RAM/battery/rumble from the (truthful-where-present)
-            // header so saves and rumble match the real board.
+            // Zook Z's MBC1 header ($01, "no RAM") is a lie: the board is
+            // electrically a bare MBC5. It declares no RAM and has no battery.
+            UnlMapper::Vf001Zook(_) => {
+                return CartridgeType::MBC5 { ram: false, battery: false, rumble: false }
+            }
+            // General VF001 is electrically MBC5, and every cart on this arm
+            // declares a truthful MBC5-family header ($19-$1E) — the detection
+            // gates on exactly that. Derive RAM/battery/rumble from it so saves
+            // and rumble match the real board.
             UnlMapper::Vf001Gen(_) => {
                 return match self.cartridge_type {
                     MBC5_RAM => CartridgeType::MBC5 { ram: true, battery: false, rumble: false },
@@ -2087,6 +2155,15 @@ impl memory::Addressable for Cartridge {
                     return byte;
                 }
             }
+            // Zook Z challenge-response: the board answers through the cart-RAM
+            // window. Unrecognised streams fall through to normal MBC5 RAM.
+            UnlMapper::Vf001Zook(st)
+                if (EXTERNAL_RAM_START..=EXTERNAL_RAM_END).contains(&addr) =>
+            {
+                if let Some(byte) = Self::vf001z_read(st, addr) {
+                    return byte;
+                }
+            }
             // 8 KiB dual-window banking: the switchable area is two independent
             // 8 KiB pages, so it cannot go through the 16 KiB `rom_bank_bases`
             // path at all.
@@ -2647,6 +2724,13 @@ impl memory::Addressable for Cartridge {
                 if matches!(self.unl_mapper, UnlMapper::Vf001Gen(_)) =>
             {
                 self.vf001g_write(addr, value);
+            }
+            // Zook Z challenge-response port: every $6000-$7FFF write feeds the
+            // protection stream (and can complete a bank select).
+            BANKING_MODE_START..=BANKING_MODE_END
+                if matches!(self.unl_mapper, UnlMapper::Vf001Zook(_)) =>
+            {
+                self.vf001z_write(addr, value);
             }
             // Banking Mode Select (0x6000-0x7FFF)
             BANKING_MODE_START..=BANKING_MODE_END => {
@@ -3817,6 +3901,146 @@ mod tests {
         assert_eq!(cart.read(0xA400), 0x5A);
     }
 
+    /// 1MB image carrying the Zook Z signature: the "V.fame" $0184 logo (whose
+    /// CRC32 is `VF001G_LOGO_CRC32[0]`, taken from the real cart's own 48 bytes)
+    /// plus the bank-select thunk at $3EF5, behind the cart's spoofed MBC1
+    /// header.
+    fn make_vf001z_rom(logo: &[u8; 48]) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x100000];
+        rom[CARTRIDGE_TYPE_OFFSET] = 0x01; // MBC1 (the board does not honour it)
+        rom[ROM_SIZE_OFFSET] = 0x05; // 1MB / 64 banks
+        rom[0x184..0x1B4].copy_from_slice(logo);
+        rom[VF001Z_THUNK_OFFSET..VF001Z_THUNK_OFFSET + VF001Z_THUNK.len()]
+            .copy_from_slice(&VF001Z_THUNK);
+        rom
+    }
+
+    /// The 48 bytes whose CRC32 is `VF001G_LOGO_CRC32[0]`: a clean-room block
+    /// (ASCII banner + a CRC32-forcing suffix), the same construction the
+    /// first-party `vf001zook_protection` ROM uses. Detection keys only on the
+    /// CRC32, so no copyrighted logo bytes are needed.
+    const VF001Z_LOGO: [u8; 48] = *b"RUSTYBOI VF001 ZOOK CLEANROOM STANDIN SIG!!!\xDF\xD4\x43\xD7";
+
+    #[test]
+    fn vf001z_detects_only_with_logo_and_thunk() {
+        let rom = make_vf001z_rom(&VF001Z_LOGO);
+        assert_eq!(crate::checksum::crc32(&rom[0x184..0x1B4]), VF001G_LOGO_CRC32[0]);
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::Vf001Zook(Box::default())
+        );
+        // The MBC1 header is a lie: the board is electrically a bare MBC5.
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(
+            cart.get_cartridge_type(),
+            CartridgeType::MBC5 { ram: false, battery: false, rumble: false }
+        ));
+
+        // Right logo, no thunk -> not this board (the $7000 config-register
+        // dialect and this one must never be confused).
+        let mut no_thunk = make_vf001z_rom(&VF001Z_LOGO);
+        no_thunk[VF001Z_THUNK_OFFSET..VF001Z_THUNK_OFFSET + VF001Z_THUNK.len()].fill(0);
+        assert_eq!(Cartridge::detect_unl_mapper(&no_thunk), UnlMapper::None);
+
+        // Right thunk, wrong logo -> no match either.
+        let mut no_logo = make_vf001z_rom(&VF001Z_LOGO);
+        no_logo[0x184..0x1B4].fill(0);
+        assert_eq!(Cartridge::detect_unl_mapper(&no_logo), UnlMapper::None);
+    }
+
+    #[test]
+    fn vf001z_answers_bank_and_challenge_transactions() {
+        let mut cart = Cartridge::from_bytes(&make_vf001z_rom(&VF001Z_LOGO)).unwrap();
+
+        // A bank select is four bytes at $7081; only the first three are keyed.
+        let select = |cart: &mut Cartridge, b: [u8; 4]| {
+            for x in b {
+                cart.write(0x7081, x);
+            }
+        };
+        select(&mut cart, [0x46, 0x58, 0x54, 0x5F]);
+        assert_eq!(cart.get_rom_bank(), 4);
+        select(&mut cart, [0x34, 0x40, 0x5A, 0x33]);
+        assert_eq!(cart.get_rom_bank(), 3);
+        // $31 is not a reset: a key containing it still selects.
+        select(&mut cart, [0x0A, 0x31, 0x18, 0x57]);
+        assert_eq!(cart.get_rom_bank(), 0x0B);
+        // The fourth byte is ignored -- same bank from a different one.
+        select(&mut cart, [0xA4, 0xBA, 0xD5, 0x44]);
+        assert_eq!(cart.get_rom_bank(), 2);
+        select(&mut cart, [0x0A, 0x31, 0x18, 0x99]);
+        assert_eq!(cart.get_rom_bank(), 0x0B);
+
+        // The same four bytes written anywhere BUT $7081 are just stream bytes,
+        // so they must not re-bank.
+        select(&mut cart, [0xA4, 0xBA, 0xD5, 0x44]);
+        for x in [0x46u8, 0x58, 0x54, 0x5F] {
+            cart.write(0x7080, x);
+        }
+        assert_eq!(cart.get_rom_bank(), 2);
+
+        // Challenge-response: the answer is keyed on the stream AND the
+        // register selected by A8-A11 of the read address.
+        for x in [0xA8u8, 0xB6] {
+            cart.write(0x7080, x);
+        }
+        assert_eq!(cart.read(0xA080), 0x6E);
+        assert_eq!(cart.read(0xA180), 0xFF); // wrong register: no answer
+        for x in [0x77u8, 0x13, 0xB4] {
+            cart.write(0x7A80, x);
+        }
+        assert_eq!(cart.read(0xA680), 0x22);
+    }
+
+    /// The port's shift window is volatile board logic: a reset must power it
+    /// up empty, exactly like a fresh load.
+    #[test]
+    fn vf001z_port_state_is_volatile_across_reset() {
+        let mut cart = Cartridge::from_bytes(&make_vf001z_rom(&VF001Z_LOGO)).unwrap();
+        for x in [0xA8u8, 0xB6] {
+            cart.write(0x7080, x);
+        }
+        assert_eq!(cart.read(0xA080), 0x6E);
+        cart.reset();
+        // The shift register powers up empty, so the same read answers nothing.
+        assert_eq!(cart.read(0xA080), 0xFF);
+        assert_eq!(cart.unl_mapper(), &UnlMapper::Vf001Zook(Box::default()));
+    }
+
+    /// The window lives in the variant payload, so a mid-challenge savestate
+    /// has to restore it: the same read must still answer after a round-trip.
+    #[test]
+    fn vf001z_port_state_round_trips_through_a_savestate() {
+        let rom = make_vf001z_rom(&VF001Z_LOGO);
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        for x in [0x46u8, 0x58, 0x54, 0x5F] {
+            cart.write(0x7081, x);
+        }
+        for x in [0xA8u8, 0xB6] {
+            cart.write(0x7080, x);
+        }
+
+        let bytes = bincode::serialize(&cart).unwrap();
+        let mut restored: Cartridge = bincode::deserialize(&bytes).unwrap();
+        restored.attach_rom(rom.clone());
+        assert_eq!(restored.unl_mapper(), cart.unl_mapper(), "the window must serialize");
+        assert_eq!(restored.read(0xA080), 0x6E);
+        assert_eq!(restored.get_rom_bank(), 4, "bank register survived too");
+    }
+
+    /// No other board may pay for the shift window: it is inside the variant
+    /// payload, so every other `UnlMapper` serializes to the bare variant index.
+    #[test]
+    fn vf001z_shift_window_costs_non_users_nothing() {
+        let none = bincode::serialize(&UnlMapper::None).unwrap().len();
+        let vfz = bincode::serialize(&UnlMapper::Vf001Zook(Box::default())).unwrap().len();
+        assert_eq!(
+            vfz - none,
+            VF001Z_STREAM_MAX + 2,
+            "the 32-byte window plus its two counters must be paid for by Zook Z alone"
+        );
+    }
+
     #[test]
     fn vf001_protection_state_is_volatile_across_reset() {
         let mut cart = Cartridge::from_bytes(&make_vf001_rom()).unwrap();
@@ -4895,6 +5119,7 @@ mod tests {
             make_trimmed_mbc1m(),
             make_vf001_rom(),
             make_vf001g_rom(),
+            make_vf001z_rom(&VF001Z_LOGO),
         ];
         for rom in roms {
             let mut cart = Cartridge::from_bytes(&rom).unwrap();

@@ -240,6 +240,12 @@ impl Mapper {
             UnlMapper::Vf001Gen(_) => {
                 return Mapper::Vf001(Vf001 { ram_enabled: false, regs: Mbc5State::default() })
             }
+            // Zook Z is electrically MBC5 too (its `rst $28` is a bare
+            // `ld ($2000),a`); the challenge-response port only adds a second
+            // way to drive the same bank register, so reuse the Vf001 board.
+            UnlMapper::Vf001Zook(_) => {
+                return Mapper::Vf001(Vf001 { ram_enabled: false, regs: Mbc5State::default() })
+            }
             // The 8 KiB dual-window board keeps its two page registers in the
             // UnlMapper::Vf8k payload and serves $4000-$7FFF from the read
             // intercept, so the board here only needs the plain MBC5 RAM-enable
