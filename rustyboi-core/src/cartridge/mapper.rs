@@ -264,6 +264,11 @@ impl Mapper {
             // $A000-$BFFF intercepts, so the board here is a plain MBC3. Fall
             // through to the header type.
             UnlMapper::PokeJadeDia(_) => {}
+            // Gowin "Story of Lasama": electrically a plain MBC1 with no RAM.
+            // The outer-bank handshake state rides in the `UnlMapper::Gowin`
+            // payload and is applied by the $6000 write intercept + bank math,
+            // so the board itself is stock MBC1 registers.
+            UnlMapper::Gowin(_) => return mbc1(false),
         }
         let mbc3 = |has_ram, timer| {
             Mapper::Mbc3(Mbc3 { ram_enabled: false, rom_bank_low: 1, ram_bank: 0, has_ram, timer })

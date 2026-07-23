@@ -239,6 +239,22 @@ const SINTAX_BANK_REORDER: [[u8; 8]; 16] = [
 /// (Terrifying 911, Shuihu Zhuan). mGBA's `_detectUnlMBC` keys on this value.
 const HITEK_LOGO_CRC32: u32 = 0x4FDA_B691;
 
+/// Gowin "Story of Lasama" (GS-04) protection board. hhugboy has no auto-detect
+/// for it (its recommended dump is a hand-fixed plain-MBC1 rebuild); the raw
+/// cart is keyed here on the CRC32 of the 48 bytes at $0184 — which on this cart
+/// are executable code, not a logo, so a plain byte-sum would be unsafe — AND on
+/// the exact 30-byte boot-protection stub the cart runs from $02D7. That stub is
+/// the whole tell: it copies a tiny thunk to HRAM that writes the parameter byte
+/// then the commit strobe to the MBC1 banking-mode port ($6000) and restarts at
+/// $0100, swinging the fixed low bank to the real game half. Requiring both the
+/// CRC32 and the stub bytes makes a licensed-cart or wrong-cart match impossible.
+const GOWIN_LASAMA_LOGO_CRC32: u32 = 0xDD11_65F1;
+const GOWIN_STUB_OFFSET: usize = 0x02D7;
+const GOWIN_STUB: [u8; 30] = [
+    0x11, 0xF4, 0x02, 0x0E, 0x20, 0x21, 0xFF, 0xDF, 0x1A, 0x32, 0x1D, 0x0D, 0x20, 0xFA, 0xC3, 0xF3,
+    0xDF, 0x3E, 0x02, 0xEA, 0x00, 0x60, 0x3E, 0xBE, 0xEA, 0x00, 0x60, 0xC3, 0x00, 0x01,
+];
+
 /// HITEK data-bit reordering tables, selected by the data-swap mode the game
 /// programs at boot (write to $2001). A read of a switchable ROM bank
 /// ($4000-$7FFF) returns `reorder_bits(rom_byte, table)`; bank 0 is unmodified.
@@ -498,6 +514,23 @@ pub enum UnlMapper {
     /// payload (like `Vf001`/`Bbd`) so no other cart's bincode savestate layout
     /// shifts. Detected by the header type $10 plus the $0184 CRC32 signature.
     PokeJadeDia(PokeJadeState),
+    /// Gowin "Story of Lasama" (GS-04) protection board (published by Gowin,
+    /// developed by people connected to Vast Fame). Electrically a plain MBC1:
+    /// the RAM-enable, 5-bit ROM-bank ($2000-$3FFF) and mode registers behave
+    /// normally. The one addition is that the MBC1 banking-mode port
+    /// ($6000-$7FFF) is repurposed as a two-write outer-bank handshake — the
+    /// first write latches a parameter, the second (a commit strobe) sets an
+    /// outer ROM base of `parameter << 1` 16 KiB banks (32 KiB granular). That
+    /// base is added to BOTH the fixed $0000-$3FFF window and the switchable
+    /// $4000-$7FFF window, so the whole selected 64 KiB half of the ROM is
+    /// presented as a stock MBC1 cart. Power-on base 0 runs the decoy bank 0,
+    /// which carries the real Nintendo logo (so the boot ROM's check passes) and
+    /// a stub that performs the handshake ($6000<-$02, $6000<-$BE) then restarts
+    /// at $0100 in the game half — a plain MBC1 leaves the low bank fixed at the
+    /// decoy and spins at the logo forever. Detected by the $0184 CRC32 plus the
+    /// exact boot stub. The tiny outer-bank state rides in the payload so no
+    /// other cart's bincode savestate layout shifts.
+    Gowin(GowinState),
 }
 
 /// Protection register state for `UnlMapper::PokeJadeDia`. Carried inside the
@@ -532,6 +565,20 @@ impl Default for Vf8kState {
     fn default() -> Self {
         Self { low: 2, high: 3 }
     }
+}
+
+/// Outer-bank handshake state for `UnlMapper::Gowin`, carried inside the enum
+/// variant (not as `Cartridge` fields) so every other cart's bincode savestate
+/// layout stays byte-identical. Power-on base 0 (the decoy/logo bank), no
+/// parameter pending — matching a cold cart before the boot stub runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GowinState {
+    /// Outer ROM base in 16 KiB banks, added to both the fixed and switchable
+    /// windows. Set by the $6000 commit strobe to `parameter << 1`.
+    base: u8,
+    /// The parameter byte latched by the first $6000 write, awaiting the commit
+    /// strobe. `None` = waiting for the parameter; `Some` = waiting for commit.
+    pending: Option<u8>,
 }
 
 /// Swap-mode latches for `UnlMapper::Hitek`, carried inside the enum variant
@@ -916,15 +963,23 @@ impl Clone for Cartridge {
 }
 
 impl Cartridge {
-    /// Detect CGB support from cartridge header byte 0x0143
-    fn detect_cgb_support(data: &[u8]) -> CgbSupport {
-        if data.len() <= CGB_FLAG_OFFSET {
-            return CgbSupport::None;
-        }
-
-        match data[CGB_FLAG_OFFSET] {
-            CGB_COMPATIBLE => CgbSupport::Compatible,
-            CGB_ONLY => CgbSupport::Only,
+    /// Detect CGB support from cartridge header byte 0x0143. Sachen MMC1/MMC2
+    /// carts scramble the whole $0100-$01FF header page (the CPU reads it back
+    /// through the mapper's RA0<-A6/RA1<-A4/RA4<-A1/RA6<-A0 bit-swap), so the
+    /// CGB flag the boot ROM actually sees comes from the descrambled offset,
+    /// not the raw byte at $0143. A CGB-compatible Sachen multicart (Rocman X
+    /// Gold: descrambled $0143 = $80) would otherwise be forced into DMG mode
+    /// and hang in its hardware-probe boot loop.
+    fn detect_cgb_support(data: &[u8], unl_mapper: &UnlMapper) -> CgbSupport {
+        let offset = match unl_mapper {
+            UnlMapper::SachenMmc1 | UnlMapper::SachenMmc2 => {
+                Self::sachen_unscramble(CGB_FLAG_OFFSET as u16) as usize
+            }
+            _ => CGB_FLAG_OFFSET,
+        };
+        match data.get(offset) {
+            Some(&CGB_COMPATIBLE) => CgbSupport::Compatible,
+            Some(&CGB_ONLY) => CgbSupport::Only,
             _ => CgbSupport::None,
         }
     }
@@ -1047,8 +1102,9 @@ impl Cartridge {
         // content. Must run on the raw file image, before padding.
         let unl_mapper = Self::detect_unl_mapper(&data);
 
-        // Detect CGB support
-        let cgb_support = Self::detect_cgb_support(&data);
+        // Detect CGB support (Sachen carts read the flag through the header
+        // scramble, so the mapper must be known first).
+        let cgb_support = Self::detect_cgb_support(&data, &unl_mapper);
 
         // Detect MBC1 multicart wiring from the per-segment logo layout.
         let mbc1_multicart = Self::detect_mbc1_multicart(cartridge_type, &data);
@@ -1139,6 +1195,9 @@ impl Cartridge {
             UnlMapper::Vf001Zook(_) => UnlMapper::Vf001Zook(Box::default()),
             // PKJD's three protection registers are volatile; power up at 0.
             UnlMapper::PokeJadeDia(_) => UnlMapper::PokeJadeDia(PokeJadeState::default()),
+            // Gowin's outer-bank latch is volatile board logic; power up at the
+            // decoy base 0 with no parameter pending, exactly like a cold cart.
+            UnlMapper::Gowin(_) => UnlMapper::Gowin(GowinState::default()),
             other => other,
         };
         Cartridge {
@@ -1382,6 +1441,12 @@ impl Cartridge {
             // ($10) is truthful, so the header decode below is correct; the
             // D/E/F protection is applied in the read/write intercepts.
             UnlMapper::PokeJadeDia(_) => {}
+            // Gowin "Story of Lasama": electrically a plain MBC1 with no RAM or
+            // battery (the header type byte $38 is title-overrun garbage). The
+            // outer-bank handshake is applied in the write path + bank math.
+            UnlMapper::Gowin(_) => {
+                return CartridgeType::MBC1 { ram: false, battery: false }
+            }
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -1510,6 +1575,17 @@ impl Cartridge {
     /// reads, so they always recompute (identical to the pre-cache behavior).
     #[inline]
     fn rom_bank_bases(&self) -> (usize, usize) {
+        // Gowin adds its outer-bank base (set by the $6000 handshake) to both
+        // the fixed and switchable windows, so the whole selected 64 KiB ROM
+        // half is presented as a stock MBC1 cart. The underlying board is a
+        // plain MBC1, so bank0 = base (mode-0) and bankN = base + inner bank.
+        if let UnlMapper::Gowin(st) = &self.unl_mapper {
+            let banks = self.rom_banks.max(1);
+            let base = st.base as usize;
+            let b0 = (base + self.get_rom_bank0()) % banks;
+            let bn = (base + self.get_rom_bank()) % banks;
+            return (b0 * 0x4000, bn * 0x4000);
+        }
         if self.unl_mapper != UnlMapper::None {
             return (self.get_rom_bank0() * 0x4000, self.get_rom_bank() * 0x4000);
         }
@@ -2810,6 +2886,14 @@ impl memory::Addressable for Cartridge {
                 if matches!(self.unl_mapper, UnlMapper::Vf001Zook(_)) =>
             {
                 self.vf001z_write(addr, value);
+            }
+            // Gowin: the MBC1 banking-mode port is repurposed as the two-write
+            // outer-bank handshake (parameter then commit strobe), so it is
+            // intercepted before the generic MBC1 mode-select arm below.
+            BANKING_MODE_START..=BANKING_MODE_END
+                if matches!(self.unl_mapper, UnlMapper::Gowin(_)) =>
+            {
+                self.gowin_write(value);
             }
             // Banking Mode Select (0x6000-0x7FFF)
             BANKING_MODE_START..=BANKING_MODE_END => {
@@ -4457,6 +4541,151 @@ mod tests {
         let mut fresh = Cartridge::from_bytes(&rom).unwrap();
         fresh.skip_boot_handoff();
         assert_eq!(fresh.read(0x0104), LICENSED_LOGO[0]);
+    }
+
+    // 48 bytes whose CRC32 is the Gowin "Story of Lasama" detection constant
+    // (0xDD1165F1): a clean-room ASCII banner + a 4-byte CRC-forcing suffix, so
+    // the fixture carries the signature with no copyrighted logo bytes. (Same
+    // block as test-roms/src/cartridge/gowin_banking.dmg.mooneye.asm.)
+    const GOWIN_LOGO: [u8; 48] = [
+        0x52, 0x55, 0x53, 0x54, 0x59, 0x42, 0x4F, 0x49, 0x20, 0x47, 0x4F, 0x57, 0x49, 0x4E, 0x20,
+        0x4C, 0x41, 0x53, 0x41, 0x4D, 0x41, 0x20, 0x47, 0x53, 0x30, 0x34, 0x20, 0x43, 0x4C, 0x45,
+        0x41, 0x4E, 0x52, 0x4F, 0x4F, 0x4D, 0x20, 0x53, 0x49, 0x47, 0x21, 0x21, 0x21, 0x21, 0xB3,
+        0x97, 0xA2, 0x17,
+    ];
+
+    /// A 128KB Gowin "Story of Lasama" image: the $0184 CRC32 signature and the
+    /// $02D7 boot stub, over `make_sized_rom`'s per-bank markers.
+    fn make_gowin_rom() -> Vec<u8> {
+        let mut rom = make_sized_rom(0x01, 0x02, 0x20000); // MBC1 header, 128KB
+        rom[0x184..0x1B4].copy_from_slice(&GOWIN_LOGO);
+        rom[GOWIN_STUB_OFFSET..GOWIN_STUB_OFFSET + GOWIN_STUB.len()].copy_from_slice(&GOWIN_STUB);
+        rom
+    }
+
+    #[test]
+    fn gowin_detects_and_outer_bank_handshake_offsets_both_windows() {
+        let rom = make_gowin_rom();
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::Gowin(GowinState::default())
+        );
+        // Both halves of the key are load-bearing: perturbing either the CRC
+        // block or the boot stub drops detection back to plain MBC1.
+        let mut no_crc = rom.clone();
+        no_crc[0x184] ^= 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&no_crc), UnlMapper::None);
+        let mut no_stub = rom.clone();
+        no_stub[GOWIN_STUB_OFFSET] ^= 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&no_stub), UnlMapper::None);
+
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        // Electrically MBC1, no RAM.
+        assert!(matches!(
+            cart.get_cartridge_type(),
+            CartridgeType::MBC1 { ram: false, battery: false }
+        ));
+        // Power-on base 0: the fixed window is bank 0, the switchable window is
+        // the MBC1 inner bank (default 1).
+        assert_eq!(cart.read(0x1000), 0);
+        assert_eq!(cart.read(0x5000), 1);
+
+        // Two-write $6000 handshake: parameter $02 then a commit strobe sets the
+        // outer base to 2<<1 = 4, added to BOTH windows. A plain MBC1 would read
+        // the second write ($BE) as a mode-select and leave the low bank at 0.
+        cart.write(0x6000, 0x02);
+        cart.write(0x6000, 0xBE);
+        assert_eq!(cart.read(0x1000), 4, "fixed window swung to bank 4");
+        assert_eq!(cart.read(0x5000), 5, "switchable window = base 4 + inner 1");
+        // The inner ($2000) register still indexes within the selected half.
+        cart.write(0x2000, 0x02);
+        assert_eq!(cart.read(0x5000), 6, "base 4 + inner 2");
+
+        // A parameter-0 handshake restores base 0 (both windows fall back).
+        cart.write(0x6000, 0x00);
+        cart.write(0x6000, 0xBE);
+        assert_eq!(cart.read(0x1000), 0);
+        assert_eq!(cart.read(0x5000), 2, "base 0 + inner 2");
+    }
+
+    /// A Sachen MMC2 raw dump: the Nintendo logo lives at the DESCRAMBLED $0184
+    /// positions (so the scrambled-$0184 sum reads as the Nintendo logo, the
+    /// MMC2 tell), over `make_sized_rom`'s per-bank markers.
+    fn make_sachen_mmc2_rom(rom_size_code: u8, size: usize) -> Vec<u8> {
+        let mut rom = make_sized_rom(0x00, rom_size_code, size);
+        for i in 0..48u16 {
+            rom[Cartridge::sachen_unscramble(0x184 + i) as usize] = LICENSED_LOGO[i as usize];
+        }
+        rom
+    }
+
+    #[test]
+    fn sachen_reads_the_cgb_flag_through_the_header_scramble() {
+        // Rocman X Gold shape: a CGB Sachen multicart whose CGB flag the CPU
+        // reads at $0143 THROUGH the $01xx address scramble, i.e. from the
+        // descrambled offset. The raw $0143 byte is not the flag.
+        let mut rom = make_sachen_mmc2_rom(0x04, 0x80000); // 512KB, MMC2
+        let scrambled = Cartridge::sachen_unscramble(0x143) as usize;
+        assert_ne!(scrambled, 0x143, "the CGB flag is genuinely relocated");
+        rom[0x143] = 0x00; // raw byte says "DMG only"
+        rom[scrambled] = CGB_COMPATIBLE; // the flag the mapper actually presents
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::SachenMmc2);
+
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(
+            cart.supports_cgb(),
+            "the descrambled $0151 CGB flag ($80) must win over the raw $0143"
+        );
+
+        // Control: the same descramble must NOT invent CGB support out of a
+        // genuinely DMG Sachen cart (both the raw and descrambled bytes DMG).
+        let mut dmg = make_sachen_mmc2_rom(0x04, 0x80000);
+        dmg[0x143] = 0xC0; // raw looks CGB-only...
+        dmg[scrambled] = 0x00; // ...but the descrambled flag is DMG
+        assert!(!Cartridge::from_bytes(&dmg).unwrap().supports_cgb());
+    }
+
+    #[test]
+    fn sachen_multicart_out_of_rom_outer_bank_reads_open_bus() {
+        // Rocman X Gold's boot probe reads $0143 under outer banks $00/$20/$40
+        // and loops forever unless the two out-of-ROM banks read back a
+        // different (open-bus) byte than the in-ROM one. On a 128KB (8-bank)
+        // cart both $20 and $40 address beyond the chip, so they must be $FF.
+        let mut rom = make_sachen_mmc2_rom(0x02, 0x20000); // 128KB = 8 banks
+        rom[0x0000] = 0x5A; // a distinctive byte in the fixed window, bank 0
+
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        // In-ROM multicart select: open the latch gate (inner bits 4-5 set),
+        // program base/mask, then read the fixed window. base&mask = 4 < 8.
+        cart.write(0x2000, 0x33); // gate open
+        cart.write(0x0000, 0x04); // base
+        cart.write(0x4000, 0x04); // mask
+        cart.write(0x2000, 0x03); // inner bank (gate closed)
+        assert_eq!(cart.read(0x1000), 4, "in-ROM outer bank selects bank 4");
+        assert_eq!(cart.read(0x5000), 4 | 3, "switchable = base | inner");
+
+        // Out-of-ROM outer bank ($40 & $40 = 64 >= 8): the whole window is open
+        // bus, matching the real cart's solder-pad wiring. WITHOUT this the
+        // wrapped read would return bank-0 data and the menu probe would hang.
+        cart.write(0x2000, 0x30); // gate open
+        cart.write(0x0000, 0x40); // base past the ROM
+        cart.write(0x4000, 0x40); // mask selects that bit
+        assert_eq!(cart.read(0x0000), 0xFF, "fixed window is open bus");
+        assert_eq!(cart.read(0x1000), 0xFF);
+        assert_eq!(cart.read(0x5000), 0xFF, "switchable window is open bus");
+
+        // The $20 (512KB) outer bank is likewise beyond an 8-bank chip.
+        cart.write(0x2000, 0x30);
+        cart.write(0x0000, 0x20);
+        cart.write(0x4000, 0x20);
+        assert_eq!(cart.read(0x1000), 0xFF);
+
+        // Back in range ($00): normal ROM, so the probe sees a real byte that
+        // differs from the open-bus reads and proceeds.
+        cart.write(0x2000, 0x30);
+        cart.write(0x0000, 0x00);
+        cart.write(0x4000, 0x00);
+        assert_eq!(cart.read(0x0000), 0x5A, "outer bank 0 is real ROM again");
     }
 
     #[test]

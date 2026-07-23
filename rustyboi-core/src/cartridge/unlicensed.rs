@@ -304,6 +304,19 @@ impl Cartridge {
             return UnlMapper::NewGbHk;
         }
 
+        // Gowin "Story of Lasama" (GS-04) protection board. hhugboy has no
+        // auto-detect for the raw cart, so this keys on the CRC32 of the 48
+        // bytes at $0184 (executable code on this cart, so a plain sum is
+        // unsafe) AND the exact 30-byte boot-protection stub at $02D7 that
+        // drives the $6000 outer-bank handshake. Both together make a licensed-
+        // or wrong-cart match impossible. Electrically MBC1.
+        if crate::checksum::crc32(&data[0x184..0x1B4]) == GOWIN_LASAMA_LOGO_CRC32
+            && data.len() > GOWIN_STUB_OFFSET + GOWIN_STUB.len()
+            && data[GOWIN_STUB_OFFSET..GOWIN_STUB_OFFSET + GOWIN_STUB.len()] == GOWIN_STUB
+        {
+            return UnlMapper::Gowin(GowinState::default());
+        }
+
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
         // banked-size file) the publisher string in the ROM. The
         // string+type+size gate already implies the blank-header shape in
@@ -819,6 +832,23 @@ impl Cartridge {
     /// bank register -- a faithful mGBA side effect the game overwrites with its
     /// next $2000 write. Swap-mode state rides in the `UnlMapper::Bbd` payload;
     /// the bank register lives on the `Mapper::Bbd` board.
+    /// Gowin ($6000-$7FFF) outer-bank handshake. The port takes a two-write
+    /// command: the first write latches a parameter byte, the second (a commit
+    /// strobe, whose value is not otherwise used) sets the outer ROM base to
+    /// `parameter << 1` 16 KiB banks — a 32 KiB-granular offset applied to both
+    /// the fixed and switchable ROM windows (see `rom_bank_bases`). The one
+    /// observed transaction is $02 then $BE, selecting bank 4 (the game half of
+    /// the 128 KiB dump); the decoy bank 0 is left mapped until then. The base
+    /// is masked to the ROM size so it can never point past the image.
+    pub(super) fn gowin_write(&mut self, value: u8) {
+        let rom_banks = self.rom_banks.max(1);
+        if let UnlMapper::Gowin(ref mut st) = self.unl_mapper {
+            match st.pending.take() {
+                None => st.pending = Some(value),
+                Some(param) => st.base = ((usize::from(param) << 1) % rom_banks) as u8,
+            }
+        }
+    }
     pub(super) fn bbd_write(&mut self, addr: u16, value: u8) {
         let value = {
             let UnlMapper::Bbd(ref mut st) = self.unl_mapper else {
@@ -1029,14 +1059,36 @@ pub(super) struct Sachen {
 
 impl Banking for Sachen {
     fn rom_bankn(&self, g: Geom) -> usize {
+        if self.outer_open_bus(g) {
+            return g.rom_banks; // out-of-ROM outer bank -> open bus (0xFF)
+        }
         (((self.state.bank & !self.state.mask) | (self.state.base & self.state.mask)) as usize)
             % g.rom_banks
     }
     fn rom_bank0(&self, g: Geom) -> usize {
+        if self.outer_open_bus(g) {
+            return g.rom_banks; // out-of-ROM outer bank -> open bus (0xFF)
+        }
         ((self.state.base & self.state.mask) as usize) % g.rom_banks
     }
     fn ram_bank(&self, _g: Geom) -> usize {
         0
+    }
+}
+
+impl Sachen {
+    /// The multicart outer bank (`base & mask`) addresses ROM beyond the
+    /// physical chip. On the real board the solder pads for a cart's ROM size
+    /// leave those upper outer-address lines open, so the whole window reads
+    /// back as open bus ($FF) rather than wrapping (hhugboy `MbcUnlSachenMMC2`'s
+    /// `mbcConfig` open-bus check, derived here from the physical ROM size).
+    /// The 4-in-1 menu's size probe depends on this: it reads $0143 under outer
+    /// banks $00/$20/$40 and loops forever unless the two out-of-ROM banks read
+    /// back different (open-bus) bytes than the in-ROM one. Returning a bank
+    /// index of `rom_banks` lands the read past the ROM image, where the read
+    /// path already yields $FF.
+    fn outer_open_bus(&self, g: Geom) -> bool {
+        (self.state.base & self.state.mask) as usize >= g.rom_banks
     }
 }
 

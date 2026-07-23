@@ -27,6 +27,7 @@ boot-licensee_boot_div-cgbecompat_l33|cgb|mooneye|test-roms/build/boot/licensee_
 boot-licensee_boot_div-cgbecompat_l33n01|cgb|mooneye|test-roms/build/boot/licensee_boot_div.cgbecompat_l33n01.mooneye.gb|rev=cgbe
 cartridge-bbd_banking-cgb|cgb|mooneye|test-roms/build/cartridge/bbd_banking.cgb.mooneye.gbc
 cartridge-ggb81_banking-cgb|cgb|mooneye|test-roms/build/cartridge/ggb81_banking.cgb.mooneye.gbc
+cartridge-gowin_banking-dmg|dmg|mooneye|test-roms/build/cartridge/gowin_banking.dmg.mooneye.gb
 cartridge-hitek_banking-cgb|cgb|mooneye|test-roms/build/cartridge/hitek_banking.cgb.mooneye.gbc
 cartridge-licheng_banking-cgb|cgb|mooneye|test-roms/build/cartridge/licheng_banking.cgb.mooneye.gbc
 cartridge-newgbhk_protection-cgb|cgb|mooneye|test-roms/build/cartridge/newgbhk_protection.cgb.mooneye.gbc
