@@ -3,8 +3,10 @@ mod color_mix;
 mod fetcher;
 mod fifo;
 mod frame_out;
-mod hdma;
 mod lcdc;
+// PPU-side mode-0 (HBlank) window queries the HDMA engine consults; the engine
+// itself is memory::dma::hdma.
+mod m0_window;
 mod mode3;
 mod modes;
 mod reads;

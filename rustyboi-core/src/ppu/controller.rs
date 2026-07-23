@@ -2513,15 +2513,6 @@ impl Ppu {
 
     // ---- Event-scheduled STAT IRQ model (hardware model) ----
 
-
-
-
-
-
-
-
-
-
     /// Register a NON-mode-3 (OAM/HBlank) DS->SS speed switch for the LY-read
     /// sub-dot phase accumulator. The hardware speed-change handling applies a
     /// half-dot re-anchor on every DS->SS switch; the whole-dot DS->SS bridge folds
@@ -2536,25 +2527,6 @@ impl Ppu {
     pub(crate) fn bump_dsss_ly_total(&mut self) {
         self.speed.dsss_ly_total_count += 1;
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     // Resolve a dot-keyed DMG palette history at pop dot `tick`.
     pub(in crate::ppu) fn pal_at_tick(hist: &[(u128, u8)], tick: u128, fallback: u8) -> u8 {
