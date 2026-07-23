@@ -6,6 +6,8 @@ mod frame_out;
 mod hdma;
 mod lcdc;
 mod reads;
+mod reg_writes;
+mod stat_engine;
 mod window_glitch;
 mod stat_irq;
 

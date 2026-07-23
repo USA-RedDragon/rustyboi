@@ -516,8 +516,8 @@ pub(crate) const OAM_SPRITE_COUNT: usize = 40; // 40 sprites total in OAM
 pub(crate) const OAM_BYTES_PER_SPRITE: usize = 4; // 4 bytes per sprite
 pub(crate) const MAX_SPRITES_PER_LINE: usize = 10; // Maximum 10 sprites per scanline
 
-const DMG_PIXEL_TRANSFER_ARM_DOT: u128 = 80;
-const CGB_PIXEL_TRANSFER_ARM_DOT: u128 = 82;
+pub(in crate::ppu) const DMG_PIXEL_TRANSFER_ARM_DOT: u128 = 80;
+pub(in crate::ppu) const CGB_PIXEL_TRANSFER_ARM_DOT: u128 = 82;
 pub(in crate::ppu) const DMG_PIXEL_TRANSFER_WARMUP: u8 = 4;
 pub(in crate::ppu) const CGB_PIXEL_TRANSFER_WARMUP: u8 = 2;
 // First line after LCDC.7 0->1: hardware sets the PPU's internal cycle
@@ -544,52 +544,14 @@ fn cgb_first_frame_lock_dot(double_speed: bool) -> u128 {
 // Serde default for `frames_since_enable`: a savestate captured mid-run has an
 // already-resynced panel, so restore to the "displays normally" value (>= 2).
 fn frames_since_enable_default() -> u8 { 2 }
-// Offset between rustyboi's `ticks` at M3 arm and the hardware line-cycle frame
-// for the scheduled Mode 3 -> Mode 0 transition. Swept against the full suite.
-const DMG_MODE0_OFFSET: i32 = 4;
-const CGB_MODE0_OFFSET: i32 = 4;
 // Mode-3 dot penalty for a window starting on this line (the hardware window draw-start penalty).
 pub(in crate::ppu) const WIN_M3_PENALTY: i32 = 6;
-// Display-column latency between a mid-mode-3 DMG palette-register (BGP/OBP0/OBP1)
-// write and the first pixel that sees the new value. `self.x` at the write instant
-// is the next column to be popped (the live pipeline plot position); the change
-// first reaches the column plotted this many dots later. Same shape as the LCDC
-// `self.x + 2` commit in handle_lcdc_write. BGP and OBP carry separate latencies
-// (the BG fetcher and the sprite mixer sample at different pipeline stages).
-// CGB hardware samples the palette mapping one dot later in the pipeline than DMG
-// hardware (the DMG fetcher runs a 4-dot pixel-transfer warmup + the +1 cgb_adj
-// phase vs CGB's 2-dot warmup): the same mid-mode-3 write reaches the displayed
-// column one column earlier on DMG. Keyed by `is_cgb()` (the hardware, NOT the
-// CGB-features mode) so DMG-compat-on-CGB — which renders with the CGB warmup but
-// uses the DMG palette regs — takes the CGB latency.
-// Pan Docs documents the general observability (a mid-scanline BGP write's effect
-// shifts left by any mode-3 delay); the exact per-machine latency is not documented.
-// Pan Docs: Rendering — https://gbdev.io/pandocs/Rendering.html
-const BGP_LATENCY_CGB: i32 = 2;
-const BGP_LATENCY_DMG: i32 = 1;
-const OBP_LATENCY_CGB: i32 = 2;
-const OBP_LATENCY_DMG: i32 = 1;
-// Maximum dot-gap between two consecutive mid-mode-3 palette writes for the DMG
-// palette-latch glitch to fire. The glitch is a TWO-WRITE collision: back-to-back
-// SET/RESTORE writes ~12 dots apart leave the first write's settling still in-flight
-// when the second lands. Single writes, or writes spaced wider than this (~60+ dots
-// apart), don't collide and produce no spike.
-// Base mid-scanline BGP shift-left is documented (Pan Docs: Rendering, cited above);
-// the two-write collision spike itself is not in Pan Docs, TCAGBD, or GBCTR —
-// sub-dot render timing from mealybug-tearoom-tests refs.
-const BGP_SPIKE_CADENCE_CC: u64 = 12;
-fn bgp_latency(cgb: bool) -> i32 {
-    if cgb { BGP_LATENCY_CGB } else { BGP_LATENCY_DMG }
-}
-fn obp_latency(cgb: bool) -> i32 {
-    if cgb { OBP_LATENCY_CGB } else { OBP_LATENCY_DMG }
-}
 // Offset (dots) between the renderer's scheduled mode-0 transition and the
 // event-model mode-0 STAT IRQ fire time. Tuned against the suite.
-const M0IRQ_OFFSET: i64 = -3;
+pub(in crate::ppu) const M0IRQ_OFFSET: i64 = -3;
 // Mode-2 STAT IRQ fires this many dots relative to the schedule formula; the
 // renderer-timed render tests need it earlier. Swept against the suite.
-const M2IRQ_OFFSET: i64 = -1;
+pub(in crate::ppu) const M2IRQ_OFFSET: i64 = -1;
 // First-line-after-enable DMG single-speed mode-0 STAT IRQ correction (dots).
 // On the first frame after the LCD turns on there is no prior mode-2 scan; the
 // DMG first-frame arm (DMG_FIRST_FRAME_ARM_DOT=85) lands the line-0 m0 IRQ three
@@ -597,32 +559,32 @@ const M2IRQ_OFFSET: i64 = -1;
 // (read-PC-calibrated to the exact m0 fire) place the true fire 3 dots earlier;
 // every scx (0..3) is uniformly +3. Scoped to DMG SS first line so the
 // steady-state m0/m2 IRQ schedule (the m0int/m2int canaries) is untouched.
-const M0IRQ_DMG_FIRST_FRAME_OFFSET: i64 = -3;
+pub(in crate::ppu) const M0IRQ_DMG_FIRST_FRAME_OFFSET: i64 = -3;
 // Absolute-clock offset attributed to an FF41/FF45 register write. The write
 // hook fires after the store but before this M-cycle's dots tick, so the
 // renderer's current dot is already `abs_cc` (the M-cycle start), matching
 // the write resolving at its access cc, before the M-cycle's +4 tick. No
 // extra bias is needed at single speed. Swept against the full suite (0 beats
 // the former -1 by 32 net).
-const WRITE_CC_OFFSET: i64 = 0;
+pub(in crate::ppu) const WRITE_CC_OFFSET: i64 = 0;
 
 // Sentinel for "no pending wy2 update".
-fn wy2_disabled() -> u64 { u64::MAX }
+pub(in crate::ppu) fn wy2_disabled() -> u64 { u64::MAX }
 
 // Dots into a line before which the window-Y comparator's line input is not
 // yet valid, so a scheduled re-check cannot match (see `run_wy_recheck`).
-const WY_RECHECK_LY_VALID_DOT: u128 = 3;
+pub(in crate::ppu) const WY_RECHECK_LY_VALID_DOT: u128 = 3;
 
 // Line-tail dot from which a CGB PPU's raw line counter -- the window-Y
 // comparator's line input in single speed -- already reads the NEXT line (see
 // `wy_comparator_ly`).
-const CGB_WY_RAW_LY_INC_DOT: u128 = 450;
+pub(in crate::ppu) const CGB_WY_RAW_LY_INC_DOT: u128 = 450;
 fn pnow_disabled() -> u64 { u64::MAX }
 fn win_y_pos_init() -> u8 { 0xFF }
 
 // Mid-mode-3 register-write commit delays (dots, relative to the write cc) and
 // render-phase offsets.
-const M0IRQ_SCX2_CGB_OFFSET: i64 = -1;
+pub(in crate::ppu) const M0IRQ_SCX2_CGB_OFFSET: i64 = -1;
 // DMG window bus-glitch (wg_apply): dots from the LCDC write's register commit
 // to the VRAM address-line transition. (The renderer's absorbed pre-window
 // sprite stall is read from the live SpriteFetchRec, not a constant.)
@@ -641,10 +603,10 @@ pub(crate) struct AccessEnv {
     pub(crate) halt_woken: bool,
 }
 
-const WY1_DELAY: i64 = 2;
-const WY2_DELAY_CGB: i64 = 7;
-const WY2_DELAY_DMG: i64 = 4;
-const SCY_DELAY: i64 = 2;
+pub(in crate::ppu) const WY1_DELAY: i64 = 2;
+pub(in crate::ppu) const WY2_DELAY_CGB: i64 = 7;
+pub(in crate::ppu) const WY2_DELAY_DMG: i64 = 4;
+pub(in crate::ppu) const SCY_DELAY: i64 = 2;
 const WXEN_COMMIT_DELAY: i64 = 3;
 const WYTRIG_COMMIT_DELAY: i64 = 3;
 const LINE153_LY0_DOT_DS: i64 = 6;
@@ -1250,7 +1212,7 @@ pub struct Ppu {
 
     // Sprite data for current scanline
     pub(in crate::ppu) sprites_on_line: Vec<Sprite>,
-    current_oam_sprite_index: usize, // Current sprite being checked during OAM search
+    pub(in crate::ppu) current_oam_sprite_index: usize, // Current sprite being checked during OAM search
     // Lazy OAM Y/X snapshot. Drives sprite
     // visibility so an OAM-DMA overlapping mode-2 retroactively zeroes positions
     // sampled inside the DMA-disabled window. Fed by `oam_change`/`oam_update`.
@@ -1292,7 +1254,7 @@ pub struct Ppu {
     #[serde(default)]
     pub(in crate::ppu) sprite_fetch_stall: u8,
     #[serde(default)]
-    pixel_transfer_warmup: u8,
+    pub(in crate::ppu) pixel_transfer_warmup: u8,
     // Fetcher cadence counter, decoupled from absolute self.ticks so that
     // sprite-fetch stall dots do not flip the fetcher's even/odd phase.
     // Reset to 0 on every OAMSearch -> PixelTransfer transition.
@@ -1405,14 +1367,14 @@ pub struct Ppu {
     // count and (because the BG tile column re-reads SCX live) the fetched
     // tile-map column. Reset to 0 at every M3 arm.
     #[serde(default)]
-    m3_pixels_discarded: u8,
+    pub(in crate::ppu) m3_pixels_discarded: u8,
     // Fine-scroll discard target latched at M3 start (the mode-3-start fine-scroll phase
     // samples `scx % 8` when the loop first runs, at M3 start, before the
     // mode-2 STAT handler's mid-M3 SCX write lands). Reading SCX live in the
     // pop loop samples it too late (after FIFO latency), capturing the
     // already-written value and over-discarding. -1 = not yet latched.
     #[serde(default)]
-    m3_discard_target: i8,
+    pub(in crate::ppu) m3_discard_target: i8,
     // Dot at which the current line's M3 (PixelTransfer) was armed. xpos in
     // The mode-3-start fine-scroll loop xpos == ticks - this. Used to re-read SCX at the
     // same early M3 dots hardware samples, so a mid-discard SCX write moves the
@@ -1428,7 +1390,7 @@ pub struct Ppu {
     // window tile's PushToFIFO (the FIFO's 8-pixel slack absorbs the re-sync to
     // global parity). DMG-only; CGB keeps its decoupled fetcher_cadence_tick.
     #[serde(default)]
-    win_fetch_anchor: Option<u128>,
+    pub(in crate::ppu) win_fetch_anchor: Option<u128>,
     // DMG WX 1..6 immediate window start: on hardware the WX comparator matches
     // during the discard prologue at position WX-7, so the window activates
     // chop = (7-WX) dots EARLIER than the WX=7 (position 0) start, and the
@@ -1647,7 +1609,7 @@ pub struct Ppu {
     // right after the switch; once several frame wraps re-settle the phase it no
     // longer applies. Reset to 0 when the flag is set.
     #[serde(default)]
-    ssds_mode3_frames: u8,
+    pub(in crate::ppu) ssds_mode3_frames: u8,
     // Cumulative NON-mode-3 (OAM/HBlank) DS->SS speed-switch count for the LY-read
     // sub-dot phase accumulator (the hardware speed-change half-dot re-anchor,
     // applied per switch). rustyboi's whole-dot DS->SS bridge folds the integer part;
@@ -1655,14 +1617,14 @@ pub struct Ppu {
     // LY-register boundary read one sub-dot. Mode-3 DS->SS switches carry their residual
     // through the `stat_phase_carry` path instead, so they are excluded here.
     #[serde(default)]
-    dsss_ly_phase_count: u32,
+    pub(in crate::ppu) dsss_ly_phase_count: u32,
     // Total DS->SS switch count (INCLUDING mode-3) for the early-frame anticipation
     // narrowing. Mode-3 DS->SS switches carry their sub-dot through the STAT-phase
     // carry for the glitch-dot resolution, but the anticipation-window WIDTH of an
     // early-frame read still tracks the full switch parity (extra mode-3 switches
     // flip the narrow-window parity).
     #[serde(default)]
-    dsss_ly_total_count: u32,
+    pub(in crate::ppu) dsss_ly_total_count: u32,
     // Set when an SS->DS speed switch executes during PixelTransfer (mode 3) and
     // the bridge dropped 2 dots (see `stop_bridge_advance`). If a subsequent
     // DS->SS switch follows (the double-switch speedchange{2..5} families), that
@@ -1678,7 +1640,7 @@ pub struct Ppu {
     // `stat_phase_carry`) reproduce that accumulated half-dot shift on the
     // STAT/line phase WITHOUT moving the render latch.
     #[serde(default)]
-    dsss_mode3_stop_count: u32,
+    pub(in crate::ppu) dsss_mode3_stop_count: u32,
     // Accumulated STAT-phase carry in master-cc (`1<<ds` per `stat_phase_carry`
     // dot). The carry advances the
     // STAT/line phase (line_cycle/abs_cc) so the STAT/m2-enable observables shift,
@@ -1692,7 +1654,7 @@ pub struct Ppu {
     // Sub-PPU-dot parity (0/1) of the currently-resolving CPU register write at
     // double speed. Set by the bus just before the FF4x write hooks run.
     #[serde(skip, default)]
-    write_subdot: u8,
+    pub(in crate::ppu) write_subdot: u8,
     // The hardware `wy2`: WY delayed by `6 - double_speed` cc after a write.
     // Event-scheduled against the write cc; consumed by the window-Y gate so
     // the M3-length predictor / window-start see the delayed value.
@@ -1700,17 +1662,17 @@ pub struct Ppu {
     pub(in crate::ppu) wy2: u8,
     // Absolute clock at which a pending wy2 update applies; DISABLED when none.
     #[serde(default = "wy2_disabled")]
-    wy2_apply_cc: u64,
+    pub(in crate::ppu) wy2_apply_cc: u64,
     // The WY value to latch into wy2 when wy2_apply_cc arrives.
     #[serde(default)]
-    wy2_pending: u8,
+    pub(in crate::ppu) wy2_pending: u8,
     // The delayed WY value the window-enable master checkpoints read: updated at
     // `cc + 1 + cgb` after a write (`update(cc + 1 + cgb)` in `WY change`).
     // Distinct from `wy2` (the per-line gate value), which is delayed further.
     #[serde(default = "win_y_pos_init")]
-    wy1: u8,
+    pub(in crate::ppu) wy1: u8,
     #[serde(default = "wy2_disabled")]
-    wy1_apply_cc: u64,
+    pub(in crate::ppu) wy1_apply_cc: u64,
     // Absolute clock of a pending on-write WY==LY re-comparison (hardware's
     // scheduled window-Y check). A WY or LCDC store re-runs the comparator a
     // few cc later instead of waiting for the next per-line checkpoint, so a
@@ -1718,9 +1680,9 @@ pub struct Ppu {
     // window. DISABLED when none; never armed once the latch is already set.
     //
     #[serde(default = "wy2_disabled")]
-    wy_recheck_cc: u64,
+    pub(in crate::ppu) wy_recheck_cc: u64,
     #[serde(default)]
-    wy1_pending: u8,
+    pub(in crate::ppu) wy1_pending: u8,
     // Delayed SCY/SCX visible to the BG fetcher during mode 3. A mid-M3 write to
     // FF42/FF43 resolves in mmio immediately (CPU readback is live), but the
     // fetcher sees the new value only after `scy/scx_apply_cc` (write-side analog
@@ -1729,15 +1691,15 @@ pub struct Ppu {
     #[serde(default)]
     pub(in crate::ppu) scy_delayed: u8,
     #[serde(default = "wy2_disabled")]
-    scy_apply_cc: u64,
+    pub(in crate::ppu) scy_apply_cc: u64,
     #[serde(default)]
-    scy_pending: u8,
+    pub(in crate::ppu) scy_pending: u8,
     #[serde(default)]
-    scx_delayed: u8,
+    pub(in crate::ppu) scx_delayed: u8,
     #[serde(default = "wy2_disabled")]
-    scx_apply_cc: u64,
+    pub(in crate::ppu) scx_apply_cc: u64,
     #[serde(default)]
-    scx_pending: u8,
+    pub(in crate::ppu) scx_pending: u8,
     // Exact-cc f1-discard SCX latch. On hardware the SCX change becomes visible at
     // `cc + 2*cgb` (before the SCX write itself resolves), so on CGB the new SCX is only
     // visible to the f1 fine-scroll discard 2 PPU cc after the write's cc. The
@@ -1745,11 +1707,11 @@ pub struct Ppu {
     // of the immediate register, so a mid-discard SCX write lands on the
     // correct f1 iteration without shifting the steady-state discard timing.
     #[serde(default)]
-    scx_prev_f1: u8, // value in effect before the pending write
+    pub(in crate::ppu) scx_prev_f1: u8, // value in effect before the pending write
     #[serde(default = "wy2_disabled")]
-    scx_f1_apply_cc: u64, // abs_cc at which scx_pending becomes visible to f1
+    pub(in crate::ppu) scx_f1_apply_cc: u64, // abs_cc at which scx_pending becomes visible to f1
     #[serde(default)]
-    scx_f1_new: u8,
+    pub(in crate::ppu) scx_f1_new: u8,
     // sub-cc column lever. A mid-mode-3 SCX write applies to the BG
     // column fetcher at `write_cc + 2*cgb` (on hardware the SCX change becomes visible at
     // `cc + 2*cgb`, before the SCX write resolves), evaluated against the cc at which a fetched tile's pixels are
@@ -1759,17 +1721,17 @@ pub struct Ppu {
     // resets on apply) so the fetcher can choose per-tile. `subcc_scx_apply_cc`
     // == disabled when no write is pending this line.
     #[serde(default = "wy2_disabled")]
-    subcc_scx_apply_cc: u64,
+    pub(in crate::ppu) subcc_scx_apply_cc: u64,
     #[serde(default)]
-    subcc_scx_old: u8,
+    pub(in crate::ppu) subcc_scx_old: u8,
     #[serde(default)]
-    subcc_scx_new: u8,
+    pub(in crate::ppu) subcc_scx_new: u8,
     // Armed by a mid-mode-3 SCX write while a BG tile is in flight (column
     // already committed under the OLD scx, not yet pushed). The next PushToFifo
     // re-keys that single tile to the NEW scx column iff it plots after the
     // apply cc, then disarms. Exactly one tile per write can straddle.
     #[serde(default)]
-    subcc_rekey_armed: bool,
+    pub(in crate::ppu) subcc_rekey_armed: bool,
     // First-tile (f1) prologue straddle: a mid-mode-3 SCX write that lands while
     // x==0 (the discard prologue, before any pixel has plotted) but AFTER the
     // first displayed tile has already been queued into the FIFO. The tile still
@@ -1780,7 +1742,7 @@ pub struct Ppu {
     // PushToFifo. DMG single-speed only (the CGB/DS prologue uses the
     // m3_arm_scx_full re-fetch path above).
     #[serde(default)]
-    prologue_rekey_armed: bool,
+    pub(in crate::ppu) prologue_rekey_armed: bool,
     // First-line (LY=0) sprite-shifted straddle (CGB SS, gap==1): on the line
     // after LCD-enable the fetcher runs a different warmup/dispatch phase, so a
     // left-edge sprite-fetch dot shifts the OLD->NEW scx boundary one tile later
@@ -1816,15 +1778,15 @@ pub struct Ppu {
     #[serde(default)]
     pub(in crate::ppu) internal_ly_val: u8,
     #[serde(default)]
-    sched_lycirq: u64,
+    pub(in crate::ppu) sched_lycirq: u64,
     #[serde(default)]
-    sched_m1irq: u64,
+    pub(in crate::ppu) sched_m1irq: u64,
     #[serde(default)]
-    sched_m2irq: u64,
+    pub(in crate::ppu) sched_m2irq: u64,
     #[serde(default)]
-    sched_m0irq: u64,
+    pub(in crate::ppu) sched_m0irq: u64,
     #[serde(default)]
-    sched_oneshot_statirq: u64,
+    pub(in crate::ppu) sched_oneshot_statirq: u64,
     // Remaining mode-3 fast dots: while > 0 (and the state is still
     // PixelTransfer), `step` skips its preamble — the STAT dispatch (no
     // event can come due inside the budget), the l154 window check (LY
@@ -1836,7 +1798,7 @@ pub struct Ppu {
     // Not serialized: deserializes to 0 = full preamble.
     #[serde(skip)]
     #[serde(default)]
-    fast_dots_left: u32,
+    pub(in crate::ppu) fast_dots_left: u32,
     // Post-invalidation hold: after any fast-span invalidation (a >=0xFE00
     // bus write or a delayed LCDC commit), run the FULL preamble for this
     // many further dots before the budget may recompute — the one-shot
@@ -1845,7 +1807,7 @@ pub struct Ppu {
     // land a few dots after the write that invalidated.
     #[serde(skip)]
     #[serde(default)]
-    fast_hold: u8,
+    pub(in crate::ppu) fast_hold: u8,
     // Cached lower bound of the 9 scheduled STAT/apply event slots consumed by
     // `dispatch_stat_events`, so the per-dot fast bail is a single compare
     // instead of a 9-way min. Invariant: always <= the true minimum (0 =
@@ -1854,12 +1816,12 @@ pub struct Ppu {
     // Deliberately NOT serialized: deserializes to 0 = dirty = safe.
     #[serde(skip)]
     #[serde(default)]
-    sched_min: u64,
+    pub(in crate::ppu) sched_min: u64,
     // Set when the m1 event flagged VBlank this frame so the render-machine
     // ly143->144 transition does NOT re-flag it (hardware has a single VBlank
     // source: the m1 event). Cleared when the m1 event re-arms for the next frame.
     #[serde(default)]
-    m1_vblank_fired: bool,
+    pub(in crate::ppu) m1_vblank_fired: bool,
     // DMG "line 154" STAT-write glitch (gbmicrotest stat_write_glitch_l154_d):
     // when the CPU writes FF41 (STAT) at the frame-wrap boundary (the LY 153->0
     // exit of VBlank, into the first line of the new frame) a hardware glitch on
@@ -1869,13 +1831,13 @@ pub struct Ppu {
     // frame-wrap, disarmed a few dots into line 0/1 so a normal mid-frame STAT
     // write never clears a legitimately-pending VBlank IRQ. DMG-only.
     #[serde(default)]
-    l154_vblank_glitch_window: bool,
+    pub(in crate::ppu) l154_vblank_glitch_window: bool,
     #[serde(default)]
-    lyc_irq: stat_irq::LycIrq,
+    pub(in crate::ppu) lyc_irq: stat_irq::LycIrq,
     #[serde(default)]
-    mstat_irq: stat_irq::MStatIrq,
+    pub(in crate::ppu) mstat_irq: stat_irq::MStatIrq,
     #[serde(default)]
-    stat_reg_committed: u8,
+    pub(in crate::ppu) stat_reg_committed: u8,
 
     // DMG palette registers delayed by one dot. A BGP/OBP write during mode 3
     // is resolved by the CPU before the four PPU dots of the write M-cycle are
@@ -1896,12 +1858,12 @@ pub struct Ppu {
     // (pre-write) value is held in `bgp_defer_hold` meanwhile. Phase-0 writes set
     // countdown 0 and are byte-identical to the plain one-dot latch. See `on_bgp_write`.
     #[serde(default)]
-    bgp_defer_hold: u8,
+    pub(in crate::ppu) bgp_defer_hold: u8,
     #[serde(default)]
-    bgp_defer_countdown: u8,
+    pub(in crate::ppu) bgp_defer_countdown: u8,
 
     #[serde(with = "fb_rle")]
-    fb_a: Box<[u8; FRAMEBUFFER_SIZE]>,
+    pub(in crate::ppu) fb_a: Box<[u8; FRAMEBUFFER_SIZE]>,
     #[serde(with = "fb_rle")]
     pub(in crate::ppu) fb_b: Box<[u8; FRAMEBUFFER_SIZE]>,
     /// SGB MASK_EN Freeze latch: the DMG shade frame captured at the first
@@ -2144,12 +2106,12 @@ pub struct Ppu {
     // resolved at mode-3 end (all writes known) by `resolve_bgp_spikes`, which paints the
     // glitch straight into the framebuffer. Reset at mode-3 start.
     #[serde(default)]
-    bgp_writes: Vec<(u64, u8, u8)>,
+    pub(in crate::ppu) bgp_writes: Vec<(u64, u8, u8)>,
     // Last mode-2 (OAM scan) BGP write (cc, value), carried across the mode-3-arm
     // bgp_writes clear and injected as a neighbor-only spike entry at mode-3 entry
     // (see on_bgp_write / the arm seed). None once consumed or if no mode-2 write.
     #[serde(default)]
-    bgp_mode2_pending: Option<(u64, u8)>,
+    pub(in crate::ppu) bgp_mode2_pending: Option<(u64, u8)>,
     #[serde(default)]
     pub(in crate::ppu) cgb_color_conversion: ColorCorrection,
     #[serde(skip, default)]
@@ -2459,199 +2421,14 @@ impl Ppu {
 
     // ---- Event-scheduled STAT IRQ model (hardware model) ----
 
-    pub(in crate::ppu) fn ly_counter(&self, mmio: &mmio::Mmio) -> stat_irq::LyCounter {
-        let ds = mmio.is_double_speed_mode();
-        // `abs_cc` is in machine cycles (advances by 1<<ds per dot). `time` is
-        // the machine-cycle clock at the next LY increment.
-        let dots_to_next_line = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as u64;
-        stat_irq::LyCounter {
-            ly: self.internal_ly() as u32,
-            time: self.abs_cc + (dots_to_next_line << ds as u32),
-            ds,
-        }
-    }
 
-    /// The LY counter as the CPU READ path must observe it —
-    /// sub-dot (master_cc) exact. At double speed the renderer's `abs_cc`/
-    /// `line_cycle` are advanced on the even-render-dot grid, which sits one
-    /// master_cc below the reference even line phase, so the bare `the LY time` (next-LY
-    /// master cc) runs 1 cc low and `line cycles = 456 - ((the LY time-cc)>>1)` reads 1
-    /// high. Carry the missing sub-dot here so the observed `the LY time`/`line cycles`/
-    /// LY/LYC-flag are master_cc-exact at DS. At single speed the bare phase is already
-    /// exact (no flooring), so the correction is DS-only; `lytime_no_plus1` (post
-    /// DS->SS-switch line) already drops the +1. Flag-OFF this is identical to
-    /// `ly_counter`. SCOPE: only the CPU-visible read observers call this; the
-    /// internal STAT-event SCHEDULE still keys off the un-corrected `ly_counter`
-    /// (its fire-cc anchors are re-anchored in Stages 2-4, not here).
-    pub(in crate::ppu) fn ly_counter_obs(&self, mmio: &mmio::Mmio) -> stat_irq::LyCounter {
-        let mut lc = self.ly_counter(mmio);
-        if lc.ds && !self.lytime_no_plus1 {
-            lc.time += 1;
-        }
-        lc
-    }
 
-    // The internal (clean) LY derived from the line clock, independent of the
-    // LY register's mid-line transients (line 153 ly=0, etc.).
-    fn internal_ly(&self) -> u8 {
-        self.internal_ly_val
-    }
 
-    /// Byte-exact hardware `mode-0 time` (master-cc) for the current line, given the
-    /// closed-form mode-3 length `m3_len` (= the cycles-until-xpos-167 length in dots).
-    /// mode-0 time = (p_now + ly_counter().time + 1) − ((456 − (m3_len + BASE)) << ds)
-    /// BASE = 84 (CGB SS+DS), 83 (DMG). `p_now + ly_counter().time` is the next-LY
-    /// master cc; the +1 corrects rustyboi's LY counter.time running one master-cc
-    /// below the hardware LY time. STAT-resolve boundary: mode3 iff `master_cc + 2 < mode-0 time`.
-    ///
-    /// `first_line` selects the first line after LCD enable: hardware seeds the PPU
-    /// at enable with `cycles = -(mode-3-start line cycle + 2)` (the LCDC-write handling), so the
-    /// first M3 begins TWO dots later than the normal-line m3-start anchor encoded
-    /// in BASE (which == `mode-3-start line cycle`). The mode-0 line-cycle is therefore
-    /// `m3_len + BASE + 2`. (`p_now + ly_counter().time` is enable-anchored on this
-    /// line — `the LCDC-write handling` reset `now = enable_cc`, `the LY counter.reset(0, enable_cc)`.)
-    fn m0_time_exact(&self, mmio: &mmio::Mmio, m3_len: u128, is_cgb: bool, first_line: bool) -> u64 {
-        let ds = mmio.is_double_speed_mode() as u32;
-        let base: i64 = if is_cgb { 84 } else { 83 };
-        let plus1 = self.ly_plus1();
-        let ly_time = self.p_now as i64 + self.ly_counter(mmio).time as i64 + plus1;
-        let m0_line_cycle = m3_len as i64 + base + if first_line { 2 } else { 0 };
-        (ly_time - ((456 - m0_line_cycle) << ds)).max(0) as u64
-    }
 
-    /// Arm `sched_m0irq` for the current line from the renderer's predicted
-    /// mode-0 start (`scheduled_mode0_dot`, a within-line dot). Converted to the
-    /// absolute clock. If no closed-form mode-0 dot is available (window/first
-    /// line), fall back to the m0 prediction from the m3 length.
-    fn arm_m0irq_for_current_line(&mut self, mmio: &mmio::Mmio, first_frame: bool) {
-        let is_cgb = mmio.is_cgb_features_enabled();
-        // The mode-0 (HBlank) STAT IRQ time is co-calibrated with the
-        // `ticks + m3_len + offset` mode-0 dot, NOT the exact STAT-resolve `mode-0 time`.
-        // The lazy-PPU rewrite re-derived `scheduled_mode0_dot` from the exact
-        // STAT-resolve mode-0 time (which the CPU read resolves at `cc + 2 < mode-0 time`),
-        // landing it 1-3 dots earlier than the eager mode-0 grid the m0 IRQ
-        // offset (M0IRQ_OFFSET) was tuned against. Reading `reported_mode0_dot`
-        // (= that exact dot) here armed the m0 IRQ early and broke the
-        // m2int_m0irq / m0enable / enable_display / vramw_m3end m0-IRQ clusters.
-        // Arm from the m3-length dot instead — the same anchor core-loop used —
-        // so the IRQ fires on the calibrated boundary again.
-        let mode0_within_line = {
-            let m3_len = self.compute_m3_length(mmio, is_cgb);
-            let offset = if is_cgb { CGB_MODE0_OFFSET } else { DMG_MODE0_OFFSET };
-            self.ticks as i64 + m3_len as i64 + offset as i64
-        };
-        let mut remaining = mode0_within_line - self.ticks as i64;
-        // VBlank (LY 144..153) has no mode 0 on the current line: the hardware
-        // xpos-166 advance time lands on the next *rendering* line's mode 0
-        // (line 0 of the following frame), far beyond the current VBlank. The
-        // `ticks + m3_len + offset` form above computes a bogus within-VBlank-line
-        // dot which would fire a spurious m0 STAT IRQ this frame (lycint152_m0irq).
-        // Carry the schedule forward to line 0: dots to the end of the current
-        // line, plus the full VBlank lines that follow, plus line-0's mode-0 dot
-        // offset (reuse `m3_len + offset` from above as the line-0 proxy).
-        let ly = self.internal_ly() as i64;
-        if ly >= stat_irq::LCD_VRES as i64 {
-            let last_line = (stat_irq::LCD_LINES_PER_FRAME - 1) as i64; // 153
-            let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
-            let line0_m0_offset = mode0_within_line - self.ticks as i64; // m3_len + offset
-            let dots_to_current_line_end = cpl - self.ticks as i64;
-            let full_vblank_lines = (last_line - ly) * cpl;
-            remaining = dots_to_current_line_end + full_vblank_lines + line0_m0_offset;
-        } else {
-            // The mode-0 STAT IRQ fires at the xpos-166 advance time, one xpos
-            // before the mode-0 time (xpos 167) the closed-form `m3_len` above tracks.
-            // For plain lines those differ by one dot (already folded into
-            // `M0IRQ_OFFSET`); when a window starts at WX=166 or a sprite sits at
-            // the right edge, the final xpos step carries the whole penalty and
-            // the IRQ fires that many dots earlier. Subtract that extra advance.
-            remaining -= self.m0irq_xpos166_advance(mmio, is_cgb);
-        }
-        let ds = mmio.is_double_speed_mode();
-        let mut off = M0IRQ_OFFSET;
-        if is_cgb && !ds && (mmio.read(SCX) & 0x07) == 2 {
-            off += M0IRQ_SCX2_CGB_OFFSET;
-        }
-        if first_frame && !is_cgb && !ds {
-            off += M0IRQ_DMG_FIRST_FRAME_OFFSET;
-        }
-        let dsf = 1i64 << ds as i32;
-        let abs = (self.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
-        // The IRQ-dispatch arm keeps the calibrated offset form (the faithful
-        // xpos-166-advance-time migration of THIS consumer is deferred — the
-        // per-dot dispatch phase is co-tuned with the consume-site `+ds /
-        // +cgb_ss_m0_anticip` anticipation). The faithful event cc is consumed
-        // independently by the halt-exit `<2` fixup via `m0_irq_event_cc_master`,
-        // captured at the m0 IRQ flag site.
-        self.sched_m0irq = abs;
-        self.stat_sched_touched();
-    }
 
-    /// FAITHFUL EVENTCC: the mode-0 STAT IRQ event time
-    /// (the xpos-166 advance time = the hardware m0
-    /// event time) in MASTER cc — the cc domain `master_cc()` /
-    /// `m0_time_master` / STAT-resolve `access_cc` share, so the halt-exit
-    /// `cc - event time < 2` halt-exit fixup compares like-for-like.
-    ///
-    /// Derived from the closed-form `m0_time_master` (= the xpos-167 advance time
-    /// in master cc): the m0 IRQ fires one xpos earlier, so subtract the 166->167
-    /// step cost `((1 + xpos166_advance) << ds)`. `None` when no closed-form master
-    /// exists (window mid-line / first line / VBlank), where no faithful event cc
-    /// is available and the halt-exit fixup is skipped.
-    pub(crate) fn m0_irq_event_cc_master(&self, mmio: &mmio::Mmio) -> Option<u64> {
-        if self.internal_ly() as u32 >= stat_irq::LCD_VRES {
-            return None;
-        }
-        let ds = mmio.is_double_speed_mode() as i64;
-        let is_cgb = mmio.is_cgb_features_enabled();
-        let adv = self.m0irq_xpos166_advance(mmio, is_cgb);
-        // m0_time_master carries the runtime sprite0-at-scx fine-scroll extra
-        // (see sprite0_scx_extra); the m0 STAT IRQ fires at the PREDICTOR time,
-        // so peel it back out here.
-        let spr0 = self.sprite0_scx_extra(mmio, is_cgb) << ds;
-        self.m0_time_master
-            .map(|m0t| (m0t as i64 - spr0 - ((1 + adv) << ds)).max(0) as u64)
-    }
 
-    /// Re-anchor the event-scheduled STAT/mode/LYC clocks to the new CPU speed.
-    /// Mirrors the hardware speed-change handling: the renderer's LCD position
-    /// (`line_cycle`/`internal_ly`) is in speed-independent dot units and stays
-    /// put, but every scheduled event time carried the old `ds` cc-factor, so
-    /// recompute them from the live `abs_cc` under the new speed.
-    pub(crate) fn speed_change(&mut self, mmio: &mmio::Mmio) {
-        if self.disabled || !self.lcdc_has(LCDCFlags::DisplayEnable) {
-            return;
-        }
-        self.reschedule_all_stat_events(mmio);
-        if self.sched_m0irq != stat_irq::DISABLED_TIME {
-            self.arm_m0irq_for_current_line(mmio, self.first_line_after_enable);
-        }
-    }
 
-    /// Advance the renderer by `dots` dots during the CGB STOP speed-switch
-    /// bridge. The hardware STOP handling advances the LCD to `cc + 8` at the OLD
-    /// (single) speed before re-anchoring at the new speed (the LCD speed change).
-    /// Our per-dot stepper realizes only `8 >> ds` of those dots through the 8
-    /// returned cycles, so this injects the remaining bridge dots so the LCD
-    /// lands on the same dot hardware does after the 0x20000-cycle window.
-    pub(crate) fn stop_bridge_advance(&mut self, mmio: &mut mmio::Mmio, dots: u32) {
-        for _ in 0..dots {
-            self.step_scheduled_stat_events(mmio);
-            // The bridge injects render dots the CPU's returned cycles did not
-            // cover, so the master cc does not advance for them. `step` derives
-            // `abs_cc = master_cc - p_now`; pull `p_now` back by one dot first so
-            // the derived clock still advances `1<<ds` this bridge step.
-            self.p_now = self.p_now.wrapping_sub(1 << mmio.is_double_speed_mode() as u32);
-            self.step(mmio);
-            self.step_lcdc_events(mmio);
-        }
-    }
 
-    /// Mark that a DS->SS speed switch just occurred, so the closed-form the LY time
-    /// drops its `+1` the LY counter correction (the whole-dot bridge already lands
-    /// the counter one master-cc high). See ENGINE_LAZY_PPU.md bug #2.
-    pub(crate) fn set_dsss_lytime_adjust(&mut self) {
-        self.lytime_no_plus1 = true;
-    }
 
     /// Register a NON-mode-3 (OAM/HBlank) DS->SS speed switch for the LY-read
     /// sub-dot phase accumulator. The hardware speed-change handling applies a
@@ -2667,604 +2444,24 @@ impl Ppu {
     pub(crate) fn bump_dsss_ly_total(&mut self) {
         self.dsss_ly_total_count += 1;
     }
-    pub(in crate::ppu) fn dsss_ly_total_par(&self) -> i64 {
-        (self.dsss_ly_total_count % 2) as i64
-    }
-    pub(crate) fn dsss_ly_phase_par(&self) -> i64 {
-        (self.dsss_ly_phase_count % 2) as i64
-    }
-    /// True once any post-STOP DS->SS switch has accumulated a sub-dot phase.
-    pub(crate) fn dsss_ly_phase_active(&self) -> bool {
-        self.dsss_ly_phase_count > 0
-    }
 
-    /// Latch the SS->DS-during-mode3 FF44 (LY) read phase advance. Consumed only
-    /// by `get_ly_reg_at_cc` to resolve the LY-register anticipation window against
-    /// the hardware re-anchored LY time (the renderer/STAT/m0 phase is unaffected).
-    pub(crate) fn set_ssds_mode3_ly_advance(&mut self) {
-        self.ssds_mode3_ly_advance = true;
-        self.ssds_mode3_frames = 0;
-    }
 
-    /// Advance the STAT/LINE-PHASE clock by ONE dot
-    /// WITHOUT moving the pixel-fetcher render latch (`self.ticks`/`self.x`/the
-    /// FIFO/the render state machine). This is the decoupling primitive:
-    /// `line_cycle` (the STAT/LY/ttnl phase clock) is normally welded to the renderer
-    /// inside `step` (both `line_cycle += 1` and `self.ticks += 1` per dot). A
-    /// faithful sub-dot STOP re-anchor needs to shift the STAT phase by
-    /// an ODD dot WITHOUT moving the mode-3 render latch. This
-    /// mirrors `step`'s STAT-phase region (the lines between `dispatch_stat_events`
-    /// and `update_window_y_latch`) exactly, but skips the `match self.state`
-    /// render machine and the `self.ticks += 1`. It is the line-phase HALF of the
-    /// lockstep that `step` runs as a whole.
-    ///
-    /// Caller contract (mirrors `stop_bridge_advance`'s per-dot prelude): pull
-    /// `p_now` back by one dot BEFORE calling so the derived `abs_cc` still
-    /// advances `1<<ds` for this STAT dot (the carry is a non-master-cc-advancing
-    /// bridge dot, same as the rendered bridge dots). `step_scheduled_stat_events`
-    /// / `step_lcdc_events` are run by the caller around it, identically to the
-    /// rendered-bridge per-dot loop, so the only difference from a bridge `step`
-    /// is the absence of render-latch motion.
-    fn step_stat_phase_only(&mut self, mmio: &mut mmio::Mmio) {
-        if self.disabled || !self.lcdc_has(LCDCFlags::DisplayEnable) {
-            return;
-        }
-        // --- STAT-phase region of `step` (no render match, no `ticks += 1`) ---
-        self.dispatch_stat_events(mmio);
-        self.abs_cc = mmio.master_cc().wrapping_sub(self.p_now);
-        self.line_cycle += 1;
-        if self.line_cycle >= stat_irq::LCD_CYCLES_PER_LINE {
-            self.line_cycle = 0;
-            self.internal_ly_val += 1;
-            if self.internal_ly_val as u32 >= stat_irq::LCD_LINES_PER_FRAME {
-                self.internal_ly_val = 0;
-            }
-        }
-        self.process_oam_reader_events(mmio);
-        let effective_ly = self.effective_ly_for_lyc_compare(mmio);
-        if mmio.read(LYC) == effective_ly {
-            mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) | (1 << 2));
-        } else {
-            mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2));
-        }
-        self.update_window_y_latch(mmio);
-    }
 
-    /// Register one DS->SS-during-mode3 STOP switch and
-    /// return how many STAT-phase carry dots to inject this switch (the increment
-    /// in `floor(count/2)`): every 2nd such switch injects ONE extra dot,
-    /// reproducing the accumulated reference `now -= 1` half-dot. Stop-count
-    /// invariant by construction (the carry depends only on the running count,
-    /// not on any single STOP's integer-cc). Returns 0 on the odd switches.
-    pub(crate) fn register_dsss_mode3_stop(&mut self) -> u32 {
-        let before = self.dsss_mode3_stop_count / 2;
-        self.dsss_mode3_stop_count += 1;
-        let after = self.dsss_mode3_stop_count / 2;
-        after - before
-    }
 
-    /// The decoupled STAT-phase carry as a bridge step. Advances the
-    /// STAT/line clock by `dots` dots (same per-dot prelude as
-    /// `stop_bridge_advance`: `step_scheduled_stat_events`, `p_now` pullback,
-    /// then the line-phase step, then `step_lcdc_events`) but the render latch
-    /// (`self.ticks`/`self.x`/FIFO/mode-3 fetch) stays PUT. With `dots == 0` this
-    /// is a no-op.
-    pub(crate) fn stat_phase_carry(&mut self, mmio: &mut mmio::Mmio, dots: u32) {
-        for _ in 0..dots {
-            self.step_scheduled_stat_events(mmio);
-            let dot_cc = 1i64 << mmio.is_double_speed_mode() as u32;
-            self.p_now = self.p_now.wrapping_sub(dot_cc as u64);
-            self.step_stat_phase_only(mmio);
-            self.step_lcdc_events(mmio);
-            // The STAT phase (line_cycle/abs_cc) just advanced one dot; the render
-            // latch did NOT. Record the divergence so the CPU-access visibility
-            // gate (`ppu_blocks` -> `render_carry_skew`) re-aligns a store to the
-            // un-carried fetcher position.
-            self.render_carry_skew_cc += dot_cc;
-        }
-    }
 
-    /// Recompute all scheduled IRQ event times from scratch at the current
-    /// `abs_cc` (used on LCD enable / LY-counter reset).
-    fn reschedule_all_stat_events(&mut self, mmio: &mmio::Mmio) {
-        let lc = self.ly_counter(mmio);
-        let cc = self.abs_cc;
-        let stat = self.stat_reg_committed;
-        self.lyc_irq.reschedule(&lc, cc);
-        self.sched_lycirq = self.lyc_irq.time;
-        self.sched_m1irq = stat_irq::mode1_irq_schedule(&lc, cc);
-        let m2 = stat_irq::mode2_irq_schedule(stat, &lc, cc);
-        self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off(mmio.is_double_speed_mode())) as u64 };
-        // m0irq is scheduled from the renderer's mode-0 prediction; (re)armed
-        // when entering pixel transfer. Leave as-is here.
-        self.stat_sched_touched();
-    }
 
-    /// Double-speed sub-dot step. At DS the CPU runs two M-cycles per displayed
-    /// pixel-dot; the full `step` runs on the even (render) M-cycle and advances
-    /// `abs_cc` by 2. This runs on the intervening odd M-cycle so STAT/LYC IRQ
-    /// events scheduled at an *odd* `abs_cc` fire at the true half-dot instead of
-    /// being rounded up to the next even render dot. It dispatches events at the
-    /// intermediate cc (`abs_cc - 1`, i.e. one M-cycle before the next render
-    /// dot's post-increment value) without advancing the renderer's clock.
-    #[inline]
-    pub(crate) fn step_subdot(&mut self, mmio: &mut mmio::Mmio) {
-        if self.disabled {
-            return;
-        }
-        // Bail without the abs_cc adjustment dance when no event is due at
-        // the odd half-dot: the dispatch fast path tests abs + 2 < sched_min,
-        // and the half-dot's abs is abs - 1, so abs + 1 < sched_min is the
-        // identical no-op condition.
-        if self.abs_cc + 1 < self.sched_min {
-            return;
-        }
-        self.step_subdot_slow(mmio);
-    }
 
-    fn step_subdot_slow(&mut self, mmio: &mut mmio::Mmio) {
-        // The preceding full `step` dispatched at the even cc N and advanced
-        // `abs_cc` to N+2 (the next render dot). The odd half-dot is cc N+1, one
-        // machine cycle earlier; dispatch any event due there, then restore.
-        self.abs_cc -= 1;
-        self.dispatch_stat_events(mmio);
-        self.abs_cc += 1;
-    }
 
-    /// Fire any STAT IRQ events whose scheduled time has arrived at the current
-    /// `abs_cc`. Called once per dot from `step` (and at the DS odd half-dot
-    /// from `step_subdot`).
-    ///
-    /// Fast path: none of the ~10 scheduled events can fire this dot. Every
-    /// consumer gates on `sched_cc <= cc + off` with `off <= 2` (the m1/m0
-    /// double-speed anticipation), and the wy/scy/scx apply blocks use off 0.
-    /// So if the cached earliest scheduled cc (`sched_min`, a lower bound of
-    /// the true 9-way min — see the field doc) is still more than 2 dots away,
-    /// the whole body is a no-op.
-    #[inline]
-    fn dispatch_stat_events(&mut self, mmio: &mut mmio::Mmio) {
-        if self.abs_cc + 2 < self.sched_min {
-            return;
-        }
-        self.dispatch_stat_events_slow(mmio);
-    }
 
-    /// Zero the cached scheduled-event lower bound so the next per-dot
-    /// dispatch recomputes it. Must be called by every path that can LOWER one
-    /// of the 9 slots (`wy2/wy1/scy/scx_apply_cc`, `sched_oneshot_statirq`,
-    /// `sched_m1irq/lycirq/m2irq/m0irq`); raise-only writes (to
-    /// DISABLED_TIME / later times) may skip it — a stale-LOW bound only costs
-    /// a redundant slow call, never a missed event.
-    #[inline]
-    pub(in crate::ppu) fn stat_sched_touched(&mut self) {
-        self.sched_min = 0;
-        self.fast_dots_left = 0;
-    }
 
-    /// Drop the mode-3 preamble fast budget. Called by the bus on any write
-    /// at or above 0xFE00 (OAM/IO — LY/LYC/STAT/WY/LCDC/IE/IF and the OAM
-    /// write-pending signal all live there), so the skipped preamble pieces
-    /// resume per-dot processing on the very next dot.
-    #[inline]
-    pub(crate) fn invalidate_fast_span(&mut self) {
-        self.fast_dots_left = 0;
-        self.fast_hold = 8;
-    }
 
-    /// Fresh mode-3 preamble fast budget in render dots: the sched_min slack
-    /// (margin 12 covers every dispatch anticipation offset and the DS
-    /// sub-dot), gated off entirely near line/frame transients.
-    fn mode3_fast_budget(&self, mmio: &mmio::Mmio) -> u32 {
-        if !(2..=152).contains(&self.internal_ly_val) || self.first_line_after_enable {
-            return 0;
-        }
-        let ds = mmio.is_double_speed_mode() as u32;
-        let abs_now = mmio.master_cc().wrapping_sub(self.p_now);
-        let slack = self.sched_min.saturating_sub(abs_now.saturating_add(12));
-        (slack >> ds).min(512) as u32
-    }
 
-    /// Lower bound, in MASTER cc, on the next cc at which the PPU can raise an
-    /// IF bit (STAT or VBlank). `sched_min` lower-bounds every scheduled
-    /// dispatch slot in abs-cc space (abs_cc = master - p_now); the 8-cc
-    /// margin covers the dispatch anticipation offsets (<= 2*ds + the sub-dot
-    /// half-step) with room to spare. The ly143->144 render-machine VBlank
-    /// fire lands ~3cc AFTER the m1 event, which is itself in the min, so it
-    /// is covered too. While the LCD is off the PPU raises nothing. A dirty
-    /// bound (sched_min == 0) yields a past cc, i.e. "no batching".
-    ///
-    /// `sched_m0irq` needs special care: unlike every other slot it is armed
-    /// mid-stream (at pixel-transfer entry), so while it is DISARMED with the
-    /// m0 STAT source enabled a fire is still possible later this line —
-    /// bound by the closed-form current-line mode-0 time. Once that time has
-    /// passed (we are in/past this line's HBlank, the slot already fired and
-    /// disarmed), the next possible m0 fire is next line's mode-0 entry: at
-    /// least (dots to next line start) + mode 2 (80) + minimal mode 3, kept
-    /// very conservative at +200 render dots past the line wrap. With no
-    /// closed-form anchor (window / first line) batching is refused outright.
-    pub(crate) fn next_stat_irq_lower_bound_master(&self, now: u64, ds: bool) -> u64 {
-        if self.disabled {
-            return u64::MAX;
-        }
-        let mut bound = self.sched_min.saturating_add(self.p_now);
-        if self.sched_m0irq == stat_irq::DISABLED_TIME
-            && self.stat_reg_committed & stat_irq::STAT_M0EN != 0
-        {
-            // The m0 slot is only armed mid-stream at the pixel-transfer
-            // transition (ticks 80/82 normal, 84/85 first-line-after-enable;
-            // every other arm site is CPU-write-driven, i.e. at a batch
-            // boundary). While the slot is disarmed with the m0 STAT source
-            // enabled, bound the batch to end 2+ dots before the earliest
-            // possible arm; inside the arm zone itself refuse to batch
-            // (single-step through it — the traced failure mode was treating
-            // t=78/79 as "past the arm" and wrapping a full line across this
-            // line's arm AND fire). Past the zone a disarmed slot means this
-            // line's fire already happened (or a VBlank line, where the real
-            // next arm is even later), so the next arm is next line's.
-            const ARM_LO: u64 = 78; // 2 before the earliest arm dot (80)
-            const ARM_HI: u64 = 88; // 2 past the latest arm dot (85, first line)
-            let t = (self.ticks as u64) % stat_irq::LCD_CYCLES_PER_LINE as u64;
-            let to_arm = if t < ARM_LO {
-                ARM_LO - t
-            } else if t < ARM_HI {
-                return 0;
-            } else {
-                (stat_irq::LCD_CYCLES_PER_LINE as u64 - t) + ARM_LO
-            };
-            bound = bound.min(now.saturating_add(to_arm << (ds as u32)));
-        }
-        bound.saturating_sub(8)
-    }
 
-    /// One-compare pre-gate for `skip_inert_dots`: only mode 0/1/2 interiors
-    /// can be inert, so mode-3 dots skip the full-call attempt entirely.
-    #[inline]
-    pub(crate) fn maybe_inert_state(&self) -> bool {
-        matches!(self.state, State::HBlank | State::VBlank | State::OAMSearch)
-    }
 
-    /// Fast-forward through inert HBlank/VBlank interior dots, where the whole
-    /// per-dot `step` body is provably bookkeeping: `ticks`/`line_cycle`
-    /// advance, the LYC compare rewrites an unchanged flag, the palette latch
-    /// re-reads unchanged registers, and the state arm does real work only at
-    /// the line edges. Returns RENDER dots consumed (0 = not skippable now).
-    ///
-    /// Soundness constraints (each maps to per-dot work that would otherwise
-    /// run):
-    /// - state is HBlank or VBlank with `ticks` in [8, 448): all state-arm
-    ///   actions live at ticks 455 (line advance / frame swap) and ticks 6 of
-    ///   line 153; the FF41 mode-2 anticipation at 453 and the window-Y latch
-    ///   checkpoints (1/450/454) and LYC next-line anticipation (454+) are
-    ///   outside the interior.
-    /// - internal LY in [2, 152]: excludes the line-153 LY-0 transient and
-    ///   the l154 glitch-window disarm checks on lines 0/1.
-    /// - no scheduled dispatch event can come due inside the span
-    ///   (`sched_min` bound with the same margin the dispatch bail uses), so
-    ///   skipping the per-dot dispatch calls skips only no-ops.
-    /// - LYC/STAT/palette registers cannot change inside the span (no CPU
-    ///   access boundary inside a quiet span) and `bgp_defer_countdown == 0`,
-    ///   so the per-dot rewrites are idempotent; the final state equals the
-    ///   per-dot outcome.
-    /// - the caller (the quiet-span loop) already excludes OAM-DMA, serial,
-    ///   the JOYP filter and the HDMA lockstep window, and guarantees no
-    ///   pending deferred HDMA writes; within an HBlank interior the HDMA
-    ///   period tracker sees no edge and no LY change, so skipped
-    ///   `step_hdma` calls are state-identical no-ops (a block fired at the
-    ///   mode-0 edge before the interior began).
-    /// - `abs_cc` is advanced with the skip: the CPU register-write hooks
-    ///   (`write_cc`) and the exact-cc override compares read it at the very
-    ///   next access boundary, before any real step would re-derive it.
-    pub(crate) fn skip_inert_dots(&mut self, mmio: &mut mmio::Mmio, max_render_dots: u32) -> u32 {
-        const INTERIOR_START: u32 = 8;
-        const INTERIOR_END: u32 = 448;
-        if self.disabled || self.bgp_defer_countdown > 0 || max_render_dots == 0 {
-            return 0;
-        }
-        // A pending delayed LCDC commit must land at its exact dot.
-        if !self.pending_lcdc_events.is_empty() {
-            return 0;
-        }
-        let mut interior = (INTERIOR_START, INTERIOR_END);
-        match self.state {
-            State::VBlank => {}
-            State::OAMSearch => {
-                // Mode-2 interior: the per-dot body is the every-2nd-dot OAM
-                // scan slot (batched below with identical per-slot work — the
-                // pushes ARE observable at a mid-mode-2 DMA-start boundary,
-                // so they must run) plus the same idempotent preamble. The
-                // tick-0/1 init and ly0 window checkpoint sit below the
-                // interior start; the pixel-transfer arm dot (80/82) and its
-                // snapshot rebuild sit past its end. A pending exact-cc
-                // OBJ-size override needs its per-dot/per-slot abs_cc
-                // resolution, so no batching then.
-                if self.first_line_after_enable || self.objsize_apply_cc != wy2_disabled() {
-                    return 0;
-                }
-                // A pending CPU OAM write must be consumed by
-                // `process_oam_reader_events` on the very next dot: its
-                // `change(cc)` cap anchors the snapshot walk position, which
-                // is cc-precise DURING the scan (gambatte late_spXX). A
-                // batch would consume it n dots late. (Mode 0/1 skips are
-                // immune: the walk is already capped at scan end there.)
-                if self.prev_dma_writing || mmio.oam_snoop_event_possible() {
-                    return 0;
-                }
-                let arm = if mmio.is_cgb_features_enabled() {
-                    CGB_PIXEL_TRANSFER_ARM_DOT as u32
-                } else {
-                    DMG_PIXEL_TRANSFER_ARM_DOT as u32
-                };
-                interior = (4, arm - 2);
-            }
-            State::HBlank => {
-                // With CGB HBlank DMA armed, a block can fire a dot or two
-                // INTO HBlank via the per-dot STAT-mode-edge fallback (window
-                // lines have no closed-form mode-0 anchor), so HBlank dots
-                // are only inert once this line's block has ALREADY fired
-                // (the rising edge is consumed; the falling edge and the LY
-                // change land past the interior) under a closed-form period
-                // anchor. VBlank has no mode-0 edges and stays skippable with
-                // HDMA armed.
-                if mmio.is_cgb_features_enabled()
-                    && (mmio.hdma_is_enabled() || mmio.hdma_req_pending())
-                    && (mmio.hdma_req_pending()
-                        || !mmio.hdma_block_fired_this_hblank()
-                        || self.m0_time_master.is_none())
-                {
-                    return 0;
-                }
-            }
-            _ => return 0,
-        }
-        if !(2..=152).contains(&self.internal_ly_val) {
-            return 0;
-        }
-        let t = self.ticks as u32;
-        if !(interior.0..interior.1).contains(&t) {
-            return 0;
-        }
-        // Event bound: render dots until the earliest scheduled event, in the
-        // same abs-cc space the dispatch compares in. `sched_min == 0`
-        // (dirty) yields no skip; the slow dispatch on the next real dot
-        // recomputes it.
-        let ds = mmio.is_double_speed_mode() as u32;
-        let abs_now = mmio.master_cc().wrapping_sub(self.p_now);
-        let event_slack = self.sched_min.saturating_sub(abs_now.saturating_add(8));
-        let to_event = event_slack >> ds;
-        let n = ((interior.1 - t) as u64)
-            .min(to_event)
-            .min(max_render_dots as u64);
-        if n == 0 {
-            return 0;
-        }
-        let n = n as u32;
-        // Mode-2: run the scan slots the skipped dots would have run, with
-        // the identical per-slot sequence (slot-size latch from the constant
-        // LCDC, visibility check + push, next-slot re-latch). One slot per
-        // even entry-tick in [t, t+n).
-        if matches!(self.state, State::OAMSearch) {
-            let slots = ((t + n).div_ceil(2)) - (t.div_ceil(2));
-            for _ in 0..slots {
-                if self.current_oam_sprite_index >= OAM_SPRITE_COUNT {
-                    break;
-                }
-                let idx = self.current_oam_sprite_index;
-                self.scan_slot_large[idx] = self.scan_obj_size_large;
-                self.check_single_sprite_for_scanline(mmio, idx);
-                self.current_oam_sprite_index += 1;
-                self.scan_obj_size_large =
-                    self.lcdc_has(LCDCFlags::SpriteSize);
-            }
-        }
-        self.ticks += n as u128;
-        self.line_cycle += n;
-        // Keep abs_cc exact through the skip: the CPU write hooks anchor
-        // their delayed applies on it at the next access boundary.
-        self.abs_cc = self.abs_cc.wrapping_add((n as u64) << ds);
-        // The palette latch would have re-read the (unchanged) registers each
-        // dot; leave it equal to the per-dot outcome.
-        self.bgp_delayed = mmio.ppu_io_reg(BGP);
-        self.obp0_delayed = mmio.ppu_io_reg(OBP0);
-        self.obp1_delayed = mmio.ppu_io_reg(OBP1);
-        n
-    }
 
-    /// Conservative count of MASTER-cc dots until the PPU's frame wrap (the
-    /// ly153->0 frame swap), minus an 8-dot safety margin so the caller's
-    /// batch always ends short of the wrap and the swap dot itself resolves
-    /// under per-dot stepping (frame-loop return points stay dot-exact).
-    /// While the LCD is off there is no wrap (the caller's global cap
-    /// bounds the batch instead).
-    pub(crate) fn dots_until_frame_wrap_conservative(&self, ds: bool) -> u64 {
-        if self.disabled {
-            return u64::MAX;
-        }
-        let pos = self.internal_ly_val as u32 * stat_irq::LCD_CYCLES_PER_LINE + self.line_cycle;
-        let total = stat_irq::LCD_LINES_PER_FRAME * stat_irq::LCD_CYCLES_PER_LINE;
-        (total.saturating_sub(pos + 8) as u64) << (ds as u32)
-    }
 
-    fn dispatch_stat_events_slow(&mut self, mmio: &mut mmio::Mmio) {
-        let ds = mmio.is_double_speed_mode();
-        let cc = self.abs_cc;
 
-        // Disabled slots hold huge sentinels (u64::MAX / DISABLED_TIME), so the
-        // min naturally excludes them.
-        let min_sched = self
-            .wy2_apply_cc
-            .min(self.wy1_apply_cc)
-            .min(self.wy_recheck_cc)
-            .min(self.scy_apply_cc)
-            .min(self.scx_apply_cc)
-            .min(self.sched_oneshot_statirq)
-            .min(self.sched_m1irq)
-            .min(self.sched_lycirq)
-            .min(self.sched_m2irq)
-            .min(self.sched_m0irq);
-        if cc + 2 < min_sched {
-            self.sched_min = min_sched;
-            return;
-        }
 
-        if self.wy2_apply_cc != wy2_disabled() && self.wy2_apply_cc <= cc {
-            self.wy2 = self.wy2_pending;
-            self.wy2_apply_cc = wy2_disabled();
-        }
-        if self.wy1_apply_cc != wy2_disabled() && self.wy1_apply_cc <= cc {
-            self.wy1 = self.wy1_pending;
-            self.wy1_apply_cc = wy2_disabled();
-        }
-        if self.wy_recheck_cc != wy2_disabled() && self.wy_recheck_cc <= cc {
-            self.wy_recheck_cc = wy2_disabled();
-            self.run_wy_recheck(mmio.is_cgb(), mmio.is_cgb_features_enabled(), ds);
-        }
-        if self.scy_apply_cc != wy2_disabled() && self.scy_apply_cc <= cc {
-            self.scy_delayed = self.scy_pending;
-            self.scy_apply_cc = wy2_disabled();
-        }
-        if self.scx_apply_cc != wy2_disabled() && self.scx_apply_cc <= cc {
-            self.scx_delayed = self.scx_pending;
-            self.scx_apply_cc = wy2_disabled();
-        }
-
-        if self.sched_oneshot_statirq <= cc {
-            mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_LYC);
-            mmio.request_interrupt(registers::InterruptFlag::Lcd);
-            self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
-        }
-        // Order matches the hardware next-memory-event priority for ties.
-        // The m1 (VBlank) event (frame_cycle 144*456-2, an even `abs_cc`) is observed
-        // two ways at double speed: a CPU FF0F read snapshots IF pre-tick (the snapshot
-        // is taken BEFORE this M-cycle's dispatch, so an event at cc == read_cc fires
-        // one dispatch too late to be seen — hardware processes events <= cc before
-        // read(0xFF0F,cc) returns; needs +2*ds to land at-or-before the read cc), and
-        // the VBlank IRQ is *delivered* by the CPU service path (needs the true event
-        // cc). The read-snapshot brackets only exist with the m1-STAT source enabled
-        // (STAT bit4: lycint143_m1irq `_2`/`_3`, m1irq_disable `_2`); when it is OFF
-        // (e.g. the vblankirq retrigger tests, STAT=0x40) the VBlank IRQ-delivery
-        // timing dominates and the extra dot delivers the IRQ too early. Anticipate by
-        // 2*ds only when m1-STAT is enabled, else by the half-dot +ds the LYC=LY/mode-0
-        // events also carry. DS-only (ds=0 leaves the single-speed phase byte-identical).
-        let m1en = self.stat_reg_committed & (1 << 4) != 0;
-        let m1_anticip = if m1en { 2 * ds as u64 } else { ds as u64 };
-        if self.sched_m1irq <= cc + m1_anticip {
-            let stat = self.stat_reg_committed;
-            if self.mstat_irq.do_m1_event(stat) {
-                mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_M1);
-                mmio.request_interrupt(registers::InterruptFlag::Lcd);
-            }
-            // The hardware VBlank interrupt (IF bit 0) and the mode-1 STAT IRQ both
-            // fire from the SAME LY-counter LY=144 event:
-            // bit 0 (VBlank) ALWAYS, bit 1 (STAT) only when the m1 condition holds.
-            // The event fires at frame_cycle 144*456-2 (line_cycle 454 of LY=143),
-            // ~3cc BEFORE rustyboi's render-machine VBlank (the HBlank ly143->144
-            // line transition at line_cycle 455/0). A CPU IF read landing in that
-            // gap saw the STAT bit but missed VBlank (the m1irq `_2`/`_3` bracket
-            // halves: out0 vs the correct out3, outE2 vs outE3). Flag VBlank here
-            // at the faithful m1 event cc so both bits land coincident as on hardware;
-            // the render machine's later fire is idempotent (same frame OR).
-            if self.internal_ly_val >= 143 {
-                mmio.request_interrupt(registers::InterruptFlag::VBlank);
-                // Mark so the render-machine ly143->144 transition does not re-flag
-                // VBlank after a CPU IF-write cleared it (hardware: single VBlank
-                // source). The flag covers the gap between this event (line_cycle
-                // 454) and the render transition (line_cycle 455/0).
-                self.m1_vblank_fired = true;
-            }
-            self.sched_m1irq = self.sched_m1irq
-                .wrapping_add((stat_irq::LCD_CYCLES_PER_FRAME) << ds as u32);
-        }
-        if self.sched_lycirq <= cc + ds as u64 {
-            let lc = self.ly_counter(mmio);
-            if self.lyc_irq.do_event(&lc) {
-                mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_LYC);
-                mmio.request_interrupt(registers::InterruptFlag::Lcd);
-            }
-            self.sched_lycirq = self.lyc_irq.time;
-        }
-        if self.sched_m2irq <= cc {
-            self.do_mode2_irq_event(mmio, ds);
-        }
-        // The mode-0 (HBlank) STAT IRQ schedules at an odd `abs_cc` (a half-dot)
-        // at double speed; the per-dot dispatch flags it one M-cycle late, which
-        // pushes it across a CPU instruction boundary (≈4cc service delay).
-        // Anticipating by `ds` dots lands it on the boundary hardware services at
-        // — the same half-dot sub-dot fix applied to the LYC=LY IRQ above.
-        //
-        // On CGB single speed the per-dot dispatch additionally flags the m0 IRQ one
-        // dot after the hardware xpos-166 advance time (= mode-0 time-1): the IRQ is
-        // delivered at the mode-3->0 transition dot rather than one xpos before it.
-        // Measured byte-exact via cctracer (m2int_m0irq_scx3 fires at rel+2 from the
-        // IF-clear write M-cycle start vs the hardware rel+1; DMG is already at rel+1).
-        // Anticipate by one dot on CGB SS so the m0 IRQ flags at mode-0 time-1, matching
-        // the (already exact) m2/LYC phase. Fixes 10sprites/ly0/wxA5 m0irq and the
-        // CGB m2int_m0irq_*_ifw IF-clear-vs-m0 ordering.
-        let cgb_ss_m0_anticip = (!ds && mmio.is_cgb_features_enabled()) as u64;
-        if self.sched_m0irq <= cc + ds as u64 + cgb_ss_m0_anticip {
-            let stat = self.stat_reg_committed;
-            let ly = self.internal_ly() as u32;
-            // FAITHFUL EVENTCC: capture this line's m0 IRQ event cc
-            // (the xpos-166 advance time) BEFORE the mutable IF-flag borrow, so
-            // the halt-exit `<2` fixup can read the cc the IF bit was raised at
-            // (hardware flags the m0 STAT IRQ at its m0 event time).
-            let m0_event_cc = self.m0_irq_event_cc_master(mmio);
-            let fired = self.mstat_irq.do_m0_event(ly, stat, self.lyc_irq.lyc_reg_src());
-            if fired {
-                mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_M0);
-                mmio.request_interrupt(registers::InterruptFlag::Lcd);
-                mmio.set_pending_m0_irq_fire_cc(m0_event_cc);
-            }
-            // m0irq re-arm happens at next pixel-transfer entry.
-            self.sched_m0irq = stat_irq::DISABLED_TIME;
-        }
-
-        // Refresh the cached fast-bail bound from the post-fire schedule.
-        self.sched_min = self
-            .wy2_apply_cc
-            .min(self.wy1_apply_cc)
-            .min(self.wy_recheck_cc)
-            .min(self.scy_apply_cc)
-            .min(self.scx_apply_cc)
-            .min(self.sched_oneshot_statirq)
-            .min(self.sched_m1irq)
-            .min(self.sched_lycirq)
-            .min(self.sched_m2irq)
-            .min(self.sched_m0irq);
-    }
-
-    fn m2_off(_ds: bool) -> i64 {
-        // DS and SS converged on -1 after the double-speed STAT sub-dot step
-        // (step_subdot) gave the IRQ model true odd-cc resolution.
-        M2IRQ_OFFSET
-    }
-
-    fn do_mode2_irq_event(&mut self, mmio: &mut mmio::Mmio, ds: bool) {
-        // doMode2IrqEvent: the LY used is the *next* line's LY if the m2 event
-        // is within 16 cycles of the ly increment.
-        let lc = self.ly_counter(mmio);
-        let near_ly_inc = lc.time.saturating_sub(self.sched_m2irq) < 16;
-        let ly = if near_ly_inc {
-            if lc.ly == stat_irq::LCD_LINES_PER_FRAME - 1 { 0 } else { lc.ly + 1 }
-        } else {
-            lc.ly
-        };
-        let stat = self.stat_reg_committed;
-        let fired = self.mstat_irq.do_m2_event(ly, stat, self.lyc_irq.lyc_reg_src());
-        if fired {
-            mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_M2);
-            mmio.request_interrupt(registers::InterruptFlag::Lcd);
-            // FAITHFUL HALT-EXIT: a halted CPU wakes at this exact cc; the DMG
-            // halt-exit fixup (sm83.rs) needs the m2 event time to apply the
-            // real +4 (`cc - event time < 2`).
-            mmio.set_last_m2_irq_fire_cc(mmio.master_cc());
-            // Record the m2-event LY so the CGB halt-exit +4 stall (sm83.rs) can
-            // distinguish a rendering-line OAM wake (ly 0..143, intr_2) from the
-            // VBlank-entry mode-2 quirk wake (ly 144, vblank_stat_intr).
-            mmio.set_last_m2_irq_ly(ly as u8);
-        }
-        let delta = stat_irq::mode2_reschedule_delta(ly, stat, ds);
-        self.sched_m2irq = self.sched_m2irq.wrapping_add(delta);
-    }
 
     // Window-Y activation latch. Hardware compares LY against WY at three fixed
     // checkpoints per frame; once any comparison hits, the window is armed for the
@@ -3273,7 +2470,7 @@ impl Ppu {
     // the prior line's HBlank at line cycles 450 (compare LY) and 454 (compare
     // LY+1). WX only decides where the armed window begins drawing, not whether it
     // arms; this handles the Y side.
-    fn update_window_y_latch(&mut self, mmio: &mmio::Mmio) {
+    pub(in crate::ppu) fn update_window_y_latch(&mut self, mmio: &mmio::Mmio) {
         if self.disabled {
             return;
         }
@@ -3615,7 +2812,7 @@ impl Ppu {
     /// (the xpos-167 advance time) closed form. Zero for plain BG lines, so
     /// the calibrated `M0IRQ_OFFSET` arm is unchanged; non-zero only when a
     /// window starts at WX=166 or a sprite sits at the right edge.
-    fn m0irq_xpos166_advance(&self, mmio: &mmio::Mmio, is_cgb: bool) -> i64 {
+    pub(in crate::ppu) fn m0irq_xpos166_advance(&self, mmio: &mmio::Mmio, is_cgb: bool) -> i64 {
         let len167 = self.compute_m3_length_to_target(mmio, is_cgb, 167) as i64;
         let len166 = self.compute_m3_length_to_target(mmio, is_cgb, 166) as i64;
         (len167 - len166 - 1).max(0)
@@ -3699,7 +2896,7 @@ impl Ppu {
     /// dot later. Applied
     /// to `m0_time_master` (the renderer/STAT boundary) and subtracted back out in
     /// `m0_irq_event_cc_master`. Mooneye intr_2_mode0_timing_sprites_scx{1..4}.
-    fn sprite0_scx_extra(&self, mmio: &mmio::Mmio, is_cgb: bool) -> i64 {
+    pub(in crate::ppu) fn sprite0_scx_extra(&self, mmio: &mmio::Mmio, is_cgb: bool) -> i64 {
         let obj_enabled = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
         if !(obj_enabled || is_cgb) {
             return 0;
@@ -3742,437 +2939,20 @@ impl Ppu {
         self.cgbp_block_start_cc = None;
     }
 
-    /// Re-evaluate the LYC=LY flag and the STAT edge after a CPU write to
-    /// FF40 (LCDC), FF41 (STAT), or FF45 (LYC). Called by the host between
-    /// CPU instructions when `Mmio::take_stat_register_write_pending`
-    /// returns true. The mid-instruction write itself becomes visible to the
-    /// PPU on its next dot step; this hook closes the gap where enabling a
-    /// STAT source whose underlying condition is already true must produce
-    /// an immediate rising edge.
-    /// Record the sub-PPU-dot parity of the CPU write about to be resolved, so
-    /// the STAT/LYC change hooks can place the event on the correct half-dot at
-    /// double speed. `phase` is the persistent CPU T-phase at write resolution.
-    pub(crate) fn set_write_subdot(&mut self, phase: u64) {
-        self.write_subdot = (phase % 2) as u8;
-    }
 
-    /// FF4A (WY) write hook. Hardware applies the write to `wy2` (the value the
-    /// window-Y gate reads) delayed by `6 - double_speed` cc after the write.
-    /// Schedule that delayed apply against the resolving write's absolute clock.
-    pub(crate) fn on_wy_write(&mut self, value: u8, mmio: &mmio::Mmio) {
-        if self.disabled {
-            self.wy2 = value;
-            self.wy2_apply_cc = wy2_disabled();
-            self.wy1 = value;
-            self.wy1_apply_cc = wy2_disabled();
-            return;
-        }
-        let ds = mmio.is_double_speed_mode();
-        let cc = self.write_cc(ds);
-        // On a hardware WY change the delayed WY value (the value
-        // the window-enable master checkpoints read) applies at cc + 1 + cgb. Schedule that delayed
-        // apply so a mid-frame WY write reaches the window-enable master latch with the same
-        // phase hardware uses, rather than the live (immediate) mmio value.
-        let cgb = mmio.is_cgb_features_enabled() as i64;
-        let wy1_delay = WY1_DELAY + cgb;
-        self.wy1_pending = value;
-        self.wy1_apply_cc = cc + wy1_delay.max(0) as u64;
-        // wy2 apply delay (cc) past the write, swept against the late_wy suite:
-        // CGB 7, DMG 4 (-ds at double speed). The split reflects the differing
-        // M3-start / fine-scroll phase between the two cores.
-        let base = if mmio.is_cgb_features_enabled() {
-            WY2_DELAY_CGB
-        } else {
-            WY2_DELAY_DMG
-        };
-        let delay = (base - ds as i64).max(0) as u64;
-        self.wy2_pending = value;
-        self.wy2_apply_cc = cc + delay;
-        self.arm_wy_recheck(cc, ds);
-        self.stat_sched_touched();
-    }
 
-    /// Arm the hardware's scheduled window-Y comparison after a WY or LCDC
-    /// store. The comparator does not only run at the fixed per-line
-    /// checkpoints (see `update_window_y_latch`): a store re-runs it on the
-    /// next 4-dot fetch-grid boundary, so a WY value that equals the current
-    /// line for only a couple of M-cycles still arms the window for the rest
-    /// of the frame. Skipped once the latch is set (the comparison is sticky,
-    /// so a re-run can only ever set it again).
-    pub(in crate::ppu) fn arm_wy_recheck(&mut self, cc: u64, ds: bool) {
-        if self.disabled || self.window_y_triggered {
-            return;
-        }
-        // 4 dots (8 cc at double speed) after the store, quantized onto the
-        // grid the comparator runs on.
-        let step = 4u64 << (ds as u32);
-        self.wy_recheck_cc = cc + step - (cc % step);
-    }
 
-    /// Run a scheduled window-Y comparison (see `arm_wy_recheck`).
-    fn run_wy_recheck(&mut self, cgb_hw: bool, cgb_features: bool, ds: bool) {
-        // Double speed re-phases the comparison onto a different sub-dot of
-        // the fetch grid (SameBoy quantizes it with `wy_check_modulo + 6`
-        // there against `+ 0` in CGB single speed), and rustyboi's CGB
-        // double-speed write-vs-LCD phase at the line tail sits several dots
-        // off SameBoy's, so the store dot itself is not adjudicable. Left
-        // unmodelled rather than approximated (gambatte late_wy_*_ds_*).
-        if cgb_hw && ds {
-            return;
-        }
-        if self.disabled
-            || self.window_y_triggered
-            || !self.lcdc_has(LCDCFlags::WindowDisplayEnable)
-        {
-            return;
-        }
-        // The comparison value is the line counter as the comparator sees it,
-        // which is not yet valid in the first dots of a line (hardware feeds
-        // it an out-of-range value there, so no match is possible).
-        if self.ticks < WY_RECHECK_LY_VALID_DOT {
-            return;
-        }
-        // A CGB single-speed store whose scheduled comparison lands AFTER the
-        // window's start column has already been fetched does not arm the
-        // window at all: on real cgb04c the mid-frame comparator has no later
-        // checkpoint this frame, so the window never appears (gambatte
-        // late_wy_* `_2`/`_3`, real silicon). SameBoy's model arms it sticky
-        // and would show the window on the next line, which cgb04c does not --
-        // this suppression tracks the silicon, not SameBoy. The boundary is the
-        // window's fetch-start dot: a WX>=7 window draws from x = WX-7 after the
-        // first BG tile fill (`warmup + 8 + (WX-7)` past the mode-3 arm); a WX<7
-        // window takes the stream over at x == 0 with no BG-fill (`warmup`). The
-        // SCX fine-scroll discard is consumed WITHIN the first fetch step, so --
-        // unlike the window-ENABLE commit dot in `set_lcdc_visible`, compared
-        // against the raw write dot -- it does not shift this grid-quantized
-        // boundary for scx&7 <= 4 (the 4-dot-quantized recheck dot already
-        // absorbs the sub-tile offset). scx&7 == 5 is the exception: its
-        // window-tile fetch runs a dot later in the mode-3 dispatch AND its
-        // whole recheck grid lands one 4-dot step later, so the arm/suppress
-        // boundary tracks it a full step out. Derived from the cgb04c
-        // late_wy_FFto2_ly2_scx{2,3,5} oracles (real silicon): scx2/3 suppress
-        // from the same dot as scx0, scx5 one grid step later.
-        if cgb_hw && self.state == State::PixelTransfer {
-            let wx = self.m3_scheduled_wx as i64;
-            let warmup = if cgb_features {
-                CGB_PIXEL_TRANSFER_WARMUP as i64
-            } else {
-                DMG_PIXEL_TRANSFER_WARMUP as i64
-            };
-            let scx5_step = if wx <= 7 && (self.m3_arm_scx & 7) == 5 { 4 } else { 0 };
-            let commit_dot = self.m3_arm_dot as i64
-                + warmup
-                + if wx >= 7 { 8 + (wx - 7) } else { 0 }
-                + scx5_step
-                - 1;
-            if (self.ticks as i64) >= commit_dot {
-                return;
-            }
-        }
-        // The scheduled comparison reads the value the store itself wrote --
-        // it is that store that schedules it, and the comparator is fed WY
-        // directly. `wy1`'s couple-of-cc apply delay governs only the periodic
-        // checkpoints, and a store landing late on the 4-dot grid gets its
-        // re-check before that delay has elapsed.
-        let wy = if self.wy1_apply_cc != wy2_disabled() { self.wy1_pending } else { self.wy1 };
-        if wy == self.wy_comparator_ly(cgb_hw, ds) {
-            self.window_y_triggered = true;
-        }
-    }
 
-    /// Line value the window-Y comparator sees right now.
-    ///
-    /// A CGB PPU in single speed feeds the comparator the RAW line counter,
-    /// which has already advanced across the line tail; every other
-    /// configuration (pre-CGB, and a CGB in double speed) feeds it the same
-    /// lagging LY-compare value the LYC comparator uses, which still holds the
-    /// previous line's number there. SameBoy `Core/display.c` `wy_check`:
-    /// `comparison = current_line`, overridden by `ly_for_comparison` only
-    /// when `(!GB_is_cgb(gb) || gb->cgb_double_speed)`.
-    ///
-    /// The two line-tail checkpoints in `update_window_y_latch` bracket the
-    /// DMG advance (450 compares `ly`, 454 compares `ly + 1`); the CGB advance
-    /// is one M-cycle earlier, at 450. Adjudicated against SameBoy CGB-C/DMG
-    /// with the WY store swept through the line tail an M-cycle at a time:
-    /// both cores stop arming one step apart, and at the step in between
-    /// SameBoy reports `current_line = ly + 1` while `ly_for_comparison` is
-    /// still `ly` (gambatte late_wy_* `_2` variants, real cgb04c/dmg08).
-    fn wy_comparator_ly(&self, cgb_hw: bool, ds: bool) -> u8 {
-        let ly = self.internal_ly();
-        if !cgb_hw || ds || self.ticks < CGB_WY_RAW_LY_INC_DOT {
-            return ly;
-        }
-        if ly as u32 + 1 >= stat_irq::LCD_LINES_PER_FRAME { 0 } else { ly + 1 }
-    }
 
-    /// FF47 (BGP) write hook. The CPU readback is immediate (handled by mmio), but
-    /// the rendered BG palette mapping must change at the exact pixel being drawn
-    /// `MID_M3_PAL_LATENCY` columns after the write. Record
-    /// the change keyed by the display column it first becomes visible at; the
-    /// per-column draw resolves it via `bgp_at`. Only while pixel transfer is active
-    /// for this line — a write outside mode 3 just lands in the seed at the next
-    /// mode-3 entry. Steady-state (no mid-mode-3 write) is unaffected.
-    pub(crate) fn on_bgp_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
-        // A BGP write in the OAM scan (mode 2) just before mode 3 is the leading edge
-        // of a two-write spike pair when a mode-3 write follows within the cadence
-        // window: it settles the glitch palette so the mode-3 partner's transition
-        // paints a visible spike (e.g. a $FF write in mode 2 with its restore at
-        // col 1 in mode 3). Stash it (survives the mode-3-arm
-        // bgp_writes clear); it is injected neighbor-only at mode-3 entry and
-        // discarded by the cadence gate if no mode-3 partner lands within
-        // BGP_SPIKE_CADENCE_CC.
-        if self.state == State::OAMSearch && !_mmio.is_cgb() && !self.disabled {
-            self.bgp_mode2_pending = Some((self.abs_cc, value));
-        }
-        if self.state != State::PixelTransfer || self.disabled {
-            return;
-        }
-        let lat = self.bgp_apply_latency(_mmio);
-        // DMG sub-M-cycle phase hold: for a write whose store lands later in the M-cycle
-        // (`master_cc % 4` != 0), the DMG per-dot latch (`bgp_delayed`) must keep the old
-        // value for `lat - 1` extra dot-refreshes so the new palette first colors the
-        // column `self.x + lat` (not `self.x + 1`). Phase-0 writes leave countdown 0 and
-        // are unchanged. CGB does not use `bgp_delayed` (it resolves BGP per column from
-        // `bgp_history`), so this is DMG-only.
-        if !_mmio.is_cgb() {
-            let extra = (lat - bgp_latency(false)).max(0) as u8;
-            if extra > 0 {
-                self.bgp_defer_hold = self.bgp_delayed;
-                self.bgp_defer_countdown = extra;
-            }
-        }
-        // DMG mid-mode-3 palette-write glitch (see `bgp_writes`): record this write's
-        // apply column, `old | new` glitch value, and cc. Whether it actually spikes a
-        // pixel (the TWO-WRITE cadence gate) is resolved at mode-3 end in
-        // `resolve_bgp_spikes`, once all of the line's writes are known. Capture the old
-        // (settled) value BEFORE recording the new one in the history.
-        // A prologue write (SCX-discard warmup) does not paint its own spike, but
-        // on hardware it still forms the leading half of a two-write spike cadence:
-        // its restore partner (recorded below at a visible column) must find it as a
-        // neighbor or the spike vanishes (e.g. a $FF write at x=0 during the SCX
-        // discard, restore at x=4 paints the visible black pixel).
-        // Record it with a never-painted victim column (>=160) so it is a cadence
-        // neighbor only.
-        if !_mmio.is_cgb() && self.in_previsible_prologue() {
-            self.bgp_writes.push((self.abs_cc, 0xFF, value));
-        }
-        if !_mmio.is_cgb() && !self.in_previsible_prologue() {
-            // The spike's victim is the pixel POPPING at the write's apply dot.
-            // When a sprite fetch has the pipeline stalled across that dot no
-            // pixel pops — the glitched palette transition collides with
-            // nothing and there is no visible spike (a RESTORE landing inside a
-            // sprite stall must not paint the first post-stall column). The
-            // write is still RECORDED (victim 0xFF, never painted) so its
-            // partner keeps its cadence neighbor. On stall-free lines the
-            // victim is exactly `self.x + lat` (the old column model).
-            let stall = self.sprite_fetch_stall as i32;
-            // Pending SCX discard: at x==0 the first display column has not popped
-            // while pixels remain to be discarded (m3_pixels_discarded <
-            // m3_discard_target). The write's victim pixel is one of those discarded
-            // pixels, so no visible spike lands — record it neighbor-only (a restore
-            // firing mid-discard).
-            let discarding = self.x == 0 && self.m3_pixels_discarded < self.m3_discard_target.max(0) as u8;
-            let col = if stall <= lat && !discarding {
-                (self.x as i32 + lat - stall).clamp(0, 255) as u8
-            } else {
-                0xFF
-            };
-            let old = self.bgp_history.last().map(|&(_, v)| v).unwrap_or(self.bgp_delayed);
-            self.bgp_writes.push((self.abs_cc, col, old | value));
-        }
-        let boundary = self.pal_write_boundary(lat);
-        Self::push_pal_history(&mut self.bgp_history, boundary, value);
-        // Dot-keyed history for the CGB / DMG-compat BG path: the write applies at
-        // its own dot; each pixel samples it at its (stall-delayed) pop dot.
-        let apply = self.pal_write_apply_tick(lat);
-        Self::push_pal_dot_history(&mut self.bgp_dot_history, apply, value);
-    }
 
-    // Display-column latency (dots) for a mid-mode-3 BGP write. This hook fires at the
-    // write M-cycle's START, but the DMG store's bus-write lands at a later sub-M-cycle
-    // T-cycle, so the change reaches the displayed column a phase-dependent number of
-    // dots after `self.x`. The phase is the write's `master_cc % 4`:
-    // - phase 0 -> +1 (the baseline). Ordinary one-write-per-line palette streams
-    // land here.
-    // - later phases add `phase - 1` more dots: a write whose M-cycle starts deeper in
-    // the pixel-clock grid latches proportionally later. A tight
-    // `LD A,(HL+); LDFF (C),A` gradient write lands at phase 3 (+3 total),
-    // 2 columns past the phase-0 baseline.
-    // CGB keeps its own 2-dot latency; no phase term (the CGB fetcher samples the
-    // palette-RAM pipeline at a fixed stage).
-    fn bgp_apply_latency(&self, mmio: &mmio::Mmio) -> i32 {
-        if mmio.is_cgb() {
-            // CGB-D/E samples the BG palette one dot earlier than CGB-C: CGB-E
-            // takes the DMG 1-dot latency while CGB-B/C keep 2.
-            //
-            // AGB lands on the CGB-B/C side because the bare `is_cgb_de()` is
-            // false for it. That placement is INHERITED, not measured: BGP
-            // latency is outside the four families `Mmio::set_cgb_de` documents
-            // as deliberate (LY-153 window, end-of-vblank STAT, OAM read
-            // windows, speed-switch TIMA edge), and NO AGB-graded oracle covers
-            // palette latency anywhere (mealybug m3_bgp_change is dmg/cgb only,
-            // age m3-bg-bgp tops out at cgbe, and no AGB reference capture
-            // exists). Queued for the bench; if AGB turns out to track D/E this
-            // becomes `is_agb() || is_cgb_de()`, as the FF41 coincidence
-            // tail-hold already spells out.
-            let base = if mmio.is_cgb_de() {
-                BGP_LATENCY_DMG
-            } else {
-                bgp_latency(true)
-            };
-            base + Self::cgb_halt_wake_write_bias(mmio)
-        } else {
-            let phase = (mmio.master_cc() % 4) as i32;
-            bgp_latency(false) + (phase - 1).max(0)
-        }
-    }
 
-    // CGB halt-woken write-stream bias, in display columns. Hardware charges
-    // `cc += 4 * isCgb()` when an IRQ ends HALT — one real
-    // M-cycle before the woken stream resumes. rustyboi's halted CPU wakes at
-    // the exact IF-set cc and models that M-cycle on the READ side only
-    // (STAT-resolve/LY-register biases), so a halt-woken WRITE stream runs 4cc early:
-    // every mid-mode-3 palette write it makes lands 4cc (dots, halved in
-    // double speed) of display columns short of the hardware column. Re-add
-    // the un-charged M-cycle here, gated on the woken stream
-    // (`halt_wakeup_skew`, set at wake / cleared at the next HALT): an LYC-woken
-    // ISR write stream takes it (its boundaries would otherwise be a uniform 4
-    // columns early); a busy-waiting stream (skew=false) keeps the flat latency.
-    fn cgb_halt_wake_write_bias(mmio: &mmio::Mmio) -> i32 {
-        // A grid-woken CGB stream (quantized DMG-cart path) resumes at the
-        // hardware boundary, but its palette writes commit one dot earlier
-        // relative to the renderer column clock than the read anchor — the
-        // legacy model's read(+5cc)-vs-write(+4col) asymmetry, kept as a -1
-        // column write-phase constant (daid ppu_scanline_bgp real-CGB capture).
-        if mmio.halt_wake_grid_cgb() {
-            return -1;
-        }
-        // An LYC/m1-woken stream that charged the +4 halt exit as a REAL stall
-        // (sm83.rs) already writes at the hardware cc — re-adding the M-cycle
-        // here would double it. The m2-woken stall keeps the co-tuned bias.
-        if mmio.halt_wakeup_skew() && !mmio.cgb_lcd_stall_charged_no_bias() {
-            4 >> mmio.is_double_speed_mode() as i32
-        } else {
-            0
-        }
-    }
 
-    // Resolve the DMG mid-mode-3 BGP-write glitch for the just-finished line and paint
-    // the spikes into the framebuffer. Called at the mode-3 -> HBlank transition, when
-    // every write of the line is known. The glitch is a TWO-WRITE collision: a write
-    // spikes its own pixel (looked up through `old | new`) only when it has a
-    // neighboring mid-mode-3 write within `BGP_SPIKE_CADENCE_CC` (SET/RESTORE
-    // pairs, ~12 dots apart). A single write, or one spaced wider (one write per
-    // line, or 60-148 dots apart), has no colliding neighbor and paints no spike —
-    // leaving the clean palette transition. Resolving at line end (all writes known) lets a SET
-    // write spike on the strength of its FUTURE RESTORE neighbor, which a per-write gate
-    // could not see. DMG-only; the CGB path uses true-color palette RAM (no collapse).
-    fn resolve_bgp_spikes(&mut self, mmio: &mmio::Mmio) {
-        if mmio.is_cgb() || self.bgp_writes.len() < 2 {
-            return;
-        }
-        let ly = mmio.read(LY);
-        if ly >= 144 {
-            return;
-        }
-        let writes = std::mem::take(&mut self.bgp_writes);
-        for i in 0..writes.len() {
-            let (cc, col, glitch) = writes[i];
-            // Neighboring write within the tight cadence, in either direction.
-            let has_neighbor = writes.iter().enumerate().any(|(j, &(occ, _, _))| {
-                j != i && cc.abs_diff(occ) <= BGP_SPIKE_CADENCE_CC
-            });
-            if !has_neighbor || col >= 160 {
-                continue;
-            }
-            // Re-map the BG pixel drawn at `col` through the OR-glitched palette. The
-            // per-dot draw stored its BG color index in `line_bg_idx` (-1 = a sprite won
-            // this column, or it was BG-disabled; leave those untouched).
-            let bg_idx = self.line_bg_idx[col as usize];
-            if bg_idx < 0 {
-                continue;
-            }
-            let fb_offset = (ly as u16) * 160 + col as u16;
-            self.fb_a[fb_offset as usize] = (glitch >> (2 * bg_idx as u8)) & 0x03;
-        }
-    }
 
-    /// FF48 (OBP0) write hook. See `on_bgp_write`; affects sprite palette 0.
-    pub(crate) fn on_obp0_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
-        if self.state != State::PixelTransfer || self.disabled {
-            return;
-        }
-        let lat = obp_latency(_mmio.is_cgb())
-            + if _mmio.is_cgb() { Self::cgb_halt_wake_write_bias(_mmio) } else { 0 };
-        let boundary = self.pal_write_boundary(lat);
-        Self::push_pal_history(&mut self.obp0_history, boundary, value);
-        let apply = self.pal_write_apply_tick(lat);
-        Self::push_pal_dot_history(&mut self.obp0_dot_history, apply, value);
-    }
 
-    /// FF49 (OBP1) write hook. See `on_bgp_write`; affects sprite palette 1.
-    pub(crate) fn on_obp1_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
-        if self.state != State::PixelTransfer || self.disabled {
-            return;
-        }
-        let lat = obp_latency(_mmio.is_cgb())
-            + if _mmio.is_cgb() { Self::cgb_halt_wake_write_bias(_mmio) } else { 0 };
-        let boundary = self.pal_write_boundary(lat);
-        Self::push_pal_history(&mut self.obp1_history, boundary, value);
-        let apply = self.pal_write_apply_tick(lat);
-        Self::push_pal_dot_history(&mut self.obp1_dot_history, apply, value);
-    }
 
-    // Display column at which a mid-mode-3 palette write becomes visible: the next
-    // column to be popped (`self.x`) plus the register's pipeline latency in dots.
-    // While the pipeline is still warming up (`pixel_transfer_warmup > 0`, before any
-    // column has popped) the write lands before column 0 is plotted, so it colors
-    // column 0 onward — the `+latency` delay is absorbed by the remaining warmup.
-    // Pre-visible phase of a chopped WX<7 window start: the early activation
-    // zeroed the warmup, but a write landing before the line's pos-0 dot still
-    // colors the whole line (the column-0 pixel pops at/after pos 0), and must
-    // not seed a two-write spike either — exactly like a write during the warmup.
-    fn in_previsible_prologue(&self) -> bool {
-        if self.pixel_transfer_warmup > 0 {
-            return true;
-        }
-        if self.x == 0 && self.m3_discard_target >= 0 && self.win_fetch_anchor.is_some() {
-            let base = self.m3_arm_dot + 12 - (self.m3_arm_dot & 1)
-                + self.m3_discard_target as u128;
-            return self.ticks < base;
-        }
-        false
-    }
 
-    fn pal_write_boundary(&self, latency: i32) -> u64 {
-        if self.in_previsible_prologue() {
-            return 0;
-        }
-        (self.x as i32 + latency).clamp(0, 160) as u64
-    }
 
-    // Dot at which a mid-mode-3 palette write becomes visible to the pixel
-    // pops (the dot-space analog of `pal_write_boundary`; see
-    // `obp0_dot_history`). During the previsible prologue the write applies
-    // before any visible pop, i.e. tick 0.
-    fn pal_write_apply_tick(&self, latency: i32) -> u128 {
-        if self.in_previsible_prologue() {
-            return 0;
-        }
-        self.ticks + latency.max(0) as u128
-    }
 
-    // Append an (apply_tick, value) dot-keyed palette entry; same last-write-
-    // wins collapse as `push_pal_history`.
-    fn push_pal_dot_history(hist: &mut Vec<(u128, u8)>, apply: u128, value: u8) {
-        if let Some(last) = hist.last_mut()
-            && last.0 == apply
-        {
-            last.1 = value;
-            return;
-        }
-        hist.push((apply, value));
-    }
 
     // Resolve a dot-keyed DMG palette history at pop dot `tick`.
     pub(in crate::ppu) fn pal_at_tick(hist: &[(u128, u8)], tick: u128, fallback: u8) -> u8 {
@@ -4190,18 +2970,6 @@ impl Ppu {
         val
     }
 
-    // Append a (boundary_col, value) palette-history entry. If the last entry shares
-    // the same boundary column (two writes resolving to the same display column),
-    // overwrite it so only the last write at that column wins.
-    fn push_pal_history(hist: &mut Vec<(u64, u8)>, boundary: u64, value: u8) {
-        if let Some(last) = hist.last_mut()
-            && last.0 == boundary
-        {
-            last.1 = value;
-            return;
-        }
-        hist.push((boundary, value));
-    }
 
     // Resolve a column-keyed DMG palette history at display column `sx`: the last
     // entry whose boundary column is <= `sx` wins. Single-seed history (the common
@@ -4227,517 +2995,18 @@ impl Ppu {
         val
     }
 
-    /// FF42 (SCY) write hook. The CPU readback of FF42 is immediate (handled by
-    /// mmio), but the BG fetcher must see the new SCY only ~N dots later, the
-    /// write-side analog of the wy1/wy2 delayed latches: rustyboi otherwise
-    /// resolves the write pre-tick and the fetcher re-reads it live one M-cycle
-    /// too early vs hardware. Schedule the delayed apply against the write cc.
-    pub(crate) fn on_scy_write(&mut self, value: u8, mmio: &mmio::Mmio) {
-        if self.disabled {
-            self.scy_delayed = value;
-            self.scy_apply_cc = wy2_disabled();
-            return;
-        }
-        let ds = mmio.is_double_speed_mode();
-        let cc = self.write_cc(ds);
-        // CGB-only: rustyboi's DMG fetcher already samples SCY at the
-        // hardware-correct dot (delay 0); only the CGB core sees the mid-M3 write
-        // one M-cycle too early (the `_2/_4/_6` straddle pairs vs the passing
-        // `_1/_3/_5`). A DMG delay regresses the DMG scy_during_m3 cases.
-        // SCY=2 is the swept optimum (fixes 20 CGB scy_during_m3 straddle cases,
-        // zero regression; 1 -> -4, 3 -> -14, 4 -> +8 regresses).
-        let delay = if mmio.is_cgb_features_enabled() {
-            SCY_DELAY.max(0) as u64
-        } else {
-            0
-        };
-        self.scy_pending = value;
-        self.scy_apply_cc = cc + delay;
-        self.stat_sched_touched();
 
-        // DMG BG bus-glitch SCY journal (see bg_wg_apply): record the exact
-        // bus transition time of a mid-mode-3 SCY write; BG fetch reads
-        // resolve SCY at their reconstructed hardware dots against it, and
-        // the in-flight tile's already-executed reads are re-resolved
-        // (bg_retro_repair).
-        if !mmio.is_cgb_features_enabled() && self.state == State::PixelTransfer {
-            let old = self
-                .bg_scy_hist
-                .last()
-                .map(|&(_, _, new)| new)
-                .unwrap_or(self.scy_delayed);
-            if old != value {
-                // Transition placement: the new row/line address bits are
-                // effective for reads strictly PAST the write's commit cc —
-                // the same phase the live per-substep SCY re-read gives an
-                // unshifted read (writes commit pre-tick; the first fetch dot
-                // of the write M-cycle already sees the new value). No OR
-                // edge: the LCDC pulse captures cannot separate OR from
-                // clean-new/clean-old at the transition dots (old side is
-                // 0x00 there), and the SCY capture rejects an OR at this
-                // phase (whole-row blend pollution).
-                self.bg_scy_hist.push((cc, old, value));
-                self.bg_retro_repair(mmio);
-            }
-        }
-    }
 
-    /// FF43 (SCX) write hook. See `on_scy_write`.
-    pub(crate) fn on_scx_write(&mut self, value: u8, mmio: &mmio::Mmio) {
-        if self.disabled {
-            self.scx_delayed = value;
-            self.scx_apply_cc = wy2_disabled();
-            return;
-        }
-        let ds = mmio.is_double_speed_mode();
-        let cc = self.write_cc(ds);
-        // SCX has no positive lever in the sweep (delay 1/2 == net-zero vs the
-        // live read); the SCX-write straddles need the read-cc convergent root,
-        // out of scope. Applied live (delay 0).
-        self.scx_pending = value;
-        self.scx_apply_cc = cc;
-        self.stat_sched_touched();
 
-        // DMG BG grid SCX journal (see bg_wg_apply): record the mid-mode-3 SCX
-        // write so the tile-map column resolves it at the tile's reconstructed
-        // hardware TileNumber dot instead of the stall-displaced live dot.
-        if !mmio.is_cgb_features_enabled() && self.state == State::PixelTransfer {
-            let old = self
-                .bg_scx_hist
-                .last()
-                .map(|&(_, _, new)| new)
-                .unwrap_or(self.scx_delayed);
-            if old != value {
-                self.bg_scx_hist.push((cc, old, value));
-            }
-        }
 
-        // Exact-cc f1-discard latch. The "before" value is whatever the f1 loop
-        // sees right now (resolving any already-pending latch up to this write's
-        // cc); the new value becomes visible at write_cc + 2*cgb (a hardware SCX
-        // change becomes visible at cc + 2*cgb). NB: mmio already holds `value` (the
-        // store ran before this hook), so `scx_f1_at_cc` must derive the old
-        // value from the latch state, never from mmio.read(SCX).
-        let cgb = mmio.is_cgb_features_enabled();
-        self.scx_prev_f1 = self.scx_f1_pending_at_cc(cc);
-        self.scx_f1_new = value;
-        // The hardware SCX change (visible at cc + 2*cgb) runs in PPU dot units: the new
-        // SCX becomes visible to the f1 fine-scroll loop one PPU dot after the
-        // write (CGB). `abs_cc` is the master clock (1 dot = 1<<ds cc), so the
-        // dot delay scales with double speed -- otherwise a mid-f1 SCX write
-        // lands one f1 iteration too early at DS (scx_0367c0/scx_0761c0 _ds).
-        let ds = mmio.is_double_speed_mode() as u32;
-        self.scx_f1_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
 
-        // sub-cc column lever: record the apply boundary on the PLOT clock. The
-        // BG fetcher chooses old/new per tile by comparing the tile's plot cc to
-        // this. Persists for the line (does not reset on apply).
-        self.subcc_scx_old = self.scx_delayed;
-        self.subcc_scx_new = value;
-        self.subcc_scx_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
-        // Arm the single-tile re-key only when a BG tile is mid-fetch (its
-        // column was already committed under the OLD scx and it has not yet
-        // pushed). If the fetcher is at TileNumber, the next fetch will read
-        // the (about-to-be-NEW) scx itself; no in-flight straddle exists.
-        self.subcc_rekey_armed = !self.disabled
-            && self.state == State::PixelTransfer
-            && self.x > 0
-            && !self.fetcher.is_fetching_window()
-            && !self.fetcher.fetch_state_is_tile_number()
-            && self.fetcher.subcc_last_column_inputs().2 == self.subcc_scx_old;
 
-        // First-tile (f1) prologue straddle (DMG SS): the write lands at x==0
-        // (still in the discard prologue) but the first displayed tile is already
-        // queued (fifo>=8) and the 2nd tile is mid-fetch (its column was latched
-        // under the OLD scx one dot before this write). On hardware that 2nd tile
-        // plots after the write, so re-key it to the NEW scx on its next push.
-        // Gated on a low-X sprite (OAM x <= 8): the sprite-fetch dot during the
-        // discard prologue delays the BG fetcher one tile, so the in-flight 2nd
-        // tile latched OLD one dot before the write (vs no in-flight straddle
-        // without the sprite). The no-sprite SS straddle (scx_during_m3_4/5) is
-        // handled correctly by the steady-state gap==4 rekey and must NOT re-key
-        // here, so the sprite gate is required to protect those cases.
-        let sprites_enabled = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
-        let low_x_sprite = sprites_enabled
-            && self.sprites_on_line.iter().any(|s| s.x <= 8);
-        self.prologue_rekey_armed = !self.disabled
-            && !cgb
-            && ds == 0
-            && self.state == State::PixelTransfer
-            && self.x == 0
-            && low_x_sprite
-            && self.fetcher.pixel_fifo.size() >= 8
-            && !self.fetcher.is_fetching_window()
-            && !self.fetcher.fetch_state_is_tile_number()
-            && self.fetcher.subcc_last_column_inputs().2 == self.subcc_scx_old;
-    }
 
-    /// SCX value visible to the f1 fine-scroll discard at PPU `cc`, honoring the
-    /// CGB `update(cc + 2*cgb)`-before-`the SCX-write handling` write delay. Before the pending
-    /// write's apply cc the f1 sees the pre-write value; at/after it sees the
-    /// new. Derived purely from the latch state (mmio already holds the latest
-    /// write), seeded with the M3-start SCX in `scx_prev_f1`.
-    fn scx_f1_pending_at_cc(&self, cc: u64) -> u8 {
-        if self.scx_f1_apply_cc != wy2_disabled() && cc >= self.scx_f1_apply_cc {
-            self.scx_f1_new
-        } else {
-            self.scx_prev_f1
-        }
-    }
 
-    /// OBJ-size (large = 8x16) visible to the OAM scan at PPU `cc`, honoring the
-    /// CGB `an LCDC write taking effect at cc+2` write delay. Before the pending size write's
-    /// apply cc the scan sees the pre-write size; at/after it sees the new. With
-    /// no pending change (`apply_cc == disabled`) it falls back to the live LCDC
-    /// bit2, so the steady-state per-slot snapshot is unchanged.
-    pub(in crate::ppu) fn objsize_large_at_cc(&self, cc: u64) -> bool {
-        if self.objsize_apply_cc != wy2_disabled() {
-            // Strict `>`: an OAM slot read exactly AT the apply cc still sees the
-            // pre-write size (the late_sizechange2_sp01_ds bracket: ds_1's slot
-            // cc is strictly past apply -> new size IN; ds_2's slot cc equals
-            // apply -> old size OUT, the 1-slot boundary hardware resolves).
-            if cc > self.objsize_apply_cc {
-                self.objsize_new_large
-            } else {
-                self.objsize_prev_large
-            }
-        } else {
-            self.lcdc_has(LCDCFlags::SpriteSize)
-        }
-    }
 
-    pub(crate) fn on_stat_register_write(&mut self, mmio: &mut mmio::Mmio) {
-        // The DMG STAT-write bug fires on any FF41 write, even one that leaves
-        // the enable bits unchanged. Track whether this was an FF41 write so the
-        // unchanged-value case still runs lcdstat_change below.
-        let ff41_written = mmio.take_ff41_write_pending();
-        // DMG "line 154" STAT-write VBlank-IF glitch (gbmicrotest
-        // stat_write_glitch_l154_d). A FF41 write straddling the frame-wrap
-        // boundary (LY 153->0 VBlank exit, first dots of the new frame) clears
-        // the still-pending VBlank IF bit on real DMG-CPU-08 — the shared
-        // VBlank/STAT interrupt-line glitch. `l154_vblank_glitch_window` is armed
-        // at the frame wrap and disarmed a few dots into line 0/1, so only a write
-        // at that exact boundary is affected. DMG-only (CGB has no STAT-write bug).
-        if ff41_written
-            && self.l154_vblank_glitch_window
-            && !self.disabled
-            && !mmio.is_cgb_features_enabled()
-        {
-            let cur_if = mmio.read(registers::INTERRUPT_FLAG);
-            if cur_if & (registers::InterruptFlag::VBlank as u8) != 0 {
-                mmio.write(
-                    registers::INTERRUPT_FLAG,
-                    cur_if & !(registers::InterruptFlag::VBlank as u8),
-                );
-            }
-        }
-        // Keep the LYC=LY readback flag (FF41 bit 2) in sync regardless of LCD
-        // state; only its IRQ side-effects are gated by enable.
-        if self.disabled {
-            // STAT-write quirk (the FF41 write path): with the LCD off, an FF41
-            // write while the LYC=LY flag is set and LYC IRQ was disabled flags
-            // a STAT IRQ. On CGB the written data must also set LYC-IRQ-enable;
-            // on DMG it fires regardless of the written value.
-            let live_stat = mmio.read(LCD_STATUS);
-            let new_stat = live_stat & 0x78;
-            let old_stat = self.stat_reg_committed & 0x78;
-            let lycflag = live_stat & 0x04 != 0;
-            let old_lycen = old_stat & stat_irq::STAT_LYCEN != 0;
-            let new_lycen = new_stat & stat_irq::STAT_LYCEN != 0;
-            let cgb = mmio.is_cgb_features_enabled();
-            let data_ok = if cgb { new_lycen } else { true };
-            if ff41_written && lycflag && !old_lycen && data_ok {
-                mmio.request_interrupt(registers::InterruptFlag::Lcd);
-            }
-            // Keep the IRQ sources' shadow registers current so a later enable
-            // sees the right values (hardware runs its LCDSTAT / LYC-register change handling even
-            // while off, just skipping event scheduling).
-            self.stat_reg_committed = new_stat;
-            return;
-        }
 
-        let new_stat = mmio.read(LCD_STATUS) & 0x78;
-        let new_lyc = mmio.read(LYC);
-        let old_stat = self.stat_reg_committed & 0x78;
-        let old_lyc = self.lyc_irq.lyc_reg_src();
 
-        // FF41 (STAT) write. Run unconditionally on any FF41 write (even a
-        // same-value write) to reproduce the DMG STAT-write IRQ bug; the CGB
-        // trigger path self-guards on newly-set bits, so this is a no-op there.
-        if ff41_written || new_stat != old_stat {
-            self.lcdstat_change(new_stat, mmio);
-        }
-        // FF45 (LYC) write.
-        if new_lyc != old_lyc {
-            self.lyc_reg_change(new_lyc, mmio);
-        }
 
-        // Re-sync the LYC=LY readback flag after the change.
-        self.sync_lyc_flag(mmio);
-    }
-
-    fn sync_lyc_flag(&self, mmio: &mut mmio::Mmio) {
-        let effective_ly = self.effective_ly_for_lyc_compare(mmio);
-        if mmio.read(LYC) == effective_ly {
-            mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) | (1 << 2));
-        } else {
-            mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2));
-        }
-    }
-
-    /// The m0 IRQ time to use in the stat-change immediate-trigger check.
-    /// Mirrors hardware: when the scheduled m0 IRQ is disabled but the current
-    /// line's mode 0 is still ahead, predict it from the renderer; otherwise use
-    /// the scheduled value.
-    fn m0_irq_time_for_trigger(&self, mmio: &mmio::Mmio, lc: &stat_irq::LyCounter, cc: u64) -> u64 {
-        // The hardware STAT-change-triggers check needs the m0 IRQ time of the *current
-        // line*. Our `sched_m0irq` may hold a stale current-line value during
-        // HBlank (it is only cleared to DISABLED when the m0 source fires). The
-        // DMG/CGB branch logic only cares whether m0IrqTime is before or after
-        // `the LY counter.time()` (next-LY): if mode 0 is already active (HBlank) the
-        // current line's m0 has passed and the next is on a later line, i.e.
-        // `>= lc.time`; during mode 2/3 it is still ahead this line (`< time`).
-        // Mode 3 (PixelTransfer): the current line's m0 is ahead, and the
-        // closed-form `m0_time_master` is this line's exact mode-0 time — use the exact
-        // the hardware mode-0 IRQ event time (the xpos-166 advance time). Mode 2
-        // (OAMSearch): `m0_time_master` still holds the PREVIOUS line's value, so
-        // keep the per-dot `sched_m0irq` (this line's armed m0). Both clamp below
-        // next-LY so the "m0 ahead this line" branch is taken.
-        let sched_or_future = if self.sched_m0irq == stat_irq::DISABLED_TIME {
-            lc.time.saturating_sub(1)
-        } else {
-            self.sched_m0irq.min(lc.time.saturating_sub(1))
-        };
-        match self.state {
-            // Mode 0 active: report a time at/after the next LY so the "m0 has
-            // occurred" branch is taken.
-            State::HBlank => lc.time,
-            // VBlank: no m0 this line; far future.
-            State::VBlank => stat_irq::DISABLED_TIME,
-            State::PixelTransfer => self
-                .m0_irq_time_exact(mmio)
-                .map(|t| {
-                    // Hardware runs pending events before the FF41-write trigger
-                    // check: if the write cc has already passed the mode-0 STAT
-                    // IRQ time (the xpos-166 advance time), that event fired and
-                    // rescheduled the m0 event onto the next line
-                    // (> the LY counter.time()). Report a next-LY value so the trigger
-                    // takes the "m0 already occurred" branch and the enable
-                    // immediately flags the STAT IRQ — the `_2`/`_3`/`_4` bracket
-                    // where the window/sprite-deferred m0 xpos lies just before the
-                    // enable write.
-                    if cc >= t {
-                        lc.time
-                    } else {
-                        t.min(lc.time.saturating_sub(1))
-                    }
-                })
-                .unwrap_or(sched_or_future),
-            _ => sched_or_future,
-        }
-    }
-
-    /// The exact hardware mode-0 STAT-IRQ event time for the current line, used
-    /// by the FF41/FF45 latch + immediate-trigger comparisons. The hardware m0 IRQ
-    /// fires at the xpos-166 advance time `mode-0 time - (1<<ds)`, one xpos before
-    /// the mode-3 -> mode-0 transition (`mode-0 time` = the xpos-167 advance time,
-    /// our `m0_time_master`). Returns `None` when no closed-form master exists
-    /// (window mid-line / first line after enable), in which case callers fall
-    /// back to the per-dot delivery value (`sched_m0irq`).
-    fn m0_irq_time_exact(&self, mmio: &mmio::Mmio) -> Option<u64> {
-        let ds = mmio.is_double_speed_mode() as i64;
-        // `m0_time_master` is the master-cc mode-0 time (= the xpos-167 advance time).
-        // The STAT/LYC write-trigger comparisons run in abs-cc units (the same
-        // `cc = write_cc()` / `sched_m0irq` clock), so rebase by `p_now`
-        // (abs_cc = master_cc - p_now). The mode-0 IRQ fires one xpos earlier:
-        // the xpos-166 advance time = mode-0 time - (cost(166->167) << ds), where the
-        // 166->167 step costs one dot plus any window-start (WX=166) / right-edge
-        // sprite penalty that lands in that final xpos (`m0irq_xpos166_advance`).
-        //
-        // `m0_time_master` (via `m0_time_exact`) carries a `+1` the LY time correction
-        // tuned for the C1 *read* access-cc phase (`access_cc + 2 < mode-0 time`). The
-        // *write* cc (write_cc_off = 0) resolves the latch/trigger one cc earlier,
-        // so that read-phase `+1` over-counts the write-boundary IRQ time by 1 —
-        // subtract it back out to land the write-phase boundary exactly.
-        let is_cgb = mmio.is_cgb_features_enabled();
-        let adv = self.m0irq_xpos166_advance(mmio, is_cgb);
-        self.m0_time_master
-            .map(|m0t| (m0t as i64 - ((1 + adv) << ds) - self.p_now as i64 - 1).max(0) as u64)
-    }
-
-    /// The current-line mode-0 IRQ time for the FF41/FF45 *latch* comparisons
-    /// (the hardware mode-0 IRQ event time). During mode 3 the closed-form
-    /// `m0_time_master`-derived exact value (the xpos-166 advance time) is this
-    /// line's m0; in HBlank/mode 2/VBlank/window the per-dot `sched_m0irq` already
-    /// carries the relevant scheduled (next-line) value, matching the pre-C5 latch
-    /// behaviour, so keep it there to avoid disturbing those boundaries.
-    fn m0_irq_time_latch(&self, mmio: &mmio::Mmio, lc: &stat_irq::LyCounter) -> u64 {
-        match self.state {
-            State::PixelTransfer => self
-                .m0_irq_time_exact(mmio)
-                .map(|t| t.min(lc.time.saturating_sub(1)))
-                .unwrap_or(self.sched_m0irq),
-            _ => self.sched_m0irq,
-        }
-    }
-
-    /// Handles an LCD-STAT (FF41) change. `data` is the new FF41 enable bits (& 0x78).
-    fn lcdstat_change(&mut self, data: u8, mmio: &mut mmio::Mmio) {
-        let cc = self.write_cc(mmio.is_double_speed_mode());
-        let lc = self.ly_counter(mmio);
-        let old = self.stat_reg_committed & 0x78;
-        self.stat_reg_committed = data;
-        self.lyc_irq.stat_reg_change(data, &lc, cc);
-
-        // If m0 IRQ just got enabled and isn't scheduled, arm it from the
-        // current line's mode-0 prediction.
-        if (data & stat_irq::STAT_M0EN != 0) && self.sched_m0irq == stat_irq::DISABLED_TIME {
-            self.arm_m0irq_for_current_line(mmio, self.first_line_after_enable);
-        }
-        let m2 = stat_irq::mode2_irq_schedule(data, &lc, cc);
-        self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off(mmio.is_double_speed_mode())) as u64 };
-        self.sched_lycirq = self.lyc_irq.time;
-
-        // STAT-write IRQ timing follows the CGB LCD controller on CGB hardware
-        // (incl. DMG-compat mode), matching the hardware console-is-CGB gate.
-        let cgb = mmio.is_cgb();
-        let lyc_reg = self.lyc_irq.lyc_reg_src();
-        // The hardware STAT-change-triggers-STAT-IRQ (DMG) recomputes the current line's
-        // m0 IRQ time when it is unscheduled but mode 0 is still ahead this
-        // line. Reproduce that so enabling m0 during mode 2/3 sees a future m0.
-        let m0_for_trigger = self.m0_irq_time_for_trigger(mmio, &lc, cc);
-        let triggers = if cgb {
-            stat_irq::stat_change_triggers_cgb(
-                old,
-                data,
-                &lc,
-                cc,
-                m0_for_trigger,
-                lyc_reg,
-                stat_irq::StatWritePhase {
-                    agb: mmio.is_agb(),
-                    rephased: !mmio.halt_grid_quantized(),
-                },
-            )
-        } else {
-            stat_irq::stat_change_triggers_dmg(old, &lc, cc, m0_for_trigger, lyc_reg)
-        };
-        if triggers {
-            mmio.request_interrupt(registers::InterruptFlag::Lcd);
-        }
-
-        // Latch the new STAT bits against the exact current-line mode-0 IRQ time
-        // (the hardware mode-0 IRQ event time = the xpos-166 advance time)
-        // during mode 3, keeping the per-dot `sched_m0irq` next-line value
-        // elsewhere (HBlank/mode 2/window) — see `m0_irq_time_latch`.
-        let m0_latch = self.m0_irq_time_latch(mmio, &lc);
-        self.mstat_irq.stat_reg_change(
-            data,
-            m0_latch,
-            self.sched_m1irq,
-            self.sched_m2irq,
-            cc,
-            cgb,
-        );
-        self.stat_sched_touched();
-    }
-
-    /// Handles an LYC-register change.
-    fn lyc_reg_change(&mut self, data: u8, mmio: &mut mmio::Mmio) {
-        let old = self.lyc_irq.lyc_reg_src();
-        if data == old {
-            return;
-        }
-        let cc = self.write_cc(mmio.is_double_speed_mode());
-        let lc = self.ly_counter(mmio);
-        let stat = self.stat_reg_committed;
-        // LYC-write coincidence/IRQ timing follows the CGB LCD controller on CGB
-        // hardware (incl. DMG-compat mode); hardware gates on the console-is-CGB signal.
-        let cgb = mmio.is_cgb();
-        let ds = mmio.is_double_speed_mode();
-
-        // Trigger/latch against the current-line mode-0 IRQ time: the closed-form
-        // `m0_time_master`-derived exact value (the hardware xpos-advance-time
-        // (166)) during mode 3, the per-dot `sched_m0irq` (next-line scheduled m0,
-        // > lc.time) elsewhere — see `m0_irq_time_latch`.
-        let m0_for_trigger = self.m0_irq_time_latch(mmio, &lc);
-        self.lyc_irq.lyc_reg_change(data, &lc, cc);
-        self.mstat_irq
-            .lyc_reg_change(data, m0_for_trigger, self.sched_m2irq, cc, ds, cgb);
-        self.sched_lycirq = self.lyc_irq.time;
-
-        // Immediate-trigger m0 time = the hardware m0 event time, which
-        // is the *current line's* m0 while it is still ahead (mode 2/3) and the next
-        // line's (> lc.time) once mode 0 has passed. `m0_irq_time_latch` is correct
-        // in HBlank/mode 3 but reports DISABLED during OAMSearch (the current line's
-        // m0 has not yet been armed into `sched_m0irq`); there the current line's m0
-        // is still ahead but before next-LY, so substitute `lc.time - 1`. This makes
-        // `lyc_change_blocked_by_m0_or_m1` resolve the line-start LYC=LY coincidence
-        // (lycwirq_trigger_m0_late_lyc45 `_5`) without disturbing the HBlank
-        // line-end LYC writes (lycwirq_trigger_m0_late `_1`/`_2`/`_3`).
-        let m0_latch = self.m0_irq_time_latch(mmio, &lc);
-        let m0_for_imm = if matches!(self.state, State::OAMSearch)
-            && m0_latch == stat_irq::DISABLED_TIME
-        {
-            lc.time.saturating_sub(1)
-        } else {
-            m0_latch
-        };
-        if stat_irq::lyc_change_triggers_stat_irq(old, data, &lc, cc, stat, m0_for_imm, cgb) {
-            if cgb && !ds {
-                self.sched_oneshot_statirq = cc + 5;
-            } else {
-                mmio.request_interrupt(registers::InterruptFlag::Lcd);
-            }
-        }
-        self.stat_sched_touched();
-    }
-
-    /// The absolute clock value attributed to a register write. The write hook
-    /// fires after the FF4x store but before this M-cycle's 4 dots tick, so the
-    /// renderer's current dot is `abs_cc - 1`.
-    ///
-    /// At double speed `abs_cc` advances by 2 per PPU step and the PPU only
-    /// steps on even CPU T-phases, so `abs_cc` alone can only place a write on
-    /// an even half-dot. `write_subdot` carries the true sub-dot parity of the
-    /// resolving CPU write (0 on an even T-phase, 1 on an odd one), giving the
-    /// STAT model half-PPU-dot precision.
-    pub(in crate::ppu) fn write_cc(&self, ds: bool) -> u64 {
-        let off = WRITE_CC_OFFSET;
-        // `write_subdot` carries the sub-PPU-dot parity of the resolving CPU
-        // write. In practice the STAT/render tests align via whole-instruction
-        // polling loops, so writes land on M-cycle (even) phases and this term
-        // is 0; it remains wired for the rare odd-phase write (post-HALT-1cc).
-        let sub = if ds { self.write_subdot as i64 } else { 0 };
-        (self.abs_cc as i64 + off + sub).max(0) as u64
-    }
-
-    /// LY value used for the LYC=LY comparison. On hardware the compare uses
-    /// the next line's LY in the last 2 dots of the current line
-    /// (`the LYC-compare-LY calc` `time-to-next-LY <= 2`), so the LYC=LY flag rises one line
-    /// early. Line 153's mid-line ly=0 transient is handled separately in
-    /// Phase D by writing FF44 directly, so this only anticipates lines
-    /// 0..=152 (line 153 -> 0 already came through `write_ly_from_ppu`).
-    fn effective_ly_for_lyc_compare(&self, mmio: &mmio::Mmio) -> u8 {
-        let ly = mmio.ppu_io_reg(LY);
-        // STAT LYC compare: the next-line anticipation window is
-        // `time-to-next-LY > 2 - (!isDoubleSpeed() && isAgb())`. The renderer's
-        // line-cycle equivalent is `ticks >= 456 - thresh`; AGB single-speed
-        // lowers the threshold from 2 to 1, extending the window one dot earlier.
-        let agb_ss = mmio.is_agb() && !mmio.is_double_speed_mode();
-        let anticipate_from = if agb_ss { 455 } else { 454 };
-        if self.ticks < anticipate_from {
-            return ly;
-        }
-        match self.state {
-            State::HBlank if ly < 143 => ly + 1,
-            State::HBlank if ly == 143 => 144,
-            State::VBlank if (144..152).contains(&ly) => ly + 1,
-            // Line 152 -> 153 transition: still anticipate (next line is 153).
-            State::VBlank if ly == 152 => 153,
-            _ => ly,
-        }
-    }
 
     fn enter_scheduled_mode2(&mut self, mmio: &mut mmio::Mmio) {
         // Mode 2 holds no HDMA period edges, LY changes, or block fires; the
