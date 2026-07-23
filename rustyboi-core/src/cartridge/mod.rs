@@ -926,6 +926,13 @@ pub struct PokeJadeState {
     reg_d: u8,
     /// Protection register E.
     reg_e: u8,
+    /// Data-line swap mode latched by a write with `addr & $F0FF == $2001`,
+    /// indexing `GGB81_DATA_REORDERING` for every $4000-$7FFF read. The board
+    /// carries the same descrambler the GGB81 boards do; mode 0 (power-on) is
+    /// the identity permutation, so a cart that never writes the port -- Pokemon
+    /// Jade and Koudai Guaishou Feicui Ban both lack the thunk that does -- reads
+    /// its ROM straight through, exactly as before this register existed.
+    swap: u8,
 }
 
 /// The two 8 KiB ROM-window registers of `UnlMapper::Vf8k`, carried inside the
@@ -2867,6 +2874,12 @@ impl memory::Addressable for Cartridge {
                     UnlMapper::Ggb81(mode) => {
                         Self::reorder_bits(byte, &GGB81_DATA_REORDERING[usize::from(*mode)])
                     }
+                    // PKJD boards carry the same descrambler behind a $2001 mode
+                    // register; mode 0 is the identity, so the carts that never
+                    // program it are untouched.
+                    UnlMapper::PokeJadeDia(st) => {
+                        Self::reorder_bits(byte, &GGB81_DATA_REORDERING[usize::from(st.swap)])
+                    }
                     // Sintax XORs the switchable window with the active per-bank
                     // key (mGBA `_GBSintaxRead`).
                     UnlMapper::Sintax(st) => byte ^ st.rom_bank_xor,
@@ -3285,6 +3298,19 @@ impl memory::Addressable for Cartridge {
                 if matches!(self.unl_mapper, UnlMapper::Ggb81(_)) =>
             {
                 self.ggb81_write(addr, value);
+            }
+            // PKJD: the same $2001 data-swap-mode port as GGB81, layered over
+            // MBC3's bank register (which the raw value still latches, below).
+            ROM_BANK_SELECT_START..=ROM_BANK_SELECT_END
+                if (addr & 0xF0FF) == 0x2001
+                    && matches!(self.unl_mapper, UnlMapper::PokeJadeDia(_)) =>
+            {
+                if let UnlMapper::PokeJadeDia(ref mut st) = self.unl_mapper {
+                    st.swap = value & 0x07;
+                }
+                if let Mapper::Mbc3(m) = &mut self.mapper {
+                    m.rom_bank_low = value.max(1);
+                }
             }
             // ROM Bank Number (0x2000-0x3FFF)
             ROM_BANK_SELECT_START..=ROM_BANK_SELECT_END => match &mut self.mapper {
@@ -4540,6 +4566,52 @@ mod tests {
         rom[RAM_SIZE_OFFSET] = 0x03; // 32KB / 4 banks
         rom[0x184..0x1B4].copy_from_slice(&PKJD_SIG);
         rom
+    }
+
+    #[test]
+    fn pkjd_serves_the_ggb81_data_swap_register() {
+        // The board carries the GGB81 family's data-line descrambler behind a
+        // `addr & $F0FF == $2001` mode register. Koudai Guaishou - Da Jihe drives
+        // it from a thunk that replaced every plain `ld [$2000],a` with
+        // `and $02 / ld [$2001],a / ld [$2000],a`, and every bank of that dump
+        // whose number has bit 1 set is byte-for-byte the mode-2 permutation of
+        // the plain data its sibling Feicui Ban stores.
+        let mut rom = make_pkjd_rom();
+        rom[0x4000] = 0xF5; // bank 1 marker
+        rom[0x8000] = 0xC5; // bank 2 marker
+        rom[0x2200] = 0xF5; // fixed-bank marker (never permuted)
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+
+        // Power-on mode 0 is the identity permutation.
+        cart.write(0x2000, 0x01);
+        assert_eq!(cart.read(0x4000), 0xF5);
+        // A plain bank write does not disturb the mode.
+        cart.write(0x2000, 0x02);
+        assert_eq!(cart.read(0x4000), 0xC5);
+
+        // Mode 2 swaps D1<->D6 and D2<->D5. The $2001 write also latches the
+        // bank register (as on GGB81), so re-select afterwards.
+        cart.write(0x2001, 0x02);
+        cart.write(0x2000, 0x01);
+        assert_eq!(cart.read(0x4000), 0xB7); // $F5 permuted
+        // The fixed bank is never permuted.
+        assert_eq!(cart.read(0x2200), 0xF5);
+        // The mode survives an ordinary bank switch.
+        cart.write(0x2000, 0x02);
+        assert_eq!(cart.read(0x4000), 0xA3); // $C5 permuted
+
+        // Decoded `addr & $F0FF`, and only the low 3 bits select the mode.
+        cart.write(0x2001, 0x00);
+        assert_eq!(cart.read(0x4000), 0xF5); // value 0 -> bank register 1
+        cart.write(0x2101, 0x0A); // $0A & 7 = 2, and bank register := $0A
+        cart.write(0x2000, 0x02);
+        assert_eq!(cart.read(0x4000), 0xA3);
+
+        // The other carts on this board never write the port, so they keep the
+        // identity permutation for their whole run.
+        let mut plain = Cartridge::from_bytes(&rom).unwrap();
+        plain.write(0x2000, 0x01);
+        assert_eq!(plain.read(0x4000), 0xF5);
     }
 
     #[test]

@@ -13,6 +13,18 @@
 ;     writes register D, $0E register E, and $0F is a write-only command port
 ;     whose value mutates D and E ($11 D--, $12 E--, $41 D+=E, $42 E+=D, $51 D++,
 ;     $52 E--). Reads of the real (unpopulated) RTC registers $08-$0C return 0.
+;   * The board also carries the GGB81 family's data-line descrambler: a write
+;     with `addr & $F0FF == $2001` latches a 3-bit swap mode (the raw value still
+;     latches MBC3's bank register too), and every $4000-$7FFF read then comes
+;     back with its data lines permuted through that mode's table. Mode 0, the
+;     power-on state, is the identity permutation. Koudai Guaishou - Da Jihe
+;     drives it from a thunk at $3FF1 -- `push af / and $02 / ld [$2001],a /
+;     pop af / ld [$2000],a / ret` -- that replaced every plain `ld [$2000],a` in
+;     the image, so the mode is bit 1 of the bank number; and indeed every bank
+;     of that dump whose number has bit 1 set is stored under the mode-2
+;     permutation (D1<->D6, D2<->D5) of the same data its sibling Koudai
+;     Guaishou - Feicui Ban stores plain, byte for byte. Without the register the
+;     cart far-calls into what it thinks is code and hangs on a black screen.
 ;
 ; rustyboi content-detects the board from the header type $10 plus the 48-byte
 ; $0184 CRC32 signature (0x65BBF1FC), and maps UnlMapper::PokeJadeDia.
@@ -153,8 +165,74 @@ Start:
     cp $00
     jp nz, FailPath
 
+    ; --- data-line swap mode ($2001) -------------------------------------
+    ; Power-on mode 0 is the identity: bank 1's marker reads back unpermuted.
+    ld a, $01
+    ld [$2000], a
+    ld a, [$4000]
+    cp $F5
+    jp nz, FailPath
+
+    ; A plain $2000 bank write must NOT touch the mode.
+    ld a, $02
+    ld [$2000], a
+    ld a, [$4000]
+    cp $C5
+    jp nz, FailPath
+
+    ; Mode 2 = swap D1<->D6 and D2<->D5, exactly as the cart's thunk programs
+    ; it. The $2001 write also latches the bank register, so re-select after.
+    ld a, $02
+    ld [$2001], a
+    ld a, $01
+    ld [$2000], a
+    ld a, [$4000]
+    cp $B7            ; $F5 permuted
+    jp nz, FailPath
+
+    ; The fixed bank is never permuted.
+    ld a, [BankZeroMarker]
+    cp $F5
+    jp nz, FailPath
+
+    ; The mode persists across an ordinary bank switch.
+    ld a, $02
+    ld [$2000], a
+    ld a, [$4000]
+    cp $A3            ; $C5 permuted
+    jp nz, FailPath
+
+    ; The port is decoded `addr & $F0FF`, and only the low 3 bits pick the mode:
+    ; $2101 with value $0A selects mode 2 again (and bank $0A, so re-select).
+    ld a, $00
+    ld [$2001], a     ; back to the identity, bank register := 1 (0 -> 1)
+    ld a, [$4000]
+    cp $F5
+    jp nz, FailPath
+    ld a, $0A
+    ld [$2101], a
+    ld a, $03
+    ld [$2000], a
+    ld a, [$4000]
+    cp $B3            ; $D5 permuted
+    jp nz, FailPath
+
     test_success
 
 SECTION "failsec", ROM0[$2100]
 FailPath:
     test_failure
+
+; Fixed-bank marker: reads of $0000-$3FFF are never permuted.
+SECTION "bank0mark", ROM0[$2200]
+BankZeroMarker:
+    db $F5
+
+; Switchable-bank markers, one per bank, each chosen so the mode-2 permutation
+; maps it to a different byte ($F5->$B7, $C5->$A3, $D5->$B3).
+SECTION "b1", ROMX[$4000], BANK[1]
+    db $F5
+SECTION "b2", ROMX[$4000], BANK[2]
+    db $C5
+SECTION "b3", ROMX[$4000], BANK[3]
+    db $D5
