@@ -436,7 +436,7 @@ impl Ppu {
     }
 
     pub(in crate::ppu) fn sprite_fetch_penalty_for_current_x(&mut self, mmio: &mmio::Mmio) -> Option<u8> {
-        let lcdc = self.lcdc;
+        let lcdc = self.lcdc.reg;
         if !lcdc_has(lcdc, LCDCFlags::SpriteDisplayEnable) && !mmio.is_cgb_features_enabled() {
             return None;
         }
@@ -521,7 +521,7 @@ impl Ppu {
 
     // Mix background pixel with sprites at the given screen coordinates (CGB color version)
     pub(in crate::ppu) fn mix_background_and_sprites_color(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, bg_attrs: u8, screen_x: u8, screen_y: u8, bg_enabled_col: bool) -> (u8, u8, u8) {
-        let lcdc = self.lcdc;
+        let lcdc = self.lcdc.reg;
         // Per-pixel BG-master-priority: on CGB, LCDC.0 off keeps BG/window
         // visible but drops BG master priority over sprites for this column
         // (the hardware BG-priority mask `lcdc << 7`, evaluated live per tile). Use
@@ -828,7 +828,7 @@ impl Ppu {
     }
 
     fn get_sprite_pixel(&self, mmio: &mmio::Mmio, sprite: &Sprite, sprite_x: u8, sprite_y: u8) -> Option<u8> {
-        let lcdc = self.lcdc;
+        let lcdc = self.lcdc.reg;
         let sprite_height = if lcdc_has(lcdc, LCDCFlags::SpriteSize) { 16 } else { 8 };
 
         if sprite_x >= 8 || sprite_y >= sprite_height {

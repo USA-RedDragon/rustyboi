@@ -24,8 +24,8 @@ impl Ppu {
         // write commits `write_cc + 2` dots after the write; the checkpoint
         // resolves the bit BEFORE that commit, so a write landing exactly on the
         // checkpoint dot still reads the OLD bit here even though the live
-        // `self.lcdc` was committed one dot early by pending_lcdc_events.
-        let win_en = match self.we_win_bit_exact {
+        // `self.lcdc.reg` was committed one dot early by pending_lcdc_events.
+        let win_en = match self.lcdc.we_win_bit_exact {
             Some((commit_cc, _new, old)) if self.abs_cc <= commit_cc => old,
             _ => self.lcdc_has(LCDCFlags::WindowDisplayEnable),
         };
@@ -91,7 +91,7 @@ impl Ppu {
 
         // Per-pixel BG-enable. The per-dot draw is
         // flushed in bursts (the mode-0 time flush at mode-3 end draws all remaining
-        // FIFO pixels in one pass), so reading the LIVE `self.lcdc` would apply
+        // FIFO pixels in one pass), so reading the LIVE `self.lcdc.reg` would apply
         // the final BG-enable to every flushed column. Instead evaluate BG-enable
         // as-of THIS column's plot cc from the line's `bgen_history`, so a
         // mid-mode-3 LCDC.0 toggle (BG off then on) covers exactly the pixel span
@@ -108,9 +108,9 @@ impl Ppu {
                 [final_color_rgb.0, final_color_rgb.1, final_color_rgb.2],
             );
             let color_offset = fb_offset as usize * 3;
-            self.color_fb_a[color_offset] = final_color_rgb.0;
-            self.color_fb_a[color_offset + 1] = final_color_rgb.1;
-            self.color_fb_a[color_offset + 2] = final_color_rgb.2;
+            self.out.color_fb_a[color_offset] = final_color_rgb.0;
+            self.out.color_fb_a[color_offset + 1] = final_color_rgb.1;
+            self.out.color_fb_a[color_offset + 2] = final_color_rgb.2;
         } else if self.is_cgb_compat_dmg(mmio) {
             // DMG cart on CGB: color output via the boot ROM's DMG-compat palette.
             let final_color_rgb =
@@ -130,9 +130,9 @@ impl Ppu {
                     if bg_enabled_col && final_color_rgb == bg_only { bg_pixel_idx as i8 } else { -1 };
             }
             let color_offset = fb_offset as usize * 3;
-            self.color_fb_a[color_offset] = final_color_rgb.0;
-            self.color_fb_a[color_offset + 1] = final_color_rgb.1;
-            self.color_fb_a[color_offset + 2] = final_color_rgb.2;
+            self.out.color_fb_a[color_offset] = final_color_rgb.0;
+            self.out.color_fb_a[color_offset + 1] = final_color_rgb.1;
+            self.out.color_fb_a[color_offset + 2] = final_color_rgb.2;
         } else {
             let final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8, bg_enabled_col);
             // DMG mid-mode-3 BGP-write glitch: record the BG color index of THIS pixel so
@@ -152,7 +152,7 @@ impl Ppu {
                 _ => 0,
             };
             self.record_pixel_debug_event(ly as u8, bg_pixel_idx, [intensity, intensity, intensity]);
-            self.fb_a[fb_offset as usize] = final_color;
+            self.out.fb_a[fb_offset as usize] = final_color;
         }
         self.x += 1;
         true
@@ -162,7 +162,7 @@ impl Ppu {
     // row `bg_y`, reproducing the fetcher's addressing. Shared by the fine-scroll
     // first-tile rewrite and the sub-cc SCX column re-key.
     fn bg_pixels_at_col(&self, mmio: &mmio::Mmio, tile_col: u16, bg_y: u16) -> [crate::ppu::fifo::BgPixel; 8] {
-        let lcdc = self.lcdc;
+        let lcdc = self.lcdc.reg;
         let cgb = mmio.is_cgb_features_enabled();
         let map_base: u16 = if lcdc_has(lcdc, LCDCFlags::BGTileMapDisplaySelect) {
             0x9C00
@@ -962,13 +962,13 @@ impl Ppu {
                     // so a line-end re-resolve against the COMPLETE journal
                     // can fix the tiles fetched before the whole pulse train
                     // was journaled (see cgb_train_reresolve).
-                    if self.wg_cgb && !event.fetching_window && !self.wg_hist.is_empty() {
+                    if self.wg.wg_cgb && !event.fetching_window && !self.wg.wg_hist.is_empty() {
                         let first_x = (self.x as i32 + event.fifo_size as i32
                             - 8
                             - pending_discard as i32)
                             .max(0);
                         if (0..160).contains(&first_x) {
-                            self.bg_tile_buf.push(CapturedBgTile {
+                            self.wg.bg_tile_buf.push(CapturedBgTile {
                                 n: event.tile_index as u64,
                                 tn: event.tile_num,
                                 first_x: first_x as u8,
@@ -981,13 +981,13 @@ impl Ppu {
                     // WINDOW analog (win_train_reresolve): the window internal
                     // line is win_y_pos (not latched_y, which the window fetch
                     // does not update).
-                    if self.wg_cgb && event.fetching_window && !self.wg_hist.is_empty() {
+                    if self.wg.wg_cgb && event.fetching_window && !self.wg.wg_hist.is_empty() {
                         let first_x = (self.x as i32 + event.fifo_size as i32
                             - 8
                             - pending_discard as i32)
                             .max(0);
                         if (0..160).contains(&first_x) {
-                            self.win_tile_buf.push(CapturedWinTile {
+                            self.wg.win_tile_buf.push(CapturedWinTile {
                                 n: event.tile_index as u64,
                                 tn: event.tile_num,
                                 first_x: first_x as u8,
@@ -1637,8 +1637,8 @@ impl Ppu {
         // DMG BG fetch-grid origin (see bg_wg_apply): the line's first
         // BG TileNumber read runs on this dot, before any sprite stall.
         if cadence_even
-            && self.bg_anchor_cc.is_none()
-            && self.bg_anchor_dot.is_none()
+            && self.wg.bg_anchor_cc.is_none()
+            && self.wg.bg_anchor_dot.is_none()
             && !self.fetcher.is_fetching_window()
             && self.fetcher.fetch_state_is_tile_number()
             && self.fetcher.get_tile_index() == 0
@@ -1647,9 +1647,9 @@ impl Ppu {
             // the CGB WE-off revert column (see handle_lcdc_write) resolves
             // the fetch grid in dots-since-line-start, so it needs `ticks`,
             // not the master clock.
-            self.bg_anchor_dot = Some(self.ticks);
+            self.wg.bg_anchor_dot = Some(self.ticks);
             if !mmio.is_cgb_features_enabled() {
-                self.bg_anchor_cc = Some(self.abs_cc);
+                self.wg.bg_anchor_cc = Some(self.abs_cc);
             }
         }
         let fetcher_lcdc_state =

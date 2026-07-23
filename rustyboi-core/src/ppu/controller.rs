@@ -1093,7 +1093,7 @@ pub(crate) enum LCDCFlags {
 }
 
 // Test one LCDC bit in an arbitrary LCDC byte. The `Ppu::lcdc_has` method below
-// covers the common `self.lcdc` case; this free form is for the sites that
+// covers the common `self.lcdc.reg` case; this free form is for the sites that
 // deliberately test a DIFFERENT byte (a fetcher-latched `lcdc_state.lcdc`, a
 // pre-write `old_lcdc`, the OR-read glitch's second LCDC), where silently
 // substituting the live register would change behaviour.
@@ -1178,6 +1178,272 @@ pub(crate) enum RenderedFrame {
     Color(Box<[u8; FRAMEBUFFER_SIZE * 3]>),
 }
 
+/// Speed-switch / STOP-bridge sub-dot corrections: the residual phase the
+/// whole-dot DS<->SS bridge cannot express, accumulated per switch.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub(in crate::ppu) struct SpeedPhase {
+    // After a DS->SS speed switch the 3-dot stop bridge lands the LY counter one
+    // master-cc higher than hardware (the DS half-dot the whole-dot bridge can't
+    // express), so the closed-form `+1` the LY counter correction in `m0_time_exact`
+    // over-corrects by 1. Set on the DS->SS switch, cleared at the next LCD
+    // enable / LY reset.
+    #[serde(default)]
+    pub(in crate::ppu) lytime_no_plus1: bool,
+    // Set when an SS->DS speed switch executes DURING mode 3. Across the switch
+    // The hardware re-anchored LY-counter time (on a speed change) sits ~5 DS-dots
+    // (10 cc) ahead of rustyboi's bridged renderer line phase for the FF44 (LY)
+    // read's LY-register anticipation window. Consumed ONLY by `get_ly_reg_at_cc`
+    // (not the STAT/mode-0 time predictor, which is already correct). Cleared at the
+    // next LCD enable / LY reset, like `lytime_no_plus1`.
+    #[serde(default)]
+    pub(in crate::ppu) ssds_mode3_ly_advance: bool,
+    // Frame boundaries completed since `ssds_mode3_ly_advance` was last set. The
+    // mode-3-switch the LY counter re-anchor is a phase artifact local to the frames
+    // right after the switch; once several frame wraps re-settle the phase it no
+    // longer applies. Reset to 0 when the flag is set.
+    #[serde(default)]
+    pub(in crate::ppu) ssds_mode3_frames: u8,
+    // Cumulative NON-mode-3 (OAM/HBlank) DS->SS speed-switch count for the LY-read
+    // sub-dot phase accumulator (the hardware speed-change half-dot re-anchor,
+    // applied per switch). rustyboi's whole-dot DS->SS bridge folds the integer part;
+    // the residual half-dot per switch accumulates and its parity shifts the post-STOP
+    // LY-register boundary read one sub-dot. Mode-3 DS->SS switches carry their residual
+    // through the `stat_phase_carry` path instead, so they are excluded here.
+    #[serde(default)]
+    pub(in crate::ppu) dsss_ly_phase_count: u32,
+    // Total DS->SS switch count (INCLUDING mode-3) for the early-frame anticipation
+    // narrowing. Mode-3 DS->SS switches carry their sub-dot through the STAT-phase
+    // carry for the glitch-dot resolution, but the anticipation-window WIDTH of an
+    // early-frame read still tracks the full switch parity (extra mode-3 switches
+    // flip the narrow-window parity).
+    #[serde(default)]
+    pub(in crate::ppu) dsss_ly_total_count: u32,
+    // Set when an SS->DS speed switch executes during PixelTransfer (mode 3) and
+    // the bridge dropped 2 dots (see `stop_bridge_advance`). If a subsequent
+    // DS->SS switch follows (the double-switch speedchange{2..5} families), that
+    // bridge restores the 2 dots so the net renderer advance matches the
+    // single-switch base family's tuning. Cleared by the compensating DS->SS
+    // switch or at the next LCD enable / LY reset.
+    #[serde(default)]
+    pub(in crate::ppu) sc_mode3_pullback_pending: bool,
+    // Running count of DS->SS-during-mode3 STOP switches. The reference
+    // the speed-change re-anchor is `now -= 1` (HALF an SS dot) per DS->SS
+    // switch; the whole-dot bridge rounds each to 0, accumulating a missing HALF
+    // dot per switch. `floor(count/2)` extra STAT-only carry dots (via
+    // `stat_phase_carry`) reproduce that accumulated half-dot shift on the
+    // STAT/line phase WITHOUT moving the render latch.
+    #[serde(default)]
+    pub(in crate::ppu) dsss_mode3_stop_count: u32,
+    // Accumulated STAT-phase carry in master-cc (`1<<ds` per `stat_phase_carry`
+    // dot). The carry advances the
+    // STAT/line phase (line_cycle/abs_cc) so the STAT/m2-enable observables shift,
+    // but the pixel-fetcher render latch must stay anchored to its ORIGINAL
+    // position. The CPU VRAM/OAM/cgbp access-visibility gate (`ppu_blocks` via
+    // `render_carry_skew`) SUBTRACTS this skew from the access cc so a store still
+    // resolves against the un-carried fetcher mode-3 lock window — the decoupling
+    // that lets the odd STAT-phase shift land without moving the render latch.
+    #[serde(default)]
+    pub(in crate::ppu) render_carry_skew_cc: i64,
+    // Sub-PPU-dot parity (0/1) of the currently-resolving CPU register write at
+    // double speed. Set by the bus just before the FF4x write hooks run.
+    #[serde(skip, default)]
+    pub(in crate::ppu) write_subdot: u8,
+}
+
+/// Presentation + debug sinks: the double-buffered framebuffers the frontend
+/// reads, the panel-persistence state that decides what a skipped post-enable
+/// frame shows, and the opt-in fetch/pixel debug event journals.
+#[derive(Serialize, Deserialize, Clone)]
+pub(in crate::ppu) struct FrameOut {
+    #[serde(with = "fb_rle")]
+    pub(in crate::ppu) fb_a: Box<[u8; FRAMEBUFFER_SIZE]>,
+    #[serde(with = "fb_rle")]
+    pub(in crate::ppu) fb_b: Box<[u8; FRAMEBUFFER_SIZE]>,
+    /// SGB MASK_EN Freeze latch: the DMG shade frame captured at the first
+    /// frame boundary after the freeze engaged, shown instead of the live
+    /// frame until the mask clears (games hide their *_TRN transfer screens
+    /// behind this). None when not frozen.
+    #[serde(default)]
+    pub(in crate::ppu) sgb_freeze_fb: Option<Vec<u8>>,
+    #[serde(with = "fb_rle")]
+    pub(in crate::ppu) color_fb_a: Box<[u8; FRAMEBUFFER_SIZE * 3]>, // RGB color framebuffer
+    #[serde(with = "fb_rle")]
+    pub(in crate::ppu) color_fb_b: Box<[u8; FRAMEBUFFER_SIZE * 3]>, // RGB color framebuffer
+    pub(in crate::ppu) have_frame: bool,
+    // First-frame-after-LCD-enable display blanking. On real hardware the panel
+    // has not resynced for the first frame produced after LCDC.7 0->1, so it shows
+    // the LCD-off "whiter than white" blank instead of that frame's pixels.
+    // `frames_since_enable` counts completed frames since the last enable (saturating);
+    // get_frame presents blank until it reaches 2 (one full frame after enable has
+    // been displayed). Seeded to 2 so a skip_bios boot (LCD already on, no enable
+    // edge observed) — and a savestate from a running system — displays normally.
+    #[serde(default = "frames_since_enable_default")]
+    pub(in crate::ppu) frames_since_enable: u8,
+    // CGB panel persistence. The skipped first frame after an LCDC.7 enable is
+    // not driven to the panel; the panel keeps showing whatever it last showed,
+    // and decays to the "whiter than white" blank when the drive countdown
+    // (SameBoy `frame_repeat_countdown`, measured on CGB-E: 144*456*2 + 3640
+    // 8 MHz cycles, AGB 5982; re-armed at the START of every VBlank line
+    // 144-152, run down in real time even with the LCD off) expires before the
+    // skipped frame's own VBlank entry. The 144-line budget spans that render,
+    // so an off may only last ~1820 4 MHz cc (just under 4 lines, AGB 2991)
+    // measured from the start of the VBlank line it begins on. The EA CGB
+    // middleware (Madden/NHL 2000, Men in Black) flips its double-buffered
+    // tilemap every ~7 frames via a 2.5-line LCD off/on inside VBlank;
+    // blanking those skipped frames (the pre-fix behavior) strobed the menu
+    // white at ~9 Hz where hardware shows a seamless image. `last_drive_cc`
+    // is the master cc of the last driven VBlank line start;
+    // `panel_holds_image` is true once a frame has actually been DISPLAYED
+    // (not blanked), so a panel that never displayed anything (power-on,
+    // little-things-gb `firstwhite`'s one-frame enables) still blanks. Both
+    // are serde(skip): savestate bytes stay identical, and a restored state
+    // falls back to the blank for at most one frame.
+    #[serde(skip, default)]
+    pub(in crate::ppu) last_drive_cc: u64,
+    #[serde(skip, default)]
+    pub(in crate::ppu) panel_holds_image: bool,
+    // Latched at the skipped frame's VBlank entry (the repeat decision samples
+    // the drive window BEFORE that entry re-arms it, exactly as SameBoy checks
+    // `frame_repeat_countdown` before re-arming); applied at frame completion.
+    #[serde(skip, default)]
+    pub(in crate::ppu) repeat_skip_pending: bool,
+    #[serde(skip, default)]
+    pub(in crate::ppu) fetch_debug_events_enabled: bool,
+    #[serde(skip, default)]
+    pub(in crate::ppu) fetch_debug_events: Vec<FetchDebugEvent>,
+    #[serde(skip, default)]
+    pub(in crate::ppu) pixel_debug_events: Vec<PixelDebugEvent>,
+}
+
+// `Box<[u8; N]>` has no `Default`, and `frames_since_enable` must power on at
+// 2 (see the field's comment), so this cannot be derived.
+impl Default for FrameOut {
+    fn default() -> Self {
+        FrameOut {
+            fb_a: boxed_filled(0),
+            fb_b: boxed_filled(0),
+            sgb_freeze_fb: None,
+            color_fb_a: boxed_filled(0),
+            color_fb_b: boxed_filled(0),
+            have_frame: false,
+            frames_since_enable: frames_since_enable_default(),
+            last_drive_cc: 0,
+            panel_holds_image: false,
+            repeat_skip_pending: false,
+            fetch_debug_events_enabled: false,
+            fetch_debug_events: Vec::new(),
+            pixel_debug_events: Vec::new(),
+        }
+    }
+}
+
+/// The PPU-visible LCDC byte and everything that gates when a write to it
+/// becomes visible: the quantized pending-commit queue plus the exact-cc
+/// latches the per-substep consumers read instead of the queue.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub(in crate::ppu) struct LcdcState {
+    #[serde(default)]
+    pub(in crate::ppu) reg: u8,
+    #[serde(default)]
+    pub(in crate::ppu) cgb_tile_index_is_tile_data: bool,
+    #[serde(default)]
+    pub(in crate::ppu) pending_lcdc_events: Vec<PendingLcdcEvent>,
+    // Exact-cc latch for a mid-mode-3 CGB LCDC bit4 (BGWindowTileDataSelect)
+    // toggle. The per-dot pending-event queue quantizes the bit4 commit to a
+    // dot boundary, which at double speed lands the change one BG-fetch substep
+    // late (the change should split a tile between its TileDataLow and
+    // TileDataHigh fetches, but the dot model applies it a substep too late).
+    // Record the exact abs_cc at which the change becomes visible (`write_cc + 2`
+    // PPU dots) and let the fetcher consult it per-substep. (commit_cc, new_lcdc, old_lcdc).
+    #[serde(default)]
+    pub(in crate::ppu) lcdc_b4_exact: Option<(u64, u8, u8)>,
+    // Exact-cc window-enable (LCDC bit 5) toggle for the window-enable master checkpoints.
+    // rustyboi's pending_lcdc_events commit the window bit one PPU dot before
+    // the hardware LCDC write taking effect at cc+2 (the queue runs through one
+    // step_lcdc_events on the write dot). That 1-dot-early commit is harmless to
+    // the renderer/STAT resolve but mis-orders the lc450/lc454 window-enable master checkpoints
+    // against a window-enable write whose hardware commit (`write_cc + 2`) lands
+    // exactly on the checkpoint dot: hardware runs the window-enable master event
+    // BEFORE the LCDC write resolves, so the checkpoint sees the OLD window bit. We
+    // record the write's master-cc commit (`write_cc + 2`) and the bit's old/new
+    // values; `update_window_y_latch` reads the window-enable bit as-of the
+    // checkpoint cc through this. (commit_master_cc, new_win_bit, old_win_bit).
+    #[serde(default)]
+    pub(in crate::ppu) we_win_bit_exact: Option<(u64, bool, bool)>,
+}
+
+/// Mid-mode-3 VRAM address-bus glitch journals plus the fetch-grid anchors they
+/// are resolved against. Every member is per-line scratch, cleared at each
+/// mode-3 arm.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub(in crate::ppu) struct BusGlitch {
+    // CGB tile-index-is-tile-data glitch targets (the hardware tile-select glitch).
+    // Each falling mid-mode-3 LCDC.4 write records the single BG data read
+    // (target_cc, target_k) that lands in the write's 1-T-cycle glitch window and
+    // therefore returns the tile index instead of a VRAM byte. Resolved per fetch
+    // substep in `tidxtd_quirk_at_fetch`. Cleared at each mode-3 arm.
+    #[serde(default)]
+    pub(in crate::ppu) tidxtd_glitch: Vec<(u64, u8)>,
+    // DMG window bus-glitch journal: each mid-mode-3 LCDC write that toggles
+    // bit 6 (window map select) or bit 4 (tile data select) records
+    // (transition_cc, old_lcdc, new_lcdc) — the abs_cc at which the new address
+    // lines reach the VRAM bus. Window fetch reads are re-evaluated against it
+    // at their reconstructed hardware dots (see wg_apply). Cleared at each
+    // mode-3 arm.
+    #[serde(default)]
+    pub(in crate::ppu) wg_hist: Vec<(u64, u8, u8)>,
+    // Whether this line's bus-glitch journals resolve with the CGB-compat
+    // rules (DMG cart on CGB hardware, single speed) instead of the DMG ones.
+    // Latched at mode-3 arm.
+    #[serde(default)]
+    pub(in crate::ppu) wg_cgb: bool,
+    // The undelayed window-restart TileNumber dot (abs_cc) for the current
+    // line's window — the hardware fetch-grid origin F. None when the window
+    // did not start through the x==0 restart path this line (the glitch model
+    // is scoped to it) or when the pre-window sprite configuration is outside
+    // the single-sprite case.
+    #[serde(default)]
+    pub(in crate::ppu) wg_anchor_cc: Option<u64>,
+    // Hardware pre-window delay D_pre from an offscreen-left sprite (OAM X<=7)
+    // fetched before the window restart. 0 when none.
+    #[serde(default)]
+    pub(in crate::ppu) wg_dpre: u64,
+    // The line's first BG TileNumber read dot (abs_cc) — the hardware BG
+    // fetch-grid origin for bg_wg_apply / the SCY journal. Recorded at the
+    // tile-0 TileNumber substep; None before it or on lines that never fetch
+    // BG. Cleared at each mode-3 arm.
+    #[serde(default)]
+    pub(in crate::ppu) bg_anchor_cc: Option<u64>,
+    // The same origin in line-relative dots (`ticks`), recorded on every
+    // model (bg_anchor_cc is DMG-only). The BG fetch grid reaches display
+    // column C at `bg_anchor_dot + 8 + C`; the CGB WE-off revert column
+    // resolves against that grid. Cleared at each mode-3 arm.
+    #[serde(default)]
+    pub(in crate::ppu) bg_anchor_dot: Option<u128>,
+    // DMG mid-mode-3 SCY write journal: (transition_cc, old, new) — the abs_cc
+    // at which the new map-row / tile-line address bits reach the VRAM bus.
+    // BG fetch reads resolve SCY against it at their reconstructed hardware
+    // dots (see bg_wg_apply). Cleared at each mode-3 arm.
+    #[serde(default)]
+    pub(in crate::ppu) bg_scy_hist: Vec<(u64, u8, u8)>,
+    // DMG mid-mode-3 SCX write journal: (write_cc, old, new). The BG tile-map
+    // column resolves SCX against it at the tile's reconstructed hardware
+    // TileNumber dot (see bg_wg_apply / m3_scx_high_5_bits). Cleared each M3 arm.
+    #[serde(default)]
+    pub(in crate::ppu) bg_scx_hist: Vec<(u64, u8, u8)>,
+    // Capture-phase mid-mode-3 BG tile buffer (CGB-compat up-pulse LCDC.4 train
+    // re-resolve). Each BG tile pushed to the FIFO during mode 3 records the
+    // context needed to re-resolve its tile-data-select bits against the
+    // COMPLETE wg_hist journal at line-end and re-plot: (fetch index n, tile
+    // number, first display column, tile-row y (0..255)). Reset each mode-3 arm.
+    #[serde(default)]
+    pub(in crate::ppu) bg_tile_buf: Vec<CapturedBgTile>,
+    // Capture-phase mid-mode-3 WINDOW tile buffer (CGB-compat up-pulse LCDC.4
+    // train re-resolve; the window analog of bg_tile_buf). See win_train_reresolve.
+    #[serde(default)]
+    pub(in crate::ppu) win_tile_buf: Vec<CapturedWinTile>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Ppu {
     pub(in crate::ppu) fetcher: fetcher::Fetcher,
@@ -1238,9 +1504,6 @@ pub struct Ppu {
     pub(in crate::ppu) fetcher_cadence_tick: u8,
 
     // Window state tracking
-    // Serialized placeholder (wire-format pinned); superseded by `win_y_pos`.
-    // Never read or written outside `new`.
-    window_line_counter: u8,
     // The hardware `window Y position`: the window's internal Y line, incremented by 1 ONLY
     // at the moment the window actually begins drawing on a line (the mode-3-start window checkpoint /
     // pixel output draw-start), NOT per-line whenever ly > wy. Initialized to 0xFF
@@ -1309,12 +1572,6 @@ pub struct Ppu {
     pub(in crate::ppu) win_wx_enable_resolved: bool,
 
     // STAT interrupt state tracking
-    // Serialized placeholder (wire-format pinned); the edge-detection latch it
-    // fed was superseded by the event-scheduled STAT model. Never read.
-    previous_stat_interrupt_line: bool,
-    // Serialized placeholder (wire-format pinned); never read.
-    #[serde(default)]
-    mode2_irq_pretriggered_for_next_line: bool,
     // True for the first scanline after LCDC.7 transitions 0 -> 1. On real
     // hardware this line has no Mode 2 phase: STAT reports mode 0 until M3
     // begins, no Mode 2 STAT IRQ fires, and M3 starts later than usual
@@ -1331,10 +1588,6 @@ pub struct Ppu {
     // LY=0 Mode 2 pretrigger (both of which originally checked LY==153).
     #[serde(default)]
     pub(in crate::ppu) line_153_ly_zeroed: bool,
-    // Serialized placeholder (wire-format pinned); the mode-0 pretrigger is
-    // tracked by `mode0_reported_this_line` now. Never read.
-    #[serde(default)]
-    mode0_pretriggered_this_line: bool,
     // Number of BG pixels discarded so far for SCX fine-scroll alignment at
     // the start of Mode 3 (while x == 0). Faithful to the hardware mode-3-start fine-scroll
     // per-dot loop: each dot, the LIVE `scx % 8` is re-read; if we have not
@@ -1399,7 +1652,7 @@ pub struct Ppu {
     pub(in crate::ppu) insert_bg_pixel: bool,
     // DMG per-dot visibility history of LCDC.5 (window enable) inside mode 3,
     // shifted at the top of each PixelTransfer dot: [k] = the visible bit k
-    // dots ago ([0] = current dot). Our visible bit (self.lcdc, via the
+    // dots ago ([0] = current dot). Our visible bit (self.lcdc.reg, via the
     // 2-dot pending-event commit) turns OFF 2 dots before and ON 1 dot
     // before the hardware-visible bit, so an 8-cycle WE-off pulse spans 9
     // visible OFF dots. Three taps (each successive window row shifts the WE
@@ -1486,7 +1739,7 @@ pub struct Ppu {
     pub(in crate::ppu) scan_obj_size_large: bool,
     // Exact-cc OBJ-size (LCDC bit2) latch for the mode-2 OAM scan (PoC extension
     // of the SCX f1 / LCDC-bit4 pattern). A mid-mode-2 sprite-size write goes
-    // through the pending_lcdc_events queue (a 2-dot quantized self.lcdc commit)
+    // through the pending_lcdc_events queue (a 2-dot quantized self.lcdc.reg commit)
     // AND the per-slot `scan_obj_size_large` snapshot lags one slot, which on the
     // late_sizechange* tests pushes the change one OAM slot too late: the sprite
     // whose 8x16-only y-range straddles the line is scanned with the stale 8x8
@@ -1565,72 +1818,7 @@ pub struct Ppu {
     // enable, where it is seeded so the derived value equals the accumulator.
     #[serde(default = "pnow_disabled")]
     pub(in crate::ppu) p_now: u64,
-    // After a DS->SS speed switch the 3-dot stop bridge lands the LY counter one
-    // master-cc higher than hardware (the DS half-dot the whole-dot bridge can't
-    // express), so the closed-form `+1` the LY counter correction in `m0_time_exact`
-    // over-corrects by 1. Set on the DS->SS switch, cleared at the next LCD
-    // enable / LY reset.
-    #[serde(default)]
-    pub(in crate::ppu) lytime_no_plus1: bool,
-    // Set when an SS->DS speed switch executes DURING mode 3. Across the switch
-    // The hardware re-anchored LY-counter time (on a speed change) sits ~5 DS-dots
-    // (10 cc) ahead of rustyboi's bridged renderer line phase for the FF44 (LY)
-    // read's LY-register anticipation window. Consumed ONLY by `get_ly_reg_at_cc`
-    // (not the STAT/mode-0 time predictor, which is already correct). Cleared at the
-    // next LCD enable / LY reset, like `lytime_no_plus1`.
-    #[serde(default)]
-    pub(in crate::ppu) ssds_mode3_ly_advance: bool,
-    // Frame boundaries completed since `ssds_mode3_ly_advance` was last set. The
-    // mode-3-switch the LY counter re-anchor is a phase artifact local to the frames
-    // right after the switch; once several frame wraps re-settle the phase it no
-    // longer applies. Reset to 0 when the flag is set.
-    #[serde(default)]
-    pub(in crate::ppu) ssds_mode3_frames: u8,
-    // Cumulative NON-mode-3 (OAM/HBlank) DS->SS speed-switch count for the LY-read
-    // sub-dot phase accumulator (the hardware speed-change half-dot re-anchor,
-    // applied per switch). rustyboi's whole-dot DS->SS bridge folds the integer part;
-    // the residual half-dot per switch accumulates and its parity shifts the post-STOP
-    // LY-register boundary read one sub-dot. Mode-3 DS->SS switches carry their residual
-    // through the `stat_phase_carry` path instead, so they are excluded here.
-    #[serde(default)]
-    pub(in crate::ppu) dsss_ly_phase_count: u32,
-    // Total DS->SS switch count (INCLUDING mode-3) for the early-frame anticipation
-    // narrowing. Mode-3 DS->SS switches carry their sub-dot through the STAT-phase
-    // carry for the glitch-dot resolution, but the anticipation-window WIDTH of an
-    // early-frame read still tracks the full switch parity (extra mode-3 switches
-    // flip the narrow-window parity).
-    #[serde(default)]
-    pub(in crate::ppu) dsss_ly_total_count: u32,
-    // Set when an SS->DS speed switch executes during PixelTransfer (mode 3) and
-    // the bridge dropped 2 dots (see `stop_bridge_advance`). If a subsequent
-    // DS->SS switch follows (the double-switch speedchange{2..5} families), that
-    // bridge restores the 2 dots so the net renderer advance matches the
-    // single-switch base family's tuning. Cleared by the compensating DS->SS
-    // switch or at the next LCD enable / LY reset.
-    #[serde(default)]
-    pub(in crate::ppu) sc_mode3_pullback_pending: bool,
-    // Running count of DS->SS-during-mode3 STOP switches. The reference
-    // the speed-change re-anchor is `now -= 1` (HALF an SS dot) per DS->SS
-    // switch; the whole-dot bridge rounds each to 0, accumulating a missing HALF
-    // dot per switch. `floor(count/2)` extra STAT-only carry dots (via
-    // `stat_phase_carry`) reproduce that accumulated half-dot shift on the
-    // STAT/line phase WITHOUT moving the render latch.
-    #[serde(default)]
-    pub(in crate::ppu) dsss_mode3_stop_count: u32,
-    // Accumulated STAT-phase carry in master-cc (`1<<ds` per `stat_phase_carry`
-    // dot). The carry advances the
-    // STAT/line phase (line_cycle/abs_cc) so the STAT/m2-enable observables shift,
-    // but the pixel-fetcher render latch must stay anchored to its ORIGINAL
-    // position. The CPU VRAM/OAM/cgbp access-visibility gate (`ppu_blocks` via
-    // `render_carry_skew`) SUBTRACTS this skew from the access cc so a store still
-    // resolves against the un-carried fetcher mode-3 lock window — the decoupling
-    // that lets the odd STAT-phase shift land without moving the render latch.
-    #[serde(default)]
-    pub(in crate::ppu) render_carry_skew_cc: i64,
-    // Sub-PPU-dot parity (0/1) of the currently-resolving CPU register write at
-    // double speed. Set by the bus just before the FF4x write hooks run.
-    #[serde(skip, default)]
-    pub(in crate::ppu) write_subdot: u8,
+    pub(in crate::ppu) speed: SpeedPhase,
     // The hardware `wy2`: WY delayed by `6 - double_speed` cc after a write.
     // Event-scheduled against the write cc; consumed by the window-Y gate so
     // the M3-length predictor / window-start see the delayed value.
@@ -1838,144 +2026,13 @@ pub struct Ppu {
     #[serde(default)]
     pub(in crate::ppu) bgp_defer_countdown: u8,
 
-    #[serde(with = "fb_rle")]
-    pub(in crate::ppu) fb_a: Box<[u8; FRAMEBUFFER_SIZE]>,
-    #[serde(with = "fb_rle")]
-    pub(in crate::ppu) fb_b: Box<[u8; FRAMEBUFFER_SIZE]>,
-    /// SGB MASK_EN Freeze latch: the DMG shade frame captured at the first
-    /// frame boundary after the freeze engaged, shown instead of the live
-    /// frame until the mask clears (games hide their *_TRN transfer screens
-    /// behind this). None when not frozen.
-    #[serde(default)]
-    pub(in crate::ppu) sgb_freeze_fb: Option<Vec<u8>>,
-    #[serde(with = "fb_rle")]
-    pub(in crate::ppu) color_fb_a: Box<[u8; FRAMEBUFFER_SIZE * 3]>, // RGB color framebuffer
-    #[serde(with = "fb_rle")]
-    pub(in crate::ppu) color_fb_b: Box<[u8; FRAMEBUFFER_SIZE * 3]>, // RGB color framebuffer
-    pub(in crate::ppu) have_frame: bool,
-    // First-frame-after-LCD-enable display blanking. On real hardware the panel
-    // has not resynced for the first frame produced after LCDC.7 0->1, so it shows
-    // the LCD-off "whiter than white" blank instead of that frame's pixels.
-    // `frames_since_enable` counts completed frames since the last enable (saturating);
-    // get_frame presents blank until it reaches 2 (one full frame after enable has
-    // been displayed). Seeded to 2 so a skip_bios boot (LCD already on, no enable
-    // edge observed) — and a savestate from a running system — displays normally.
-    #[serde(default = "frames_since_enable_default")]
-    pub(in crate::ppu) frames_since_enable: u8,
-    // CGB panel persistence. The skipped first frame after an LCDC.7 enable is
-    // not driven to the panel; the panel keeps showing whatever it last showed,
-    // and decays to the "whiter than white" blank when the drive countdown
-    // (SameBoy `frame_repeat_countdown`, measured on CGB-E: 144*456*2 + 3640
-    // 8 MHz cycles, AGB 5982; re-armed at the START of every VBlank line
-    // 144-152, run down in real time even with the LCD off) expires before the
-    // skipped frame's own VBlank entry. The 144-line budget spans that render,
-    // so an off may only last ~1820 4 MHz cc (just under 4 lines, AGB 2991)
-    // measured from the start of the VBlank line it begins on. The EA CGB
-    // middleware (Madden/NHL 2000, Men in Black) flips its double-buffered
-    // tilemap every ~7 frames via a 2.5-line LCD off/on inside VBlank;
-    // blanking those skipped frames (the pre-fix behavior) strobed the menu
-    // white at ~9 Hz where hardware shows a seamless image. `last_drive_cc`
-    // is the master cc of the last driven VBlank line start;
-    // `panel_holds_image` is true once a frame has actually been DISPLAYED
-    // (not blanked), so a panel that never displayed anything (power-on,
-    // little-things-gb `firstwhite`'s one-frame enables) still blanks. Both
-    // are serde(skip): savestate bytes stay identical, and a restored state
-    // falls back to the blank for at most one frame.
-    #[serde(skip, default)]
-    pub(in crate::ppu) last_drive_cc: u64,
-    #[serde(skip, default)]
-    pub(in crate::ppu) panel_holds_image: bool,
-    // Latched at the skipped frame's VBlank entry (the repeat decision samples
-    // the drive window BEFORE that entry re-arms it, exactly as SameBoy checks
-    // `frame_repeat_countdown` before re-arming); applied at frame completion.
-    #[serde(skip, default)]
-    pub(in crate::ppu) repeat_skip_pending: bool,
-    #[serde(default)]
-    pub(in crate::ppu) lcdc: u8,
-    #[serde(default)]
-    pub(in crate::ppu) cgb_tile_index_is_tile_data: bool,
-    #[serde(default)]
-    pub(in crate::ppu) pending_lcdc_events: Vec<PendingLcdcEvent>,
-    // Exact-cc latch for a mid-mode-3 CGB LCDC bit4 (BGWindowTileDataSelect)
-    // toggle. The per-dot pending-event queue quantizes the bit4 commit to a
-    // dot boundary, which at double speed lands the change one BG-fetch substep
-    // late (the change should split a tile between its TileDataLow and
-    // TileDataHigh fetches, but the dot model applies it a substep too late).
-    // Record the exact abs_cc at which the change becomes visible (`write_cc + 2`
-    // PPU dots) and let the fetcher consult it per-substep. (commit_cc, new_lcdc, old_lcdc).
-    #[serde(default)]
-    pub(in crate::ppu) lcdc_b4_exact: Option<(u64, u8, u8)>,
-    // CGB tile-index-is-tile-data glitch targets (the hardware tile-select glitch).
-    // Each falling mid-mode-3 LCDC.4 write records the single BG data read
-    // (target_cc, target_k) that lands in the write's 1-T-cycle glitch window and
-    // therefore returns the tile index instead of a VRAM byte. Resolved per fetch
-    // substep in `tidxtd_quirk_at_fetch`. Cleared at each mode-3 arm.
-    #[serde(default)]
-    pub(in crate::ppu) tidxtd_glitch: Vec<(u64, u8)>,
-    // DMG window bus-glitch journal: each mid-mode-3 LCDC write that toggles
-    // bit 6 (window map select) or bit 4 (tile data select) records
-    // (transition_cc, old_lcdc, new_lcdc) — the abs_cc at which the new address
-    // lines reach the VRAM bus. Window fetch reads are re-evaluated against it
-    // at their reconstructed hardware dots (see wg_apply). Cleared at each
-    // mode-3 arm.
-    #[serde(default)]
-    pub(in crate::ppu) wg_hist: Vec<(u64, u8, u8)>,
-    // Whether this line's bus-glitch journals resolve with the CGB-compat
-    // rules (DMG cart on CGB hardware, single speed) instead of the DMG ones.
-    // Latched at mode-3 arm.
-    #[serde(default)]
-    pub(in crate::ppu) wg_cgb: bool,
-    // The undelayed window-restart TileNumber dot (abs_cc) for the current
-    // line's window — the hardware fetch-grid origin F. None when the window
-    // did not start through the x==0 restart path this line (the glitch model
-    // is scoped to it) or when the pre-window sprite configuration is outside
-    // the single-sprite case.
-    #[serde(default)]
-    pub(in crate::ppu) wg_anchor_cc: Option<u64>,
-    // Hardware pre-window delay D_pre from an offscreen-left sprite (OAM X<=7)
-    // fetched before the window restart. 0 when none.
-    #[serde(default)]
-    pub(in crate::ppu) wg_dpre: u64,
-    // The line's first BG TileNumber read dot (abs_cc) — the hardware BG
-    // fetch-grid origin for bg_wg_apply / the SCY journal. Recorded at the
-    // tile-0 TileNumber substep; None before it or on lines that never fetch
-    // BG. Cleared at each mode-3 arm.
-    #[serde(default)]
-    pub(in crate::ppu) bg_anchor_cc: Option<u64>,
-    // The same origin in line-relative dots (`ticks`), recorded on every
-    // model (bg_anchor_cc is DMG-only). The BG fetch grid reaches display
-    // column C at `bg_anchor_dot + 8 + C`; the CGB WE-off revert column
-    // resolves against that grid. Cleared at each mode-3 arm.
-    #[serde(default)]
-    pub(in crate::ppu) bg_anchor_dot: Option<u128>,
-    // DMG mid-mode-3 SCY write journal: (transition_cc, old, new) — the abs_cc
-    // at which the new map-row / tile-line address bits reach the VRAM bus.
-    // BG fetch reads resolve SCY against it at their reconstructed hardware
-    // dots (see bg_wg_apply). Cleared at each mode-3 arm.
-    #[serde(default)]
-    pub(in crate::ppu) bg_scy_hist: Vec<(u64, u8, u8)>,
-    // DMG mid-mode-3 SCX write journal: (write_cc, old, new). The BG tile-map
-    // column resolves SCX against it at the tile's reconstructed hardware
-    // TileNumber dot (see bg_wg_apply / m3_scx_high_5_bits). Cleared each M3 arm.
-    #[serde(default)]
-    pub(in crate::ppu) bg_scx_hist: Vec<(u64, u8, u8)>,
-    // Exact-cc window-enable (LCDC bit 5) toggle for the window-enable master checkpoints.
-    // rustyboi's pending_lcdc_events commit the window bit one PPU dot before
-    // the hardware LCDC write taking effect at cc+2 (the queue runs through one
-    // step_lcdc_events on the write dot). That 1-dot-early commit is harmless to
-    // the renderer/STAT resolve but mis-orders the lc450/lc454 window-enable master checkpoints
-    // against a window-enable write whose hardware commit (`write_cc + 2`) lands
-    // exactly on the checkpoint dot: hardware runs the window-enable master event
-    // BEFORE the LCDC write resolves, so the checkpoint sees the OLD window bit. We
-    // record the write's master-cc commit (`write_cc + 2`) and the bit's old/new
-    // values; `update_window_y_latch` reads the window-enable bit as-of the
-    // checkpoint cc through this. (commit_master_cc, new_win_bit, old_win_bit).
-    #[serde(default)]
-    pub(in crate::ppu) we_win_bit_exact: Option<(u64, bool, bool)>,
+    pub(in crate::ppu) out: FrameOut,
+    pub(in crate::ppu) lcdc: LcdcState,
+    pub(in crate::ppu) wg: BusGlitch,
     // Per-line LCDC.0 (BG-enable) plot history for the per-pixel renderer.
     // The per-dot draw is flushed in bursts (the
     // mode-0 time flush draws all remaining FIFO pixels at one cc), so a live
-    // `self.lcdc & 1` read applies the final BG-enable to every flushed column
+    // `self.lcdc.reg & 1` read applies the final BG-enable to every flushed column
     // and a mid-mode-3 LCDC.0 toggle (BG off then on within pixel transfer) is
     // lost. Hardware instead reads `lcdc & bg_enable` live as the fetcher walks
     // tiles, so each plotted column sees the BG-enable bit in effect at its own
@@ -2062,17 +2119,6 @@ pub struct Ppu {
     // through the OR palette at mode-3 end. 160 entries, reset each line.
     #[serde(default)]
     pub(in crate::ppu) line_bg_idx: Vec<i8>,
-    // Capture-phase mid-mode-3 BG tile buffer (CGB-compat up-pulse LCDC.4 train
-    // re-resolve). Each BG tile pushed to the FIFO during mode 3 records the
-    // context needed to re-resolve its tile-data-select bits against the
-    // COMPLETE wg_hist journal at line-end and re-plot: (fetch index n, tile
-    // number, first display column, tile-row y (0..255)). Reset each mode-3 arm.
-    #[serde(default)]
-    pub(in crate::ppu) bg_tile_buf: Vec<CapturedBgTile>,
-    // Capture-phase mid-mode-3 WINDOW tile buffer (CGB-compat up-pulse LCDC.4
-    // train re-resolve; the window analog of bg_tile_buf). See win_train_reresolve.
-    #[serde(default)]
-    pub(in crate::ppu) win_tile_buf: Vec<CapturedWinTile>,
     // Every mid-mode-3 BGP write on the current line, as (abs_cc, display_col, old|new).
     // The DMG palette-latch glitch is a TWO-WRITE interaction: a write spikes its own
     // pixel only when it has a neighboring mid-mode-3 write within the tight SET/RESTORE
@@ -2090,12 +2136,6 @@ pub struct Ppu {
     pub(in crate::ppu) bgp_mode2_pending: Option<(u64, u8)>,
     #[serde(default)]
     pub(in crate::ppu) cgb_color_conversion: ColorCorrection,
-    #[serde(skip, default)]
-    pub(in crate::ppu) fetch_debug_events_enabled: bool,
-    #[serde(skip, default)]
-    pub(in crate::ppu) fetch_debug_events: Vec<FetchDebugEvent>,
-    #[serde(skip, default)]
-    pub(in crate::ppu) pixel_debug_events: Vec<PixelDebugEvent>,
 }
 
 impl Default for Ppu {
@@ -2124,7 +2164,6 @@ impl Ppu {
             sprite_fetch_stall: 0,
             pixel_transfer_warmup: 0,
             fetcher_cadence_tick: 0,
-            window_line_counter: 0,
             win_y_pos: 0xFF,
             win_draw_start: false,
             win_draw_started_at_x0: false,
@@ -2136,12 +2175,9 @@ impl Ppu {
             win_wx_enable_resolved: false,
             window_started_this_line: false,
             win_weoff_deferred_tail: false,
-            previous_stat_interrupt_line: false,
-            mode2_irq_pretriggered_for_next_line: false,
             first_line_after_enable: false,
             display_enable_inactive_until: 0,
             line_153_ly_zeroed: false,
-            mode0_pretriggered_this_line: false,
             m3_pixels_discarded: 0,
             m3_discard_target: -1,
             m3_arm_scx_full: -1,
@@ -2166,14 +2202,7 @@ impl Ppu {
             objsize_new_large: false,
             scheduled_mode0_dot: None,
             m0_time_master: None,
-            lytime_no_plus1: false,
-            ssds_mode3_ly_advance: false,
-            ssds_mode3_frames: 0,
-            dsss_ly_phase_count: 0,
-            dsss_ly_total_count: 0,
-            sc_mode3_pullback_pending: false,
-            dsss_mode3_stop_count: 0,
-            render_carry_skew_cc: 0,
+            speed: SpeedPhase::default(),
             cgbp_block_start_cc: None,
             mode0_reported_this_line: false,
             line_rendered_this_line: false,
@@ -2189,13 +2218,10 @@ impl Ppu {
             obp0_history: Vec::new(),
             obp1_history: Vec::new(),
             line_bg_idx: vec![-1; 160],
-            bg_tile_buf: Vec::new(),
-            win_tile_buf: Vec::new(),
             bgp_writes: Vec::new(),
             bgp_mode2_pending: None,
             abs_cc: 0,
             p_now: pnow_disabled(),
-            write_subdot: 0,
             wy2: 0,
             wy2_apply_cc: wy2_disabled(),
             wy2_pending: 0,
@@ -2241,34 +2267,10 @@ impl Ppu {
             obp1_delayed: 0,
             bgp_defer_hold: 0,
             bgp_defer_countdown: 0,
-            fb_a: boxed_filled(0),
-            fb_b: boxed_filled(0),
-            sgb_freeze_fb: None,
-            color_fb_a: boxed_filled(0),
-            color_fb_b: boxed_filled(0),
-            have_frame: false,
-            frames_since_enable: 2,
-            last_drive_cc: 0,
-            panel_holds_image: false,
-            repeat_skip_pending: false,
-            lcdc: 0,
-            cgb_tile_index_is_tile_data: false,
-            pending_lcdc_events: Vec::new(),
-            lcdc_b4_exact: None,
-            tidxtd_glitch: Vec::new(),
-            wg_hist: Vec::new(),
-            wg_cgb: false,
-            wg_anchor_cc: None,
-            wg_dpre: 0,
-            bg_anchor_cc: None,
-            bg_anchor_dot: None,
-            bg_scy_hist: Vec::new(),
-            bg_scx_hist: Vec::new(),
-            we_win_bit_exact: None,
+            out: FrameOut::default(),
+            lcdc: LcdcState::default(),
+            wg: BusGlitch::default(),
             cgb_color_conversion: ColorCorrection::Lcd,
-            fetch_debug_events_enabled: false,
-            fetch_debug_events: Vec::new(),
-            pixel_debug_events: Vec::new(),
         }
     }
 
@@ -2286,7 +2288,7 @@ impl Ppu {
 
     pub(crate) fn sync_lcdc_from_mmio(&mut self, mmio: &mmio::Mmio) {
         self.set_lcdc_visible(mmio.read(LCD_CONTROL), mmio.is_cgb_features_enabled(), mmio.is_double_speed_mode());
-        self.pending_lcdc_events.clear();
+        self.lcdc.pending_lcdc_events.clear();
     }
 
     /// Seed the post-boot PPU frame phase for `skip_bios`. The real boot ROM
@@ -2350,8 +2352,8 @@ impl Ppu {
         // line_cycle by one dot.
         self.abs_cc = 0;
         self.p_now = mmio.master_cc();
-        self.lytime_no_plus1 = false;
-        self.ssds_mode3_ly_advance = false;
+        self.speed.lytime_no_plus1 = false;
+        self.speed.ssds_mode3_ly_advance = false;
 
         // Publish LY and the VBlank STAT mode (FF41 mode bits = 1).
         mmio.write_ly_from_ppu(ly_reg);
@@ -2414,11 +2416,11 @@ impl Ppu {
     /// no such carry: their accumulated parity determines whether a post-STOP boundary
     /// LY read lands one sub-dot early (anticipated) or late (stale).
     pub(crate) fn bump_dsss_ly_phase(&mut self) {
-        self.dsss_ly_phase_count += 1;
+        self.speed.dsss_ly_phase_count += 1;
     }
     /// Register any DS->SS switch (including mode-3) for the total-parity accumulator.
     pub(crate) fn bump_dsss_ly_total(&mut self) {
-        self.dsss_ly_total_count += 1;
+        self.speed.dsss_ly_total_count += 1;
     }
 
 
@@ -2489,7 +2491,7 @@ impl Ppu {
             } else {
                 return;
             }
-        } else if self.lcdc&(LCDCFlags::DisplayEnable as u8) == 0 {
+        } else if self.lcdc.reg&(LCDCFlags::DisplayEnable as u8) == 0 {
             self.enter_lcd_disabled(mmio);
             return;
         }
@@ -2687,15 +2689,15 @@ mod tests {
         ppu.handle_lcdc_write(new_lcdc, &mmio);
 
         ppu.step_lcdc_events(&mmio);
-        assert_eq!(ppu.lcdc & (LCDCFlags::BGWindowTileDataSelect as u8), 0);
-        assert_eq!(ppu.lcdc & (LCDCFlags::BGDisplay as u8), 0);
-        assert_eq!(ppu.lcdc & (LCDCFlags::BGTileMapDisplaySelect as u8), 0);
-        assert!(ppu.cgb_tile_index_is_tile_data);
+        assert_eq!(ppu.lcdc.reg & (LCDCFlags::BGWindowTileDataSelect as u8), 0);
+        assert_eq!(ppu.lcdc.reg & (LCDCFlags::BGDisplay as u8), 0);
+        assert_eq!(ppu.lcdc.reg & (LCDCFlags::BGTileMapDisplaySelect as u8), 0);
+        assert!(ppu.lcdc.cgb_tile_index_is_tile_data);
 
         ppu.step_lcdc_events(&mmio);
-        assert_eq!(ppu.lcdc, new_lcdc);
-        assert_ne!(ppu.lcdc & (LCDCFlags::BGDisplay as u8), 0);
-        assert!(!ppu.cgb_tile_index_is_tile_data);
+        assert_eq!(ppu.lcdc.reg, new_lcdc);
+        assert_ne!(ppu.lcdc.reg & (LCDCFlags::BGDisplay as u8), 0);
+        assert!(!ppu.lcdc.cgb_tile_index_is_tile_data);
     }
 
     // The DMG "line 154" STAT-write VBlank-IF glitch is a PPU-line phenomenon:
@@ -2747,14 +2749,14 @@ mod tests {
             mmio.bulk_advance_idle(now);
 
             let mut ppu = Ppu::new();
-            ppu.color_fb_b.fill(0x12); // a distinctive, non-white retained image
-            ppu.panel_holds_image = true;
-            ppu.last_drive_cc = now - diff_from_anchor;
+            ppu.out.color_fb_b.fill(0x12); // a distinctive, non-white retained image
+            ppu.out.panel_holds_image = true;
+            ppu.out.last_drive_cc = now - diff_from_anchor;
             // The skipped post-enable frame: LCD on, but fewer than two frames
             // displayed since the enable edge, so `blank_panel` takes the
             // persistence path rather than the normal framebuffer.
             ppu.disabled = false;
-            ppu.frames_since_enable = 1;
+            ppu.out.frames_since_enable = 1;
 
             match ppu.get_frame(&mmio) {
                 RenderedFrame::Color(fb) => {

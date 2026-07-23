@@ -65,28 +65,28 @@ impl Ppu {
     /// access in the un-carried fetcher geometry (the carry moved the LY time
     /// boundaries but not the fetcher's lock window). 0 when no carry is live.
     pub(crate) fn render_carry_skew(&self) -> i64 {
-        self.render_carry_skew_cc
+        self.speed.render_carry_skew_cc
     }
 
     pub fn set_fetch_debug_events_enabled(&mut self, enabled: bool) {
-        self.fetch_debug_events_enabled = enabled;
+        self.out.fetch_debug_events_enabled = enabled;
         if !enabled {
-            self.fetch_debug_events.clear();
-            self.pixel_debug_events.clear();
+            self.out.fetch_debug_events.clear();
+            self.out.pixel_debug_events.clear();
         }
     }
 
     pub fn take_fetch_debug_events(&mut self) -> Vec<FetchDebugEvent> {
-        std::mem::take(&mut self.fetch_debug_events)
+        std::mem::take(&mut self.out.fetch_debug_events)
     }
 
     pub fn take_pixel_debug_events(&mut self) -> Vec<PixelDebugEvent> {
-        std::mem::take(&mut self.pixel_debug_events)
+        std::mem::take(&mut self.out.pixel_debug_events)
     }
 
     #[inline]
     pub(in crate::ppu) fn record_fetch_debug_event(&mut self, event: fetcher::FetcherDebugEvent, mmio: &mmio::Mmio) {
-        if !self.fetch_debug_events_enabled {
+        if !self.out.fetch_debug_events_enabled {
             return;
         }
         self.record_fetch_debug_event_slow(event, mmio);
@@ -100,7 +100,7 @@ impl Ppu {
             fetcher::FetcherDebugEventKind::PushToFifo => FetchDebugEventKind::PushToFifo,
         };
 
-        self.fetch_debug_events.push(FetchDebugEvent {
+        self.out.fetch_debug_events.push(FetchDebugEvent {
             kind,
             ppu_ticks: self.ticks,
             x: self.x,
@@ -119,29 +119,29 @@ impl Ppu {
     }
 
     pub(in crate::ppu) fn record_pixel_debug_event(&mut self, ly: u8, bg_pixel_idx: u8, rgb: [u8; 3]) {
-        if !self.fetch_debug_events_enabled {
+        if !self.out.fetch_debug_events_enabled {
             return;
         }
 
-        self.pixel_debug_events.push(PixelDebugEvent {
+        self.out.pixel_debug_events.push(PixelDebugEvent {
             ppu_ticks: self.ticks,
             x: self.x,
             ly,
             bg_pixel_idx,
             rgb,
-            lcdc: self.lcdc,
+            lcdc: self.lcdc.reg,
         });
     }
 
     pub fn frame_ready(&self) -> bool {
-        self.have_frame
+        self.out.have_frame
     }
 
     /// The completed DMG shade-index frame (the back buffer `get_frame`
     /// serves). The SGB *_TRN readout captures from this: the real SGB
     /// re-digitizes the displayed video signal, not the GB's VRAM.
     pub(crate) fn dmg_shade_frame(&self) -> &[u8; FRAMEBUFFER_SIZE] {
-        &self.fb_b
+        &self.out.fb_b
     }
 
     /// The *presented* DMG shade-index frame: the mono output `get_frame` would
@@ -156,13 +156,13 @@ impl Ppu {
         if let Some(sgb) = mmio.sgb() {
             return match self.sgb_frame(sgb) {
                 RenderedFrame::Monochrome(m) => m,
-                RenderedFrame::Color(_) => self.fb_b.clone(),
+                RenderedFrame::Color(_) => self.out.fb_b.clone(),
             };
         }
-        if self.disabled || self.frames_since_enable < 2 {
+        if self.disabled || self.out.frames_since_enable < 2 {
             boxed_filled(0)
         } else {
-            self.fb_b.clone()
+            self.out.fb_b.clone()
         }
     }
 
@@ -183,10 +183,10 @@ impl Ppu {
         }
         if self.renders_color(mmio) {
             if !self.is_in_pixel_transfer() {
-                self.color_fb_b.fill(0x00);
+                self.out.color_fb_b.fill(0x00);
             }
         } else {
-            self.fb_b.fill(0);
+            self.out.fb_b.fill(0);
         }
     }
 
@@ -208,12 +208,12 @@ impl Ppu {
     pub(in crate::ppu) fn panel_recently_driven(&self, mmio: &mmio::Mmio) -> bool {
         let margin = if mmio.is_agb() { 5982 / 2 } else { 3640 / 2 };
         let window = (144 * 456 + margin) << (mmio.is_double_speed_mode() as u32);
-        self.panel_holds_image
-            && mmio.master_cc().wrapping_sub(self.last_drive_cc) <= window
+        self.out.panel_holds_image
+            && mmio.master_cc().wrapping_sub(self.out.last_drive_cc) <= window
     }
 
     pub(crate) fn get_frame(&mut self, mmio: &mmio::Mmio) -> RenderedFrame {
-        self.have_frame = false;
+        self.out.have_frame = false;
         // Hardware panel blank: the LCD off state and the first frame after an
         // enable both show "whiter than white" (blank), not the framebuffer. The
         // panel needs one fully-displayed frame after enable to resync, so a frame
@@ -223,7 +223,7 @@ impl Ppu {
         // reaches that, so the panel stays blank. SGB keeps its own mask/border
         // compositing (handled in sgb_frame), so this blanking is gated off there.
         let blank_panel =
-            mmio.sgb().is_none() && (self.disabled || self.frames_since_enable < 2);
+            mmio.sgb().is_none() && (self.disabled || self.out.frames_since_enable < 2);
         if self.renders_color(mmio) {
             if blank_panel {
                 // CGB panel persistence: a panel whose drive countdown has not
@@ -233,22 +233,22 @@ impl Ppu {
                 // the last driven VBlank-line start (see
                 // `panel_recently_driven`).
                 if self.panel_recently_driven(mmio) {
-                    return RenderedFrame::Color(self.color_fb_b.clone());
+                    return RenderedFrame::Color(self.out.color_fb_b.clone());
                 }
                 // CGB white == RGB 0xFFFFFF.
                 return RenderedFrame::Color(boxed_filled(0xFF));
             }
-            RenderedFrame::Color(self.color_fb_b.clone())
+            RenderedFrame::Color(self.out.color_fb_b.clone())
         } else if let Some(sgb) = mmio.sgb() {
             // MASK_EN Freeze: latch the frame completed at the freeze and keep
             // showing it (the transfer screens games draw behind the mask stay
             // hidden); drop the latch as soon as the mask leaves Freeze.
             if matches!(sgb.mask, crate::sgb::MaskMode::Freeze) {
-                if self.sgb_freeze_fb.is_none() {
-                    self.sgb_freeze_fb = Some(self.fb_b.to_vec());
+                if self.out.sgb_freeze_fb.is_none() {
+                    self.out.sgb_freeze_fb = Some(self.out.fb_b.to_vec());
                 }
-            } else if self.sgb_freeze_fb.is_some() {
-                self.sgb_freeze_fb = None;
+            } else if self.out.sgb_freeze_fb.is_some() {
+                self.out.sgb_freeze_fb = None;
             }
             self.sgb_frame(sgb)
         } else {
@@ -256,7 +256,7 @@ impl Ppu {
                 // DMG white == shade index 0.
                 return RenderedFrame::Monochrome(boxed_filled(0));
             }
-            RenderedFrame::Monochrome(self.fb_b.clone())
+            RenderedFrame::Monochrome(self.out.fb_b.clone())
         }
     }
 
@@ -272,9 +272,9 @@ impl Ppu {
         // black (the SNES blanks to color 0x0000); Color0 blanks to the shared
         // backdrop color (color 0).
         let blank = matches!(sgb.mask, MaskMode::Black | MaskMode::Color0);
-        let src: &[u8] = match self.sgb_freeze_fb.as_deref() {
+        let src: &[u8] = match self.out.sgb_freeze_fb.as_deref() {
             Some(f) if f.len() == FRAMEBUFFER_SIZE => f,
-            _ => &self.fb_b[..],
+            _ => &self.out.fb_b[..],
         };
 
         if !sgb.colorized {
@@ -355,9 +355,9 @@ impl Ppu {
         // shades — the caller passes the SGB system palette the firmware
         // would have picked for this cart, so a non-aware game shows its
         // 1-A/Auto colours inside the border instead of grey.
-        let src: &[u8] = match self.sgb_freeze_fb.as_deref() {
+        let src: &[u8] = match self.out.sgb_freeze_fb.as_deref() {
             Some(f) if f.len() == FRAMEBUFFER_SIZE => f,
-            _ => &self.fb_b[..],
+            _ => &self.out.fb_b[..],
         };
         for y in 0..144usize {
             for x in 0..160usize {
@@ -548,7 +548,7 @@ impl Ppu {
     }
 
     pub fn has_frame(&self) -> bool {
-        self.have_frame
+        self.out.have_frame
     }
 
     pub fn get_sprites_on_line_count(&self) -> usize {

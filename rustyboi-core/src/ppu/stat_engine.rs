@@ -39,7 +39,7 @@ impl Ppu {
     /// (its fire-cc anchors are re-anchored in Stages 2-4, not here).
     pub(in crate::ppu) fn ly_counter_obs(&self, mmio: &mmio::Mmio) -> stat_irq::LyCounter {
         let mut lc = self.ly_counter(mmio);
-        if lc.ds && !self.lytime_no_plus1 {
+        if lc.ds && !self.speed.lytime_no_plus1 {
             lc.time += 1;
         }
         lc
@@ -197,24 +197,24 @@ impl Ppu {
     /// drops its `+1` the LY counter correction (the whole-dot bridge already lands
     /// the counter one master-cc high). See ENGINE_LAZY_PPU.md bug #2.
     pub(crate) fn set_dsss_lytime_adjust(&mut self) {
-        self.lytime_no_plus1 = true;
+        self.speed.lytime_no_plus1 = true;
     }
     pub(in crate::ppu) fn dsss_ly_total_par(&self) -> i64 {
-        (self.dsss_ly_total_count % 2) as i64
+        (self.speed.dsss_ly_total_count % 2) as i64
     }
     pub(crate) fn dsss_ly_phase_par(&self) -> i64 {
-        (self.dsss_ly_phase_count % 2) as i64
+        (self.speed.dsss_ly_phase_count % 2) as i64
     }
     /// True once any post-STOP DS->SS switch has accumulated a sub-dot phase.
     pub(crate) fn dsss_ly_phase_active(&self) -> bool {
-        self.dsss_ly_phase_count > 0
+        self.speed.dsss_ly_phase_count > 0
     }
     /// Latch the SS->DS-during-mode3 FF44 (LY) read phase advance. Consumed only
     /// by `get_ly_reg_at_cc` to resolve the LY-register anticipation window against
     /// the hardware re-anchored LY time (the renderer/STAT/m0 phase is unaffected).
     pub(crate) fn set_ssds_mode3_ly_advance(&mut self) {
-        self.ssds_mode3_ly_advance = true;
-        self.ssds_mode3_frames = 0;
+        self.speed.ssds_mode3_ly_advance = true;
+        self.speed.ssds_mode3_frames = 0;
     }
     /// Advance the STAT/LINE-PHASE clock by ONE dot
     /// WITHOUT moving the pixel-fetcher render latch (`self.ticks`/`self.x`/the
@@ -266,9 +266,9 @@ impl Ppu {
     /// invariant by construction (the carry depends only on the running count,
     /// not on any single STOP's integer-cc). Returns 0 on the odd switches.
     pub(crate) fn register_dsss_mode3_stop(&mut self) -> u32 {
-        let before = self.dsss_mode3_stop_count / 2;
-        self.dsss_mode3_stop_count += 1;
-        let after = self.dsss_mode3_stop_count / 2;
+        let before = self.speed.dsss_mode3_stop_count / 2;
+        self.speed.dsss_mode3_stop_count += 1;
+        let after = self.speed.dsss_mode3_stop_count / 2;
         after - before
     }
     /// The decoupled STAT-phase carry as a bridge step. Advances the
@@ -288,7 +288,7 @@ impl Ppu {
             // latch did NOT. Record the divergence so the CPU-access visibility
             // gate (`ppu_blocks` -> `render_carry_skew`) re-aligns a store to the
             // un-carried fetcher position.
-            self.render_carry_skew_cc += dot_cc;
+            self.speed.render_carry_skew_cc += dot_cc;
         }
     }
     /// Recompute all scheduled IRQ event times from scratch at the current
@@ -479,7 +479,7 @@ impl Ppu {
             return 0;
         }
         // A pending delayed LCDC commit must land at its exact dot.
-        if !self.pending_lcdc_events.is_empty() {
+        if !self.lcdc.pending_lcdc_events.is_empty() {
             return 0;
         }
         let mut interior = (INTERIOR_START, INTERIOR_END);

@@ -208,7 +208,7 @@ impl Ppu {
     /// must sample the same phase.
     #[inline]
     pub(in crate::ppu) fn ly_plus1(&self) -> i64 {
-        if self.lytime_no_plus1 { 0 } else { 1 }
+        if self.speed.lytime_no_plus1 { 0 } else { 1 }
     }
 
     /// The LY time in master cc, anchored on `abs_cc` plus the dots remaining in

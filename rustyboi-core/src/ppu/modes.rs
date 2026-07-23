@@ -148,7 +148,7 @@ impl Ppu {
             self.first_line_after_enable = true;
             // First-frame-after-enable blanking: the panel shows the LCD-off
             // blank for the frame produced immediately after this enable.
-            self.frames_since_enable = 0;
+            self.out.frames_since_enable = 0;
             // The OAM snapshot at enable holds inactive until `cc + (2*40 << ds) + 1`.
             // the STAT resolve reports mode 0 (suppresses mode 2/3) for `cc < lu_`.
             {
@@ -180,8 +180,8 @@ impl Ppu {
             // anchor subtracts that one dot the old accumulator added below.
             let ds_inc = 1u64 << mmio.is_double_speed_mode() as u32;
             self.p_now = mmio.master_cc().wrapping_sub(self.abs_cc + ds_inc);
-            self.lytime_no_plus1 = false;
-            self.sc_mode3_pullback_pending = false;
+            self.speed.lytime_no_plus1 = false;
+            self.speed.sc_mode3_pullback_pending = false;
             self.wy2 = mmio.read(WY);
             self.wy2_apply_cc = wy2_disabled();
             self.wy1 = mmio.read(WY);
@@ -505,22 +505,22 @@ impl Ppu {
             // Per-line tile-index-is-tile-data glitch targets (the hardware
             // tile-select glitch); mid-mode-3 falling LCDC.4 writes append the
             // single (cc, k) read each arms (see handle_lcdc_write).
-            self.tidxtd_glitch.clear();
+            self.wg.tidxtd_glitch.clear();
             // DMG window bus-glitch state is per-line (see wg_apply).
-            self.wg_hist.clear();
-            self.bg_tile_buf.clear();
-            self.win_tile_buf.clear();
-            self.wg_anchor_cc = None;
-            self.wg_dpre = 0;
-            self.bg_anchor_cc = None;
-            self.bg_anchor_dot = None;
-            self.bg_scy_hist.clear();
-            self.bg_scx_hist.clear();
+            self.wg.wg_hist.clear();
+            self.wg.bg_tile_buf.clear();
+            self.wg.win_tile_buf.clear();
+            self.wg.wg_anchor_cc = None;
+            self.wg.wg_dpre = 0;
+            self.wg.bg_anchor_cc = None;
+            self.wg.bg_anchor_dot = None;
+            self.wg.bg_scy_hist.clear();
+            self.wg.bg_scx_hist.clear();
             // CGB-compat journal flavor (see the CGBWG_* consts): DMG cart on
             // CGB hardware (compat mode runs with CGB features OFF, so
             // it shares the DMG render paths; the journals resolve
             // with the CGB grid/transition rules instead).
-            self.wg_cgb = mmio.is_cgb() && !mmio.is_cgb_features_enabled();
+            self.wg.wg_cgb = mmio.is_cgb() && !mmio.is_cgb_features_enabled();
             // Per-pixel DMG palette histories: seed each at boundary 0 with
             // the 1-dot-delayed register value (`*_delayed`, refreshed at the
             // end of every dot), NOT the live register. A BGP/OBP write on the
@@ -538,7 +538,7 @@ impl Ppu {
             // mode-3 column-0 pixel with the LIVE BGP register (age m3-bg-bgp-ncm:
             // the pre-frame BGP is already latched at mode-3 arm). DMG keeps the
             // 1-dot-delayed seed (dmgpalette_during_m3, via bgp_history).
-            let bgp_dot_seed = if self.wg_cgb { mmio.read(BGP) } else { self.bgp_delayed };
+            let bgp_dot_seed = if self.wg.wg_cgb { mmio.read(BGP) } else { self.bgp_delayed };
             self.bgp_dot_history.push((0, bgp_dot_seed));
             // Clear any leftover DMG BGP phase-hold from the previous line.
             self.bgp_defer_countdown = 0;
@@ -754,12 +754,12 @@ impl Ppu {
                 // skipped frame denied the repeat (panel already
                 // decayed) does not re-arm — the panel stays undriven
                 // until a displayed frame.
-                if self.frames_since_enable == 0 {
-                    self.repeat_skip_pending =
+                if self.out.frames_since_enable == 0 {
+                    self.out.repeat_skip_pending =
                         self.renders_color(mmio) && self.panel_recently_driven(mmio);
                 }
-                if self.frames_since_enable != 0 || self.repeat_skip_pending {
-                    self.last_drive_cc = mmio.master_cc();
+                if self.out.frames_since_enable != 0 || self.out.repeat_skip_pending {
+                    self.out.last_drive_cc = mmio.master_cc();
                 }
                 Self::set_lcd_status_mode(mmio, 1);
                 // The m1 event already flagged VBlank (line_cycle 454, ~3cc
@@ -868,31 +868,31 @@ impl Ppu {
                 // DMG panels show the blank for the skipped frame instead
                 // of repeating (SameBoy: CGB-only REPEAT vblank type).
                 let repeat_skip =
-                    self.frames_since_enable == 0 && self.repeat_skip_pending;
-                self.repeat_skip_pending = false;
+                    self.out.frames_since_enable == 0 && self.out.repeat_skip_pending;
+                self.out.repeat_skip_pending = false;
                 if repeat_skip {
-                    self.color_fb_a.fill(0);
-                    self.frames_since_enable = 2;
+                    self.out.color_fb_a.fill(0);
+                    self.out.frames_since_enable = 2;
                 } else if self.renders_color(mmio) {
                     // CGB / DMG-compat-on-CGB: swap color framebuffers
-                    std::mem::swap(&mut self.color_fb_b, &mut self.color_fb_a);
-                    self.color_fb_a.fill(0);
+                    std::mem::swap(&mut self.out.color_fb_b, &mut self.out.color_fb_a);
+                    self.out.color_fb_a.fill(0);
                 } else {
                     // DMG mode: swap monochrome framebuffers
-                    std::mem::swap(&mut self.fb_b, &mut self.fb_a);
-                    self.fb_a.fill(0);
+                    std::mem::swap(&mut self.out.fb_b, &mut self.out.fb_a);
+                    self.out.fb_a.fill(0);
                 }
 
-                self.have_frame = true;
+                self.out.have_frame = true;
                 // Count this completed frame toward post-enable resync so
                 // get_frame stops blanking once a full frame has displayed.
                 if !repeat_skip {
-                    self.frames_since_enable = self.frames_since_enable.saturating_add(1);
+                    self.out.frames_since_enable = self.out.frames_since_enable.saturating_add(1);
                 }
                 // The panel holds a real image only while completed frames
                 // are actually displayed (not blanked by the resync rule);
                 // a blanked skipped frame means the panel decayed to white.
-                self.panel_holds_image = self.frames_since_enable >= 2;
+                self.out.panel_holds_image = self.out.frames_since_enable >= 2;
                 // The SS->DS-mode3 the LY counter re-anchor is a phase artifact
                 // local to the frame(s) right after the switch; once two
                 // frame wraps have re-settled the line phase (age lcd-align-ly:
@@ -900,10 +900,10 @@ impl Ppu {
                 // the switch) it no longer applies and the LY-register reads
                 // resolve through the standard DS window. The age `ly`
                 // mode-3-switch probes read within 0-1 wraps and keep it.
-                if self.ssds_mode3_ly_advance {
-                    self.ssds_mode3_frames = self.ssds_mode3_frames.saturating_add(1);
-                    if self.ssds_mode3_frames >= 2 {
-                        self.ssds_mode3_ly_advance = false;
+                if self.speed.ssds_mode3_ly_advance {
+                    self.speed.ssds_mode3_frames = self.speed.ssds_mode3_frames.saturating_add(1);
+                    if self.speed.ssds_mode3_frames >= 2 {
+                        self.speed.ssds_mode3_ly_advance = false;
                     }
                 }
             } else if (144..153).contains(&current_ly) {
@@ -916,9 +916,9 @@ impl Ppu {
                 // line start, so late-VBlank offs (the EA flip at
                 // LY 145+) still repeat. Line 153 does not re-arm.
                 if next_ly <= 152
-                    && (self.frames_since_enable != 0 || self.repeat_skip_pending)
+                    && (self.out.frames_since_enable != 0 || self.out.repeat_skip_pending)
                 {
-                    self.last_drive_cc = mmio.master_cc();
+                    self.out.last_drive_cc = mmio.master_cc();
                 }
             }
             return true;

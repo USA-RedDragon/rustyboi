@@ -10,7 +10,7 @@ use super::controller::{
 impl Ppu {
     pub(crate) fn handle_lcdc_write(&mut self, value: u8, mmio: &mmio::Mmio) {
         let display_enable = LCDCFlags::DisplayEnable as u8;
-        let old_lcdc = self.lcdc;
+        let old_lcdc = self.lcdc.reg;
         let display_stays_enabled = (old_lcdc & display_enable) != 0 && (value & display_enable) != 0;
 
         // DMG window bus-glitch journal (see wg_apply): record the exact bus
@@ -27,7 +27,7 @@ impl Ppu {
                 | (LCDCFlags::BGTileMapDisplaySelect as u8);
             if (old_lcdc ^ value) & wg_bits != 0 {
                 let t_cc = self.write_cc(false) + WG_TRANSITION_DELAY;
-                self.wg_hist.push((t_cc, old_lcdc, value));
+                self.wg.wg_hist.push((t_cc, old_lcdc, value));
                 self.bg_retro_repair(mmio);
             }
         }
@@ -49,7 +49,7 @@ impl Ppu {
         // Per-pixel BG-enable history. A mid-mode-3 LCDC.0 (BG-enable) toggle must
         // be applied per display column: the per-dot draw is flushed in bursts (the
         // mode-0 time flush draws all remaining FIFO pixels at one cc), so a
-        // once-per-line / live `self.lcdc & 1` read applies the final BG-enable to
+        // once-per-line / live `self.lcdc.reg & 1` read applies the final BG-enable to
         // every flushed column. Record each bit0 change as a (boundary_col, bgen)
         // entry — columns >= boundary_col see the new bit — so the renderer
         // reproduces the live per-tile `lcdc & lcdc_bgen` read. Only while pixel
@@ -242,7 +242,7 @@ impl Ppu {
             if self.state == State::PixelTransfer && (old_lcdc & tds) != (value & tds) {
                 let ds = mmio.is_double_speed_mode();
                 let commit_cc = self.write_cc(ds) + 2;
-                self.lcdc_b4_exact = Some((commit_cc, value, old_lcdc));
+                self.lcdc.lcdc_b4_exact = Some((commit_cc, value, old_lcdc));
                 // Tile-index-is-tile-data glitch: a
                 // falling LCDC.4 edge arms the glitch for exactly one CPU T-cycle
                 // (on hardware the write sets the glitch flag for one T-cycle: set, advance 1,
@@ -278,7 +278,7 @@ impl Ppu {
                         _ => None,
                     };
                     if let Some(t) = target {
-                        self.tidxtd_glitch.push(t);
+                        self.wg.tidxtd_glitch.push(t);
                     }
                 }
             }
@@ -297,10 +297,10 @@ impl Ppu {
                 // window-enable master event runs at the checkpoint BEFORE the LCDC commit, so equality
                 // reads the OLD bit (the `<=` in `update_window_y_latch`).
                 let commit_cc = self.write_cc(ds) + if ds { 4 } else { 3 };
-                self.we_win_bit_exact =
+                self.lcdc.we_win_bit_exact =
                     Some((commit_cc, (value & we) != 0, (old_lcdc & we) != 0));
             }
-            self.pending_lcdc_events.push(PendingLcdcEvent {
+            self.lcdc.pending_lcdc_events.push(PendingLcdcEvent {
                 cycles_remaining: 1,
                 base_value: old_lcdc,
                 value,
@@ -308,14 +308,14 @@ impl Ppu {
             });
             // Full lands 2 PPU dots after the write commits, matching the hardware
             // LCDC write taking effect at cc+2.
-            self.pending_lcdc_events.push(PendingLcdcEvent {
+            self.lcdc.pending_lcdc_events.push(PendingLcdcEvent {
                 cycles_remaining: 2,
                 base_value: old_lcdc,
                 value,
                 kind: PendingLcdcEventKind::Full,
             });
         } else {
-            self.pending_lcdc_events.clear();
+            self.lcdc.pending_lcdc_events.clear();
             self.set_lcdc_visible(value, mmio.is_cgb_features_enabled(), mmio.is_double_speed_mode());
         }
     }
@@ -325,7 +325,7 @@ impl Ppu {
     /// the drain loop lives out of line.
     #[inline]
     pub(crate) fn step_lcdc_events(&mut self, mmio: &mmio::Mmio) {
-        if self.pending_lcdc_events.is_empty() {
+        if self.lcdc.pending_lcdc_events.is_empty() {
             return;
         }
         self.step_lcdc_events_slow(mmio);
@@ -333,13 +333,13 @@ impl Ppu {
 
     fn step_lcdc_events_slow(&mut self, mmio: &mmio::Mmio) {
         let mut index = 0;
-        while index < self.pending_lcdc_events.len() {
-            if self.pending_lcdc_events[index].cycles_remaining > 0 {
-                self.pending_lcdc_events[index].cycles_remaining -= 1;
+        while index < self.lcdc.pending_lcdc_events.len() {
+            if self.lcdc.pending_lcdc_events[index].cycles_remaining > 0 {
+                self.lcdc.pending_lcdc_events[index].cycles_remaining -= 1;
             }
 
-            if self.pending_lcdc_events[index].cycles_remaining == 0 {
-                let event = self.pending_lcdc_events.remove(index);
+            if self.lcdc.pending_lcdc_events[index].cycles_remaining == 0 {
+                let event = self.lcdc.pending_lcdc_events.remove(index);
                 match event.kind {
                     PendingLcdcEventKind::TileDataSelectOnly => {
                         let tile_data_select = LCDCFlags::BGWindowTileDataSelect as u8;
@@ -349,9 +349,9 @@ impl Ppu {
                     }
                     PendingLcdcEventKind::Full => {
                         self.set_lcdc_visible(event.value, mmio.is_cgb_features_enabled(), mmio.is_double_speed_mode());
-                        // The settled value now lives in self.lcdc /
+                        // The settled value now lives in self.lcdc.reg /
                         // cgb_tile_index_is_tile_data; drop the exact-cc override.
-                        self.lcdc_b4_exact = None;
+                        self.lcdc.lcdc_b4_exact = None;
                         // The commit changes what the mode-3 one-shot checks
                         // compare against; hold the preamble fast path off.
                         self.invalidate_fast_span();
@@ -456,7 +456,7 @@ impl Ppu {
     // 1-T-cycle tile-select-glitch window catches returns the tile index as data.
     fn tidxtd_quirk_at_fetch(&self) -> bool {
         let k = self.fetcher.fetch_substep();
-        self.tidxtd_glitch
+        self.wg.tidxtd_glitch
             .iter()
             .any(|&(cc, tk)| cc == self.abs_cc && tk == k)
     }
@@ -472,11 +472,11 @@ impl Ppu {
         // its exact commit cc, present the PRE-commit bit4. This lets a single
         // tile straddle the change: TileDataLow before the commit uses the old
         // addressing method, TileDataHigh after it uses the new one.
-        if let Some((commit_cc, new_val, old_val)) = self.lcdc_b4_exact {
+        if let Some((commit_cc, new_val, old_val)) = self.lcdc.lcdc_b4_exact {
             let tds = LCDCFlags::BGWindowTileDataSelect as u8;
             if self.abs_cc < commit_cc {
                 // Pre-commit: old bit4.
-                let lcdc = (self.lcdc & !tds) | (old_val & tds);
+                let lcdc = (self.lcdc.reg & !tds) | (old_val & tds);
                 return fetcher::FetcherLcdcState {
                     lcdc,
                     cgb_tile_index_is_tile_data: quirk,
@@ -486,7 +486,7 @@ impl Ppu {
                 };
             } else {
                 // Post-commit: new bit4.
-                let lcdc = (self.lcdc & !tds) | (new_val & tds);
+                let lcdc = (self.lcdc.reg & !tds) | (new_val & tds);
                 return fetcher::FetcherLcdcState {
                     lcdc,
                     cgb_tile_index_is_tile_data: quirk,
@@ -497,7 +497,7 @@ impl Ppu {
             }
         }
         fetcher::FetcherLcdcState {
-            lcdc: self.lcdc,
+            lcdc: self.lcdc.reg,
             cgb_tile_index_is_tile_data: quirk,
             or_lcdc: None,
             scy_bus: None,
@@ -546,14 +546,14 @@ impl Ppu {
     // Test one LCDC bit in the PPU's live LCDC latch.
     #[inline]
     pub(in crate::ppu) fn lcdc_has(&self, f: LCDCFlags) -> bool {
-        lcdc_has(self.lcdc, f)
+        lcdc_has(self.lcdc.reg, f)
     }
 
     pub(in crate::ppu) fn set_lcdc_visible(&mut self, value: u8, cgb_features_enabled: bool, ds: bool) {
-        let old_lcdc = self.lcdc;
+        let old_lcdc = self.lcdc.reg;
         let tile_data_select = LCDCFlags::BGWindowTileDataSelect as u8;
         let display_enable = LCDCFlags::DisplayEnable as u8;
-        self.cgb_tile_index_is_tile_data = cgb_features_enabled
+        self.lcdc.cgb_tile_index_is_tile_data = cgb_features_enabled
             && (old_lcdc & tile_data_select) != 0
             && (value & tile_data_select) == 0
             && (old_lcdc & display_enable) != 0
@@ -612,7 +612,7 @@ impl Ppu {
                 self.m0_time_master =
                     Some((m0t as i64 + ((delta as i64) << dsf)).max(0) as u64);
             }
-            self.lcdc = value;
+            self.lcdc.reg = value;
             return;
         }
         if self.state == State::PixelTransfer
@@ -956,7 +956,7 @@ impl Ppu {
                 }
             }
         }
-        self.lcdc = value;
+        self.lcdc.reg = value;
         // An LCDC store re-runs the scheduled window-Y comparison the same way
         // a WY store does, so a window-enable that is only briefly set while
         // WY == LY still arms the window for the rest of the frame.
@@ -975,7 +975,7 @@ impl Ppu {
     /// BG TileNumber), which is the only case the anchor cannot describe.
     fn cgb_weoff_extra_tiles(&self) -> u8 {
         let substep_ran_tile_number = self.fetcher.fetch_substep() != 0;
-        let Some(anchor) = self.bg_anchor_dot else {
+        let Some(anchor) = self.wg.bg_anchor_dot else {
             let wxs = self.fetcher.window_x_start_dbg() as i32;
             let phase = (self.x as i32 + 2 - 2 * wxs).rem_euclid(8);
             return if phase == 0 { 0 } else { 1 };

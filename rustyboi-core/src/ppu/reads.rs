@@ -60,7 +60,7 @@ impl Ppu {
                 let wrap_lc = if is_read {
                     self.line_cycles_at(cc, ds)
                 } else {
-                    self.line_cycle as i64 - self.lytime_no_plus1 as i64
+                    self.line_cycle as i64 - self.speed.lytime_no_plus1 as i64
                 };
                 // CGB-D/E: the OAM-read line-wrap pre-lock keeps the SS threshold
                 // in double speed (the hardware line-start rule `oam_read_blocked = !ds ||
@@ -221,7 +221,7 @@ impl Ppu {
                 // `started` alone: `_1` (before begin) accessible, `_2` (past
                 // begin) blocked. Scoped to a live carry so flag-OFF / non-carried
                 // lcdoffset lines keep the proven coarse escape.
-                if self.render_carry_skew_cc != 0 {
+                if self.speed.render_carry_skew_cc != 0 {
                     return Some(started);
                 }
                 let lcdoffset_extended =
@@ -269,7 +269,7 @@ impl Ppu {
         } else if is_read {
             self.line_cycles_at(cc, ds)
         } else {
-            self.line_cycle as i64 - self.lytime_no_plus1 as i64
+            self.line_cycle as i64 - self.speed.lytime_no_plus1 as i64
         };
         if kind == 1 {
             // CGB-D/E read threshold: see the ly==153 wrap above.
@@ -380,7 +380,7 @@ impl Ppu {
     /// carries its OWN halt-exit read bias (the OAMSearch `access_cc + 5`/`+ 1`),
     /// so taking this one there would charge the same re-phasing twice.
     fn stat_read_off(&self, ds: bool, late_rev: bool, halt_woken: bool) -> i64 {
-        let base = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
+        let base = if !ds && !self.speed.lytime_no_plus1 { 3 } else { 2 };
         // Double speed on CPU-CGB-D/E and AGB: the mode-3 -> mode-0 read boundary
         // sits 3 DOTS below the mode-0 time, the same 3 dots the single-speed
         // branch above uses -- at DS a dot is 2cc, so that is 6cc, not the 2cc a
@@ -391,8 +391,8 @@ impl Ppu {
         // there moves the boundary past the `_1`/`_2` bracket of 136 DS m3stat
         // rows.
         let base = base + if ds && late_rev { 4 } else { 0 };
-        let base = if self.lytime_no_plus1 {
-            base - self.render_carry_skew_cc
+        let base = if self.speed.lytime_no_plus1 {
+            base - self.speed.render_carry_skew_cc
         } else {
             base
         };
@@ -974,9 +974,9 @@ impl Ppu {
         // absorbs the 1cc there -- without the exclusion the frame0 line-0 read
         // (frame0_m2stat_count_1) would over-set the coincidence bit.
         let ss_plus1 = (!lc.ds
-            && !self.lytime_no_plus1
+            && !self.speed.lytime_no_plus1
             && mmio.is_cgb()
-            && self.frames_since_enable == 0
+            && self.out.frames_since_enable == 0
             && self.internal_ly_val != 0) as i64;
         // Double-speed LYC-comparator anticipation on CGB-D/E and AGB: ONE EXTRA DOT.
         //
@@ -1116,7 +1116,7 @@ impl Ppu {
         // ly-dmgC-cgbBC), leaving the halt-woken families (hdma_late_m3speedchange_ly,
         // cctracer) on the un-adjusted -10.
         const SSDS_PLAIN_TIME_ADJ: i64 = 3;
-        let ssds_plain = ds && self.ssds_mode3_ly_advance && !mmio.halt_wakeup_skew();
+        let ssds_plain = ds && self.speed.ssds_mode3_ly_advance && !mmio.halt_wakeup_skew();
         let ds_corr: i64 = if ssds_plain { SSDS_PLAIN_TIME_ADJ } else { 0 };
         let mut time = self.p_now as i64 + lc.time as i64 + 1 + ds_corr;
         // SS->DS-during-mode3: rustyboi's bridged renderer line phase trails
@@ -1125,7 +1125,7 @@ impl Ppu {
         // LY-register anticipation window resolves identically (cctracer: _2/_6
         // read 147, to_next 8). DS-only (the switch lands in DS). Scoped to this
         // read path; the STAT/mode-0 time predictor keeps the un-advanced phase.
-        if self.ssds_mode3_ly_advance && ds {
+        if self.speed.ssds_mode3_ly_advance && ds {
             time -= 10;
         }
         // The hardware LY-register read: `if (cc >= the LY counter().time()) update(cc)` advances the
@@ -1199,7 +1199,7 @@ impl Ppu {
                 // whole number of dots, shift==0, e.g. cgbE to_next 456 carry 0) and the
                 // steady line-153 families (offset2_lyc98int / lycint152_ly153)
                 // keep the un-tightened window.
-                let ls_shift = -(((self.render_carry_skew_cc + 2).rem_euclid(15)) / 5);
+                let ls_shift = -(((self.speed.render_carry_skew_cc + 2).rem_euclid(15)) / 5);
                 let head_hold = (self.dsss_ly_phase_active() && ls_shift != 0) as i64;
                 if to_next - 1 <= cpl - agb - de - head_hold {
                     return Some(0);
@@ -1290,7 +1290,7 @@ impl Ppu {
             && ds
             && mmio.ssds_haltskew_ly_advance()
             && !mmio.halt_wakeup_hdma()
-            && !self.ssds_mode3_ly_advance;
+            && !self.speed.ssds_mode3_ly_advance;
         // FAITHFUL HALT-EXIT (CGB m0-woken stream, DMG-flagged cart): the CGB
         // analog of `m0_halt_adv`. On a CGB console with a DMG cart neither the DMG
         // block (gated `!is_cgb()`) nor `cgb_halt_exit` (gated on cart features)
@@ -1356,7 +1356,7 @@ impl Ppu {
         // tables): `shift = -(((carry+2) % 15) / 5)` in dots. `tn_eff = tn - shift` is
         // the phase-corrected time-to-next-LY the window resolves against.
         let shift = if post_stop {
-            -(((self.render_carry_skew_cc + 2).rem_euclid(15)) / 5)
+            -(((self.speed.render_carry_skew_cc + 2).rem_euclid(15)) / 5)
         } else {
             0
         };

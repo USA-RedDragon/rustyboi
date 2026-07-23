@@ -126,8 +126,8 @@ impl Ppu {
     }
 
     pub(in crate::ppu) fn wg_set_anchor(&mut self, chop: u64) {
-        self.wg_anchor_cc = None;
-        self.wg_dpre = 0;
+        self.wg.wg_anchor_cc = None;
+        self.wg.wg_dpre = 0;
         if self.x != 0 {
             return; // scoped to the x==0 restart family
         }
@@ -168,7 +168,7 @@ impl Ppu {
             // 1/2 -> 11, 3/4 -> 9, 5/6/7 -> 7. The CGB grid resolves single
             // dots: D_pre = 13 - X (it separates the X=1 vs X=2 and X=3 vs X=4
             // bands the DMG quantization merges).
-            Some((x, p)) if x <= 7 && self.wg_cgb => (p, (13 - x) as u64),
+            Some((x, p)) if x <= 7 && self.wg.wg_cgb => (p, (13 - x) as u64),
             Some((x, p)) if x <= 7 => (p, (13i64 - ((x as i64 + 1) & !1)).max(7) as u64),
             // OAM X == 8 (window position 0): the hardware-side stall is a
             // midline shift resolved per-read in wg_apply (the in-progress
@@ -176,8 +176,8 @@ impl Ppu {
             Some((_, p)) => (p, 0),
             None => (0, 0),
         };
-        self.wg_dpre = dpre;
-        self.wg_anchor_cc = Some(self.abs_cc.saturating_sub(rb_absorb + chop));
+        self.wg.wg_dpre = dpre;
+        self.wg.wg_anchor_cc = Some(self.abs_cc.saturating_sub(rb_absorb + chop));
     }
 
     // CGB-compat window train tile-data-select sample lag, in dots, subtracted
@@ -195,17 +195,17 @@ impl Ppu {
     /// overwhelmingly common case) is an inlined check.
     #[inline]
     pub(in crate::ppu) fn wg_apply(&self, fls: fetcher::FetcherLcdcState) -> fetcher::FetcherLcdcState {
-        if self.wg_anchor_cc.is_none() || self.wg_hist.is_empty() {
+        if self.wg.wg_anchor_cc.is_none() || self.wg.wg_hist.is_empty() {
             return fls;
         }
         self.wg_apply_slow(fls)
     }
 
     fn wg_apply_slow(&self, mut fls: fetcher::FetcherLcdcState) -> fetcher::FetcherLcdcState {
-        let Some(anchor) = self.wg_anchor_cc else {
+        let Some(anchor) = self.wg.wg_anchor_cc else {
             return fls;
         };
-        if self.wg_hist.is_empty() || !self.fetcher.is_fetching_window() {
+        if self.wg.wg_hist.is_empty() || !self.fetcher.is_fetching_window() {
             return fls;
         }
         let k = self.fetcher.fetch_substep();
@@ -213,7 +213,7 @@ impl Ppu {
             return fls; // PushToFIFO: no VRAM read
         }
         let n = self.fetcher.get_tile_index() as u64;
-        let base = anchor + self.wg_dpre + 8 * n + 2 * k as u64;
+        let base = anchor + self.wg.wg_dpre + 8 * n + 2 * k as u64;
         let mut h = base;
         // Stall dots hardware charges this read but the arm rule below does
         // not (the pending-stall shadow): a counted on-screen sprite whose
@@ -238,7 +238,7 @@ impl Ppu {
             let Some(rec) = self.sprite_fetch_recs.get(i) else {
                 continue;
             };
-            if self.wg_cgb {
+            if self.wg.wg_cgb {
                 // The fetch reads run ahead of the pixel pops that arm the
                 // stalls: a Pending record still counts if OBJ is enabled
                 // (mirrors the BG-path rule). An Aborted zero-penalty record
@@ -273,7 +273,7 @@ impl Ppu {
         }
         const WG_BITS: u8 =
             (LCDCFlags::WindowTileMapDisplaySelect as u8) | (LCDCFlags::BGWindowTileDataSelect as u8);
-        if self.wg_cgb {
+        if self.wg.wg_cgb {
             let sub = WgSubDot {
                 phase8: -((self.win_y_pos % 8) as i64),
                 shifted: h != base,
@@ -314,9 +314,9 @@ impl Ppu {
             }
             return fls;
         }
-        let mut bits = self.wg_hist[0].1; // before the first transition
+        let mut bits = self.wg.wg_hist[0].1; // before the first transition
         let mut edge: Option<u8> = None;
-        for &(cc, old, new) in &self.wg_hist {
+        for &(cc, old, new) in &self.wg.wg_hist {
             if h > cc {
                 bits = new;
             } else {
@@ -352,7 +352,7 @@ impl Ppu {
         sub: WgSubDot,
     ) -> (u8, bool) {
         let tds = LCDCFlags::BGWindowTileDataSelect as u8;
-        let mut bits = self.wg_hist[0].1;
+        let mut bits = self.wg.wg_hist[0].1;
         let mut quirk = false;
         let mut prev_fall_w: Option<i64> = None;
         // Pulse-train scope (see CGBWG_TRAIN_ADVANCE). A line that holds LCDC.4
@@ -365,8 +365,8 @@ impl Ppu {
         // train is journaled — unlike an edge-count which the growing journal only
         // reaches mid-line): a high baseline is the repeatedly-pulsed train, a low
         // baseline is the isolated blip.
-        let is_train = (self.wg_hist[0].1 & tds) != 0;
-        for &(t, old, new) in &self.wg_hist {
+        let is_train = (self.wg.wg_hist[0].1 & tds) != 0;
+        for &(t, old, new) in &self.wg.wg_hist {
             let w = t - WG_TRANSITION_DELAY; // raw write commit cc
             let rising = !old & new;
             let falling = old & !new;
@@ -502,7 +502,7 @@ impl Ppu {
     // tile-number read did not — mixing the tile's map row with the wrong tile
     // line (per-row jitter).
     fn bg_hw_read_dot_ex(&self, n: u64, k: u8, ly: u8, scy_mode: bool) -> Option<u64> {
-        let anchor = self.bg_anchor_cc?;
+        let anchor = self.wg.bg_anchor_cc?;
         if self.fetcher.is_fetching_window() || self.window_started_this_line {
             return None;
         }
@@ -521,7 +521,7 @@ impl Ppu {
                 // CGB: an Aborted zero-penalty record with OBJ on is a
                 // live-walk artifact (see wg_apply); hardware fetched it.
                 SpriteFetchPhase::Aborted => {
-                    self.wg_cgb
+                    self.wg.wg_cgb
                         && rec.penalty == 0
                         && self.lcdc_has(LCDCFlags::SpriteDisplayEnable)
                 }
@@ -533,7 +533,7 @@ impl Ppu {
                 if n >= 1 {
                     // CGB: 1-dot D_pre = 13 - X (see the CGBWG_* consts); DMG: 2-dot
                     // fetcher-boundary quantized. (scy_mode: hardware-exact 11 - X.)
-                    h += if self.wg_cgb {
+                    h += if self.wg.wg_cgb {
                         (13 - s.x) as u64 - cgb_stall_bias
                     } else {
                         (13i64 - ((s.x as i64 + 1) & !1)).max(7) as u64
@@ -541,7 +541,7 @@ impl Ppu {
                 }
             } else {
                 let pos = (s.x - 8) as u64;
-                if self.wg_cgb {
+                if self.wg.wg_cgb {
                     // CGB read-granular rule: only reads whose unshifted dot
                     // is at/after the sprite's arm dot A = F + arm + 8*(pos/8)
                     // (constant within the sprite's own tile) shift, by
@@ -596,8 +596,8 @@ impl Ppu {
     // reject one at this phase, and the LCDC pulse captures cannot separate
     // OR from clean-new/clean-old at the transition dots.)
     fn bg_wg_resolve(&self, h: u64) -> u8 {
-        let mut bits = self.wg_hist[0].1;
-        for &(cc, _, new) in &self.wg_hist {
+        let mut bits = self.wg.wg_hist[0].1;
+        for &(cc, _, new) in &self.wg.wg_hist {
             let t = cc.saturating_sub(WG_TRANSITION_DELAY);
             if h > t {
                 bits = new;
@@ -649,7 +649,7 @@ impl Ppu {
     // commit cc lies strictly before `h`. None when no journal. (No OR edge —
     // see the journal push comment.)
     fn bg_scy_resolve(&self, h: u64) -> Option<u8> {
-        if self.bg_scy_hist.is_empty() {
+        if self.wg.bg_scy_hist.is_empty() {
             return None;
         }
         // CGB-compat: the raw write commit reaches the fetch address lines
@@ -657,9 +657,9 @@ impl Ppu {
         // Paired with the hardware-exact fetch dot (bg_hw_read_dot_ex scy_mode),
         // add=1 reproduces the hardware inclusive read>=write commit for both
         // sprite-stalled and un-stalled tiles.
-        let add = if self.wg_cgb { CGBWG_SCY_ADD } else { 0 };
-        let mut v = self.bg_scy_hist[0].1;
-        for &(t, _, new) in &self.bg_scy_hist {
+        let add = if self.wg.wg_cgb { CGBWG_SCY_ADD } else { 0 };
+        let mut v = self.wg.bg_scy_hist[0].1;
+        for &(t, _, new) in &self.wg.bg_scy_hist {
             if h > t + add {
                 v = new;
             } else {
@@ -680,21 +680,21 @@ impl Ppu {
     // — the isolated single pulse is 2 edges and stays untouched). Returns the
     // number of pixels re-plotted (0 when out of scope). CGB-compat only.
     pub(in crate::ppu) fn cgb_train_reresolve(&mut self, mmio: &mmio::Mmio) {
-        if !self.wg_cgb || self.bg_tile_buf.is_empty() || self.wg_hist.is_empty() {
+        if !self.wg.wg_cgb || self.wg.bg_tile_buf.is_empty() || self.wg.wg_hist.is_empty() {
             return;
         }
         let tds = LCDCFlags::BGWindowTileDataSelect as u8;
         // Up-pulse train discriminator (complete journal): line-initial bit4 low
         // and at least two pulses (>= 4 edges). The isolated tile_sel_change
         // pulse is exactly 2 edges (one up, one down) and is left untouched.
-        let init_low = (self.wg_hist[0].1 & tds) == 0;
-        let n_edges = self.wg_hist.len();
+        let init_low = (self.wg.wg_hist[0].1 & tds) == 0;
+        let n_edges = self.wg.wg_hist.len();
         if !(init_low && n_edges >= 4) {
             return;
         }
         let ly = mmio.read(LY);
         if ly >= 144 {
-            self.bg_tile_buf.clear();
+            self.wg.bg_tile_buf.clear();
             return;
         }
         // Each plane's tile-data base is re-sampled at its OWN T1 (one substep
@@ -702,10 +702,10 @@ impl Ppu {
         // write commit is <= (hardware-exact fetch dot - CGBWG_TRAIN_T1_LEAD).
         // Validated dot-exact vs CGB-C per-plane hardware across
         // change2 ly24-55 (every train tile L/H last_tileset reproduced).
-        let buf = std::mem::take(&mut self.bg_tile_buf);
+        let buf = std::mem::take(&mut self.wg.bg_tile_buf);
         let raw_at = |dot: i64| -> u8 {
-            let mut b = self.wg_hist[0].1 & tds;
-            for &(tt, _, nn) in &self.wg_hist {
+            let mut b = self.wg.wg_hist[0].1 & tds;
+            for &(tt, _, nn) in &self.wg.wg_hist {
                 let w = tt as i64 - WG_TRANSITION_DELAY as i64;
                 if dot >= w { b = nn & tds; } else { break; }
             }
@@ -783,7 +783,7 @@ impl Ppu {
                 let plane_tds = raw_at(t1);
                 let a = self.fetcher.get_tile_data_address(t.tn, line, plane_tds) + k as u16;
                 let mut byte = mmio.read_vram_bank(0, a);
-                for &(tt, o, nn) in &self.wg_hist {
+                for &(tt, o, nn) in &self.wg.wg_hist {
                     let w = tt as i64 - WG_TRANSITION_DELAY as i64;
                     if w != t1 + 1 {
                         continue;
@@ -828,9 +828,9 @@ impl Ppu {
                 if old < 0 || old as u8 == idx { continue; }
                 let rgb = self.compat_bg_color(mmio, idx);
                 let off = (ly as usize * 160 + ci) * 3;
-                self.color_fb_a[off] = rgb.0;
-                self.color_fb_a[off + 1] = rgb.1;
-                self.color_fb_a[off + 2] = rgb.2;
+                self.out.color_fb_a[off] = rgb.0;
+                self.out.color_fb_a[off + 1] = rgb.1;
+                self.out.color_fb_a[off + 2] = rgb.2;
                 self.line_bg_idx[ci] = idx as i8;
             }
         }
@@ -851,22 +851,22 @@ impl Ppu {
     // the exact A12-settle phase is not observable from the refs. CGB-compat only.
     // Not in Pan Docs, TCAGBD, or GBCTR; sub-dot render timing from mealybug-tearoom-tests refs.
     pub(in crate::ppu) fn win_train_reresolve(&mut self, mmio: &mmio::Mmio) {
-        if !self.wg_cgb || self.win_tile_buf.is_empty() || self.wg_hist.is_empty() {
+        if !self.wg.wg_cgb || self.wg.win_tile_buf.is_empty() || self.wg.wg_hist.is_empty() {
             return;
         }
         let tds = LCDCFlags::BGWindowTileDataSelect as u8;
-        let init_low = (self.wg_hist[0].1 & tds) == 0;
-        if !(init_low && self.wg_hist.len() >= 4) {
-            self.win_tile_buf.clear();
+        let init_low = (self.wg.wg_hist[0].1 & tds) == 0;
+        if !(init_low && self.wg.wg_hist.len() >= 4) {
+            self.wg.win_tile_buf.clear();
             return;
         }
         let ly = mmio.read(LY);
         if ly >= 144 {
-            self.win_tile_buf.clear();
+            self.wg.win_tile_buf.clear();
             return;
         }
-        let (Some(anchor), dpre) = (self.wg_anchor_cc, self.wg_dpre) else {
-            self.win_tile_buf.clear();
+        let (Some(anchor), dpre) = (self.wg.wg_anchor_cc, self.wg.wg_dpre) else {
+            self.wg.win_tile_buf.clear();
             return;
         };
         // Resolve the LCDC.4 tile-data-select level at a reconstructed read dot,
@@ -886,10 +886,10 @@ impl Ppu {
                 return (false, false, false);
             }
             let s = h as i64 - sample_lag;
-            let mut level = (this.wg_hist[0].1 & tds) != 0;
+            let mut level = (this.wg.wg_hist[0].1 & tds) != 0;
             let mut glitch = false;
             let mut rise_hit = false;
-            for &(cc, old, new) in &this.wg_hist {
+            for &(cc, old, new) in &this.wg.wg_hist {
                 let w = cc as i64 - WG_TRANSITION_DELAY as i64; // raw write commit
                 if s > w {
                     level = (new & tds) != 0;
@@ -940,7 +940,7 @@ impl Ppu {
             }
             None
         };
-        let buf = std::mem::take(&mut self.win_tile_buf);
+        let buf = std::mem::take(&mut self.wg.win_tile_buf);
         // Per-tile resolved (tn, low base, high base) records for the
         // stale-bus lookup, keyed by fetch index n (buf is in fetch order).
         let mut resolved_recs: Vec<Option<(u8, bool, bool)>> = Vec::new();
@@ -1047,9 +1047,9 @@ impl Ppu {
                 if old < 0 || old as u8 == idx { continue; }
                 let rgb = self.compat_bg_color(mmio, idx);
                 let off = (ly as usize * 160 + ci) * 3;
-                self.color_fb_a[off] = rgb.0;
-                self.color_fb_a[off + 1] = rgb.1;
-                self.color_fb_a[off + 2] = rgb.2;
+                self.out.color_fb_a[off] = rgb.0;
+                self.out.color_fb_a[off + 1] = rgb.1;
+                self.out.color_fb_a[off + 2] = rgb.2;
                 self.line_bg_idx[ci] = idx as i8;
             }
         }
@@ -1060,7 +1060,7 @@ impl Ppu {
     /// the inlined empty check.
     #[inline(always)]
     pub(in crate::ppu) fn bg_wg_apply(&self, fls: fetcher::FetcherLcdcState, ly: u8) -> fetcher::FetcherLcdcState {
-        if self.wg_hist.is_empty() && self.bg_scy_hist.is_empty() && self.bg_scx_hist.is_empty() {
+        if self.wg.wg_hist.is_empty() && self.wg.bg_scy_hist.is_empty() && self.wg.bg_scx_hist.is_empty() {
             return fls;
         }
         self.bg_wg_apply_slow(fls, ly)
@@ -1077,9 +1077,9 @@ impl Ppu {
         };
         const BG_BITS: u8 = (LCDCFlags::BGTileMapDisplaySelect as u8)
             | (LCDCFlags::BGWindowTileDataSelect as u8);
-        if !self.wg_hist.is_empty() {
-            if self.wg_cgb {
-                let h_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(h);
+        if !self.wg.wg_hist.is_empty() {
+            if self.wg.wg_cgb {
+                let h_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg.wg_cgb).unwrap_or(h);
                 let (bits, quirk) = self.bg_wg_resolve_cgb(h, h_scy, k);
                 fls.lcdc = (fls.lcdc & !BG_BITS) | (bits & BG_BITS);
                 fls.or_lcdc = None;
@@ -1093,14 +1093,14 @@ impl Ppu {
         }
         // SCY resolves at the hardware-exact fetch dot (see bg_hw_read_dot_ex);
         // on DMG the scy_mode dot is identical to `h` (bias 0).
-        let h_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(h);
+        let h_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg.wg_cgb).unwrap_or(h);
         fls.scy_bus = self.bg_scy_resolve(h_scy);
         // SCX resolves the tile-map column at the TileNumber (k==0) reconstructed
         // hardware dot: a sprite-stalled tile reads SCX as-of that dot, not the
         // stall-displaced live scx (m3_scx_high_5_bits). Only k==0 fetches the
         // column, so only resolve there.
-        if k == 0 && !self.bg_scx_hist.is_empty() {
-            let h_scx = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(h);
+        if k == 0 && !self.wg.bg_scx_hist.is_empty() {
+            let h_scx = self.bg_hw_read_dot_ex(n, k, ly, self.wg.wg_cgb).unwrap_or(h);
             fls.scx_bus = self.bg_scx_resolve(h_scx);
         }
         fls
@@ -1108,12 +1108,12 @@ impl Ppu {
 
     // SCX in effect at reconstructed hardware dot `h` per the DMG BG journal.
     fn bg_scx_resolve(&self, h: u64) -> Option<u8> {
-        if self.bg_scx_hist.is_empty() {
+        if self.wg.bg_scx_hist.is_empty() {
             return None;
         }
-        let add = if self.wg_cgb { CGBWG_SCY_ADD } else { 0 };
-        let mut v = self.bg_scx_hist[0].1;
-        for &(t, _, new) in &self.bg_scx_hist {
+        let add = if self.wg.wg_cgb { CGBWG_SCY_ADD } else { 0 };
+        let mut v = self.wg.bg_scx_hist[0].1;
+        for &(t, _, new) in &self.wg.bg_scx_hist {
             if h > t + add {
                 v = new;
             } else {
@@ -1138,7 +1138,7 @@ impl Ppu {
     // case). DMG-only (both journals are DMG-scoped).
     pub(in crate::ppu) fn bg_retro_repair(&mut self, mmio: &mmio::Mmio) {
         if self.state != State::PixelTransfer
-            || (self.wg_hist.is_empty() && self.bg_scy_hist.is_empty())
+            || (self.wg.wg_hist.is_empty() && self.wg.bg_scy_hist.is_empty())
         {
             return;
         }
@@ -1158,10 +1158,10 @@ impl Ppu {
         };
         // CGB resolves the map bit at the hardware-exact fetch dot and the
         // tile-data bit at the calibrated `h` (see bg_wg_resolve_cgb); DMG uses `h`.
-        let h0_scy = self.bg_hw_read_dot_ex(n, 0, ly, self.wg_cgb).unwrap_or(h0);
-        let bits0 = if self.wg_hist.is_empty() {
-            self.lcdc
-        } else if self.wg_cgb {
+        let h0_scy = self.bg_hw_read_dot_ex(n, 0, ly, self.wg.wg_cgb).unwrap_or(h0);
+        let bits0 = if self.wg.wg_hist.is_empty() {
+            self.lcdc.reg
+        } else if self.wg.wg_cgb {
             self.bg_wg_resolve_cgb(h0, h0_scy, 0).0
         } else {
             self.bg_wg_resolve(h0)
@@ -1185,10 +1185,10 @@ impl Ppu {
         // arm-dot anchoring, which retro's shared reconstruction inherits.)
         let tds = LCDCFlags::BGWindowTileDataSelect as u8;
         let tds_low = self.bg_hw_read_dot(n, 1, ly).map(|h1| {
-            let h1_scy = self.bg_hw_read_dot_ex(n, 1, ly, self.wg_cgb).unwrap_or(h1);
-            if self.wg_hist.is_empty() {
-                self.lcdc & tds
-            } else if self.wg_cgb {
+            let h1_scy = self.bg_hw_read_dot_ex(n, 1, ly, self.wg.wg_cgb).unwrap_or(h1);
+            if self.wg.wg_hist.is_empty() {
+                self.lcdc.reg & tds
+            } else if self.wg.wg_cgb {
                 self.bg_wg_resolve_cgb(h1, h1_scy, 1).0 & tds
             } else {
                 self.bg_wg_resolve(h1) & tds
@@ -1204,10 +1204,10 @@ impl Ppu {
             let Some(hk) = self.bg_hw_read_dot(n, k, ly) else {
                 return;
             };
-            let hk_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(hk);
-            let (mut bitsk, quirkk) = if self.wg_hist.is_empty() {
-                (self.lcdc, false)
-            } else if self.wg_cgb {
+            let hk_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg.wg_cgb).unwrap_or(hk);
+            let (mut bitsk, quirkk) = if self.wg.wg_hist.is_empty() {
+                (self.lcdc.reg, false)
+            } else if self.wg.wg_cgb {
                 self.bg_wg_resolve_cgb(hk, hk_scy, k)
             } else {
                 (self.bg_wg_resolve(hk), false)
@@ -1233,10 +1233,11 @@ impl Ppu {
             // resolving on its own. Gate the unstalled pin on the up-pulse
             // (line-initial LCDC.4 low) so it never flattens the down-pulse mix.
             let up_pulse = self
+                .wg
                 .wg_hist
                 .first()
                 .is_some_and(|&(_, first, _)| (first & tds) == 0);
-            if self.wg_cgb
+            if self.wg.wg_cgb
                 && k == 2
                 && (!unstalled || up_pulse)
                 && let Some(low_tds) = tds_low

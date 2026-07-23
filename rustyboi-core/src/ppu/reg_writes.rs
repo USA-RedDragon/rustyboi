@@ -55,7 +55,7 @@ impl Ppu {
     /// the STAT/LYC change hooks can place the event on the correct half-dot at
     /// double speed. `phase` is the persistent CPU T-phase at write resolution.
     pub(crate) fn set_write_subdot(&mut self, phase: u64) {
-        self.write_subdot = (phase % 2) as u8;
+        self.speed.write_subdot = (phase % 2) as u8;
     }
     /// FF4A (WY) write hook. Hardware applies the write to `wy2` (the value the
     /// window-Y gate reads) delayed by `6 - double_speed` cc after the write.
@@ -387,7 +387,7 @@ impl Ppu {
                 continue;
             }
             let fb_offset = (ly as u16) * 160 + col as u16;
-            self.fb_a[fb_offset as usize] = (glitch >> (2 * bg_idx as u8)) & 0x03;
+            self.out.fb_a[fb_offset as usize] = (glitch >> (2 * bg_idx as u8)) & 0x03;
         }
     }
     /// FF48 (OBP0) write hook. See `on_bgp_write`; affects sprite palette 0.
@@ -508,6 +508,7 @@ impl Ppu {
         // (bg_retro_repair).
         if !mmio.is_cgb_features_enabled() && self.state == State::PixelTransfer {
             let old = self
+                .wg
                 .bg_scy_hist
                 .last()
                 .map(|&(_, _, new)| new)
@@ -522,7 +523,7 @@ impl Ppu {
                 // clean-new/clean-old at the transition dots (old side is
                 // 0x00 there), and the SCY capture rejects an OR at this
                 // phase (whole-row blend pollution).
-                self.bg_scy_hist.push((cc, old, value));
+                self.wg.bg_scy_hist.push((cc, old, value));
                 self.bg_retro_repair(mmio);
             }
         }
@@ -548,12 +549,13 @@ impl Ppu {
         // hardware TileNumber dot instead of the stall-displaced live dot.
         if !mmio.is_cgb_features_enabled() && self.state == State::PixelTransfer {
             let old = self
+                .wg
                 .bg_scx_hist
                 .last()
                 .map(|&(_, _, new)| new)
                 .unwrap_or(self.scx_delayed);
             if old != value {
-                self.bg_scx_hist.push((cc, old, value));
+                self.wg.bg_scx_hist.push((cc, old, value));
             }
         }
 
@@ -943,7 +945,7 @@ impl Ppu {
         // write. In practice the STAT/render tests align via whole-instruction
         // polling loops, so writes land on M-cycle (even) phases and this term
         // is 0; it remains wired for the rare odd-phase write (post-HALT-1cc).
-        let sub = if ds { self.write_subdot as i64 } else { 0 };
+        let sub = if ds { self.speed.write_subdot as i64 } else { 0 };
         (self.abs_cc as i64 + off + sub).max(0) as u64
     }
     /// LY value used for the LYC=LY comparison. On hardware the compare uses
