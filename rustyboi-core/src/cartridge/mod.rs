@@ -75,6 +75,46 @@ const VF8K_PAGE: usize = 0x2000;
 /// licensed cart (whose $0134-$0143 is the ASCII title) can match.
 const VF8K_BOOT_STUB: [u8; 6] = [0xF5, 0x3E, 0xAA, 0xEA, 0x00, 0x70];
 
+/// Page size of the `UnlMapper::ActionReplayV4` switchable ROM window and of
+/// its SRAM banks (8 KiB each).
+const ARV4_PAGE: usize = 0x2000;
+/// The Action Replay V4 register block, at the top of its $6000-$7FFF window.
+/// $7FE1 is the only register whose effect is visible without a cartridge in
+/// the pass-through slot; the rest describe the slot cart ($7FE5 selects which
+/// of the two the window shows, $7FE2-$7FE4 its MBC, $7FE0 its bank).
+const ARV4_REG_START: u16 = 0x7FE0;
+const ARV4_REG_END: u16 = 0x7FEF;
+/// $7FE1: the 8 KiB ROM page mapped at $4000-$5FFF.
+const ARV4_REG_ROM_PAGE: u16 = 0x7FE1;
+
+/// Xploder GB ROM-bank register ($4000-$7FFF, 16 KiB banks).
+const XPLODER_REG_ROM_BANK: u16 = 0x0006;
+/// Xploder GB RAM-bank register ($A000-$BFFF, 8 KiB banks).
+const XPLODER_REG_RAM_BANK: u16 = 0x0007;
+/// RAM banks on the Xploder GB board: the firmware masks its bank parameter to
+/// 4 bits and uses bank $0E, so the array is sixteen 8 KiB banks (128 KiB).
+const XPLODER_RAM_BANKS: usize = 16;
+/// CRC32 (reflected IEEE) of the 48 bytes at $0104 on the Xploder GB boards.
+/// A pass-through cheat cart needs no logo of its own, so FCD reused the block
+/// for an ASCII credit line; identical on the Europe and Germany images, and
+/// no licensed cart can carry anything but the logo there.
+const XPLODER_HEADER_CRC32: u32 = 0xF13F_FA9A;
+/// SRAM on the Action Replay V4 board: one flat 8 KiB bank filling $6000-$7FFF
+/// (a stock 6264). Nothing in the firmware banks it — $7FE0, the only other
+/// register it programs with small numbers, drives the *slot* cartridge (it is
+/// swept 4, 5, then $FF as a deselect, and the values it takes index blank
+/// pages of the device's own ROM), not this array.
+const ARV4_RAM_BANKS: usize = 1;
+/// CRC32 (reflected IEEE) of the 48 bytes at $0104 on the Datel Action Replay
+/// V4 boards. A pass-through cheat cart needs no logo of its own (the game in
+/// the slot supplies the one the boot ROM checks), so Datel reused the block
+/// for the ASCII menu strings `Upload Snapshot: `/`Download Snapshot: ` — with
+/// a $44 marker at $0104 that the firmware itself compares against to tell its
+/// own ROM from the cart in the slot. Identical on all three known images
+/// (GameShark Online (USA), Action Replay Online (Europe), Action Replay
+/// Xtreme), and no licensed cart can carry anything but the logo there.
+const ARV4_HEADER_CRC32: u32 = 0xA69E_896B;
+
 /// CRC32 (reflected IEEE) of the 48 bytes at $0184 on the Hong Kong
 /// "POCKETMON" Pokemon Red bootleg: a re-linked Pokemon that the bootlegger
 /// converted from MBC1 to MBC5-style linear banking (a full-width bank number
@@ -581,6 +621,103 @@ pub enum UnlMapper {
     /// RAM-bank select with no MBC1 mode register in sight. Keyed on the exact
     /// whole-ROM CRC32 of the three prototype dumps, so no other cart moves.
     ForceMbc3,
+    /// Datel "Action Replay V4" cheat-device board (GameShark Online (USA),
+    /// Action Replay Online (Europe), Action Replay Xtreme). A pass-through
+    /// cart: the game plugs into the top of the device, so the device ROM
+    /// carries no Nintendo logo of its own — $0104 instead holds the ASCII
+    /// menu strings `Upload Snapshot:`/`Download Snapshot:` with a $44 marker
+    /// byte the firmware itself tests to tell "my own ROM" from "the cart in
+    /// the slot" (see the $FF80 HRAM routine each of these ROMs installs).
+    ///
+    /// The address map is nothing like an MBC, which is why a header-inferred
+    /// MBC1 white-screens: the firmware sets `SP` to $7FC0 and keeps every
+    /// variable in the $7xxx region, so on a plain MBC1 its own stack is ROM.
+    ///
+    ///   * $0000-$3FFF — ROM 8 KiB pages 0 and 1, fixed.
+    ///   * $4000-$5FFF — ROM 8 KiB page selected by $7FE1 (the firmware uses
+    ///     pages 2/3/8/9; `ld a,$09 / ld ($7FE1),a / call $4100` is the boot's
+    ///     first far call, and only 8 KiB granularity puts a real subroutine
+    ///     at $4100 — 16 KiB granularity lands mid-data and derails).
+    ///   * $6000-$7FFF — 8 KiB battery-backed SRAM, bank selected by $7FE0.
+    ///     Not ROM: the firmware writes $7FE0 with 1/2/4/5/6/7, and pages 6
+    ///     and 7 of the 80 KiB GameShark Online image are 100% $00, so those
+    ///     values cannot be indexing the ROM. The device stores cheat lists
+    ///     and game "snapshots" here, hence the large array.
+    ///   * $7FE0-$7FE5 — the register file, at the top of the SRAM window.
+    ///     $7FE5 is the pass-through window select ($10 = show the cartridge
+    ///     in the slot, $00 = show the device's own ROM); $7FE2-$7FE4 carry
+    ///     the slot cart's MBC description. Only the two bank registers are
+    ///     modelled — with no second cartridge to pass through to, the window
+    ///     select has nothing to switch to and the firmware's own menu never
+    ///     needs it.
+    ///
+    /// Detected by the CRC32 of the 48-byte block at $0104 (identical on all
+    /// three ROMs, and ASCII no licensed cart can carry there) plus the
+    /// bankless header type. The two bank registers ride in the payload so no
+    /// other cart's bincode savestate layout shifts.
+    ActionReplayV4(ArV4State),
+    /// Future Console Design "Xploder GB" cheat device (sold by Blaze; the
+    /// Europe v1.2.3E and Germany v1.2.2G images). Another pass-through cart,
+    /// so like the Action Replay it carries no Nintendo logo — $0104 holds the
+    /// ASCII credit `Future Console Design! * P.J.H. _ I.N. _ W.H.B. ` — and
+    /// its header is garbage throughout (type $69, ROM-size $67, RAM-size $6E
+    /// are all outside the Pan Docs tables).
+    ///
+    /// Its register file sits in the first bytes of the ROM window rather than
+    /// in an MBC's $0000-$7FFF blocks, so a header-inferred MBC1 reads them as
+    /// RAM-enable and leaves the cart with no reachable banks and no RAM:
+    ///
+    ///   * $0006 — ROM bank at $4000-$7FFF (16 KiB, MBC5-style: no bank-0
+    ///     remap). The firmware's own "return to the menu" epilogue writes $01
+    ///     here, exactly where a stock cart's power-on bank sits.
+    ///   * $0007 — RAM bank at $A000-$BFFF. The firmware's parameter is masked
+    ///     to 4 bits before the store (against the constant $000F at $3EAF),
+    ///     and it selects bank $0E to copy 8 KiB out to WRAM, so the array is
+    ///     sixteen 8 KiB banks.
+    ///   * $0000, $0002-$0005 — further board registers, written alongside the
+    ///     two above but with no effect this model needs; there is no RAM
+    ///     enable gate (the boot writes $0007 and then immediately stores to
+    ///     $B000, which a gated board would drop).
+    ///
+    /// Detected by the CRC32 of the 48-byte block at $0104 (identical on both
+    /// images) plus the garbage header type. The two bank registers ride in
+    /// the payload so no other cart's bincode savestate layout shifts.
+    XploderGb(XploderState),
+}
+
+/// Bank registers of `UnlMapper::XploderGb`, carried inside the enum variant
+/// (not as `Cartridge` fields) so every other cart's bincode savestate layout
+/// stays byte-identical. Power-on bank 1 / RAM bank 0 matches a stock cart;
+/// the firmware programs both before it uses either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XploderState {
+    /// 16 KiB ROM bank mapped at $4000-$7FFF (written to $0006).
+    rom_bank: u8,
+    /// 8 KiB RAM bank mapped at $A000-$BFFF (written to $0007).
+    ram_bank: u8,
+}
+
+impl Default for XploderState {
+    fn default() -> Self {
+        Self { rom_bank: 1, ram_bank: 0 }
+    }
+}
+
+/// Page register of `UnlMapper::ActionReplayV4`, carried inside the enum
+/// variant (not as a `Cartridge` field) so every other cart's bincode
+/// savestate layout stays byte-identical. Power-on page 2 puts the same bytes
+/// at $4000-$5FFF that a stock cart's power-on bank 1 would; the firmware
+/// programs it before its first far call regardless.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArV4State {
+    /// 8 KiB ROM page mapped at $4000-$5FFF (written to $7FE1).
+    rom_page: u8,
+}
+
+impl Default for ArV4State {
+    fn default() -> Self {
+        Self { rom_page: 2 }
+    }
 }
 
 /// Protection register state for `UnlMapper::PokeJadeDia`. Carried inside the
@@ -1073,7 +1210,16 @@ impl Cartridge {
     /// carts routinely carry garbage here (Sonic 3D Blast 5 has $20 because
     /// game code overlaps the header), matching reference decoders (RAM size
     /// stays 0 for values > 5).
-    fn compute_ram_banks(ram_size_code: u8) -> usize {
+    ///
+    /// One exception, the same "the physical chip is what matters" argument
+    /// `compute_rom_banks` makes: when the type byte names a board that carries
+    /// an external RAM chip, that chip exists no matter what the size byte
+    /// says, so a garbage size byte yields the smallest real part (one 8KB
+    /// bank) instead of none. Pro Action Replay (Europe) is the case in point -
+    /// its whole header is erased to $FF, and with zero RAM banks its
+    /// disclaimer/menu code reads back $FF from its own scratch RAM and never
+    /// draws a screen.
+    fn compute_ram_banks(ram_size_code: u8, cartridge_type: u8) -> usize {
         match ram_size_code {
             0x00 => 0,  // No RAM
             0x01 => 1,  // 2KB (partial bank)
@@ -1081,7 +1227,7 @@ impl Cartridge {
             0x03 => 4,  // 32KB = 4 banks of 8KB
             0x04 => 16, // 128KB = 16 banks of 8KB
             0x05 => 8,  // 64KB = 8 banks of 8KB
-            _ => 0,
+            _ => usize::from(header_type_has_external_ram(cartridge_type)),
         }
     }
 
@@ -1146,7 +1292,7 @@ impl Cartridge {
         let rom_banks = Self::compute_rom_banks(rom_size_code, data.len())?;
 
         // Calculate number of RAM banks
-        let ram_banks = Self::compute_ram_banks(ram_size_code);
+        let ram_banks = Self::compute_ram_banks(ram_size_code, cartridge_type);
 
         // Detect unlicensed mapper families (header-spoofing boards) from ROM
         // content. Must run on the raw file image, before padding.
@@ -1166,7 +1312,26 @@ impl Cartridge {
         // `.sav` files). ForceMbc1 header-liars carry garbage RAM-size bytes;
         // RAM is forced off for them.
         let ram_banks = if unl_mapper == UnlMapper::ForceMbc1 { 0 } else { ram_banks };
-        let ram_data = if cartridge_type == MBC7_SENSOR_RUMBLE_RAM_BATTERY {
+        // Action Replay V4: the header claims ROM ONLY, but the board's whole
+        // $6000-$7FFF window is SRAM banked by $7FE0. The firmware selects
+        // banks up to 7, so the array is eight 8 KiB banks.
+        let ram_banks = if matches!(unl_mapper, UnlMapper::ActionReplayV4(_)) {
+            ARV4_RAM_BANKS
+        } else {
+            ram_banks
+        };
+        // Xploder GB: the header RAM-size byte is garbage ($6E); the board's
+        // own bank register is 4 bits wide, so the array is 16 banks.
+        let ram_banks = if matches!(unl_mapper, UnlMapper::XploderGb(_)) {
+            XPLODER_RAM_BANKS
+        } else {
+            ram_banks
+        };
+        let ram_data = if matches!(unl_mapper, UnlMapper::ActionReplayV4(_)) {
+            vec![0xFF; ARV4_RAM_BANKS * RAM_BANK_SIZE]
+        } else if matches!(unl_mapper, UnlMapper::XploderGb(_)) {
+            vec![0xFF; XPLODER_RAM_BANKS * RAM_BANK_SIZE]
+        } else if cartridge_type == MBC7_SENSOR_RUMBLE_RAM_BATTERY {
             vec![0xFF; 256]
         } else if cartridge_type == TAMA5 {
             // TAMA5 declares RAM size $00 too: its save RAM is the 32 bytes the
@@ -1248,6 +1413,10 @@ impl Cartridge {
             // Gowin's outer-bank latch is volatile board logic; power up at the
             // decoy base 0 with no parameter pending, exactly like a cold cart.
             UnlMapper::Gowin(_) => UnlMapper::Gowin(GowinState::default()),
+            // The Action Replay's two bank registers are volatile board logic.
+            UnlMapper::ActionReplayV4(_) => UnlMapper::ActionReplayV4(ArV4State::default()),
+            // The Xploder's two bank registers are volatile board logic.
+            UnlMapper::XploderGb(_) => UnlMapper::XploderGb(XploderState::default()),
             other => other,
         };
         Cartridge {
@@ -1501,6 +1670,21 @@ impl Cartridge {
             // outer-bank handshake is applied in the write path + bank math.
             UnlMapper::Gowin(_) => {
                 return CartridgeType::MBC1 { ram: false, battery: false }
+            }
+            // Action Replay V4: the board's own windows are served entirely by
+            // the read/write intercepts, so the only thing the generic decode
+            // still has to get right is "has battery-backed RAM" - the device
+            // keeps its cheat list and snapshots across power cycles. Its
+            // header type byte ($00) claims neither.
+            UnlMapper::ActionReplayV4(_) => {
+                return CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
+            }
+            // Xploder GB: same story - the board's windows are served by the
+            // intercepts, and the generic decode only still has to say "has
+            // battery-backed RAM" (the device keeps cheat lists and backed-up
+            // game saves). Its header type byte ($69) names nothing at all.
+            UnlMapper::XploderGb(_) => {
+                return CartridgeType::MBC5 { ram: true, battery: true, rumble: false }
             }
         }
         match self.cartridge_type {
@@ -2360,6 +2544,22 @@ impl memory::Addressable for Cartridge {
             {
                 return self.vf8k_read(*st, addr);
             }
+            // Action Replay V4: the switchable area is an 8 KiB ROM page plus
+            // an 8 KiB SRAM bank, so it cannot go through the 16 KiB
+            // `rom_bank_bases` path at all.
+            UnlMapper::ActionReplayV4(st)
+                if (mmio::CARTRIDGE_BANK_START..=mmio::CARTRIDGE_BANK_END).contains(&addr) =>
+            {
+                return self.arv4_read(*st, addr);
+            }
+            // Xploder GB: both windows come off the board's own bank registers,
+            // and its RAM has no enable gate, so neither can go through the
+            // generic MBC arms.
+            UnlMapper::XploderGb(st) if addr >= mmio::CARTRIDGE_BANK_START => {
+                if let Some(byte) = self.xploder_read(*st, addr) {
+                    return byte;
+                }
+            }
             // "New GB Color" HK PCB: while the bank register holds $80 or more
             // the switchable window is the protection chip, not ROM.
             UnlMapper::NewGbHk
@@ -2744,6 +2944,23 @@ impl memory::Addressable for Cartridge {
             {
                 self.vf8k_write(addr, value);
             }
+            // Action Replay V4: the whole cart window is the board's own, not
+            // an MBC's. $6000-$7FFF is SRAM (with the two bank registers at the
+            // top of it) and everything below is inert, so this is intercepted
+            // before every generic arm.
+            RAM_ENABLE_START..=BANKING_MODE_END
+                if matches!(self.unl_mapper, UnlMapper::ActionReplayV4(_)) =>
+            {
+                self.arv4_write(addr, value);
+            }
+            // Xploder GB: its two bank registers live in the first bytes of the
+            // ROM window, nowhere near an MBC's register blocks, so the whole
+            // cart window is intercepted before every generic arm.
+            RAM_ENABLE_START..=BANKING_MODE_END
+                if matches!(self.unl_mapper, UnlMapper::XploderGb(_)) =>
+            {
+                self.xploder_write(addr, value);
+            }
             // RAM Enable (0x0000-0x1FFF)
             RAM_ENABLE_START..=RAM_ENABLE_END => match &mut self.mapper {
                 Mapper::Mbc1(m) => m.ram_enabled = (value & 0x0F) == 0x0A,
@@ -2972,6 +3189,14 @@ impl memory::Addressable for Cartridge {
                 if matches!(self.unl_mapper, UnlMapper::PokeJadeDia(_)) =>
             {
                 self.pokejade_write(addr, value);
+            }
+            // Xploder GB: banked by its own $0007 register and never gated.
+            EXTERNAL_RAM_START..=EXTERNAL_RAM_END
+                if matches!(self.unl_mapper, UnlMapper::XploderGb(_)) =>
+            {
+                if let Some(offset) = self.xploder_ram_offset(addr) {
+                    let _ = self.write_ram_byte(offset, value);
+                }
             }
             // External RAM (0xA000-0xBFFF)
             EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
@@ -4786,6 +5011,140 @@ mod tests {
         cart.write(0x0000, 0x00);
         cart.write(0x4000, 0x00);
         assert_eq!(cart.read(0x0000), 0x5A, "outer bank 0 is real ROM again");
+    }
+
+    // 48 bytes whose CRC32 is the Action Replay V4 detection constant
+    // (0xA69E896B): a clean-room ASCII banner plus a 4-byte CRC-forcing
+    // suffix, so the fixture carries the signature without reproducing the
+    // device's own header block.
+    const ARV4_HEADER: [u8; 48] = [
+        0x52, 0x55, 0x53, 0x54, 0x59, 0x42, 0x4F, 0x49, 0x20, 0x41, 0x43, 0x54,
+        0x49, 0x4F, 0x4E, 0x20, 0x52, 0x45, 0x50, 0x4C, 0x41, 0x59, 0x20, 0x56,
+        0x34, 0x20, 0x43, 0x4C, 0x45, 0x41, 0x4E, 0x52, 0x4F, 0x4F, 0x4D, 0x20,
+        0x53, 0x49, 0x47, 0x21, 0x21, 0x21, 0x21, 0x21, 0x1A, 0x14, 0x6A, 0xC0,
+    ];
+    // Likewise for the Xploder GB constant (0xF13FFA9A).
+    const XPLODER_HEADER: [u8; 48] = [
+        0x52, 0x55, 0x53, 0x54, 0x59, 0x42, 0x4F, 0x49, 0x20, 0x58, 0x50, 0x4C,
+        0x4F, 0x44, 0x45, 0x52, 0x20, 0x47, 0x42, 0x20, 0x46, 0x43, 0x44, 0x20,
+        0x43, 0x4C, 0x45, 0x41, 0x4E, 0x52, 0x4F, 0x4F, 0x4D, 0x20, 0x53, 0x49,
+        0x47, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x21, 0x0A, 0xC6, 0xE6, 0xB2,
+    ];
+
+    #[test]
+    fn action_replay_v4_board() {
+        // GameShark Online shape: bankless header type, no logo, 80KB (an
+        // exact 10 x 8KB pages - the device's ROM is paged, not banked, so a
+        // non-power-of-two image is the natural size, not a truncated dump).
+        let mut rom = make_sized_rom(0x00, 0x00, 0x14000);
+        rom[0x104..0x134].copy_from_slice(&ARV4_HEADER);
+        // Per-8KB-page marker so the page register is observable.
+        for page in 0..(rom.len() / 0x2000) {
+            rom[page * 0x2000 + 0x100] = 0xA0 | page as u8;
+        }
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::ActionReplayV4(ArV4State::default())
+        );
+
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        // A bankless header would have left the upper pages unreachable and
+        // the whole $6000-$7FFF window read-only.
+        assert!(cart.has_battery());
+        assert_eq!(cart.ram_data.len(), ARV4_RAM_BANKS * RAM_BANK_SIZE);
+
+        // $7FE1 pages 8KB at $4000-$5FFF; the boot's first far call is
+        // `ld a,$09 / ld ($7FE1),a / call $4100`.
+        cart.write(0x7FE1, 0x09);
+        assert_eq!(cart.read(0x4100), 0xA0 | 9);
+        cart.write(0x7FE1, 0x02);
+        assert_eq!(cart.read(0x4100), 0xA0 | 2);
+        // Out-of-range pages wrap to the image (padded to 8 banks = 16 pages).
+        assert_eq!(cart.rom_data.len(), 0x20000);
+        cart.write(0x7FE1, 0x12);
+        assert_eq!(cart.read(0x4100), 0xA0 | 2);
+
+        // $6000-$7FFF is SRAM: the firmware runs its stack from $7FC0 and
+        // copies code to $7800 to execute it, so both must stick.
+        cart.write(0x7FBF, 0x5A);
+        assert_eq!(cart.read(0x7FBF), 0x5A);
+        cart.write(0x7800, 0xC9);
+        assert_eq!(cart.read(0x7800), 0xC9);
+        cart.write(0x6000, 0x11);
+        assert_eq!(cart.read(0x6000), 0x11);
+
+        // The register block is write-only and reads back 0. The firmware
+        // tests bits 0 and 4 of $7FEE and only takes its normal boot path when
+        // both are clear, so open-bus $FF there sends it down the error path.
+        assert_eq!(cart.read(0x7FEE), 0x00);
+        assert_eq!(cart.read(0x7FE1), 0x00);
+
+        // Nothing below $6000 is writable - there is no MBC behind it.
+        cart.write(0x2000, 0x05);
+        assert_eq!(cart.read(0x4100), 0xA0 | 2, "no MBC bank register");
+    }
+
+    #[test]
+    fn xploder_gb_board() {
+        // Xploder GB shape: garbage header throughout ($69/$67/$6E), no logo,
+        // 128KB.
+        let mut rom = make_sized_rom(0x69, 0x67, 0x20000);
+        rom[RAM_SIZE_OFFSET] = 0x6E;
+        rom[0x104..0x134].copy_from_slice(&XPLODER_HEADER);
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::XploderGb(XploderState::default())
+        );
+
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(cart.has_battery());
+        assert_eq!(cart.ram_data.len(), XPLODER_RAM_BANKS * RAM_BANK_SIZE);
+
+        // $0006 is the 16KB ROM bank. An inferred MBC1 would have read this as
+        // RAM-enable and left the bank stuck at 1.
+        assert_eq!(cart.read(0x5000), 1, "power-on bank 1");
+        cart.write(0x0006, 0x06);
+        assert_eq!(cart.read(0x5000), 6);
+        cart.write(0x0006, 0x03);
+        assert_eq!(cart.read(0x5000), 3);
+        // MBC5-style: bank 0 is selectable, and out-of-range wraps.
+        cart.write(0x0006, 0x00);
+        assert_eq!(cart.read(0x5000), 0);
+        cart.write(0x0006, 0x09);
+        assert_eq!(cart.read(0x5000), 1, "9 % 8 banks");
+
+        // $0007 is the RAM bank, and the RAM has no enable gate: the boot
+        // writes $0007 and then stores straight to $B000, which a gated board
+        // would drop.
+        cart.write(0x0007, 0x00);
+        cart.write(0xB000, 0x11);
+        cart.write(0x0007, 0x0E); // the bank the firmware copies out to WRAM
+        cart.write(0xB000, 0x22);
+        assert_eq!(cart.read(0xB000), 0x22);
+        cart.write(0x0007, 0x00);
+        assert_eq!(cart.read(0xB000), 0x11, "banks are independent");
+    }
+
+    #[test]
+    fn blank_header_ram_type_still_gets_a_ram_chip() {
+        // Pro Action Replay (Europe): the whole header is erased to $FF, so the
+        // RAM-size byte is out of spec. The type byte that survives ($FF, HuC1
+        // +RAM+BATTERY) still names a board with a RAM chip, and the device's
+        // menu keeps its state there - with zero banks it reads back $FF and
+        // never draws a screen.
+        let mut cart = Cartridge::from_bytes(&make_rom(HUC1_RAM_BATTERY, 0xFF)).unwrap();
+        assert_eq!(cart.ram_banks, 1);
+        cart.write(0xB000, 0x3C);
+        assert_eq!(cart.read(0xB000), 0x3C);
+
+        // A type byte that names no RAM chip keeps the old "garbage size byte
+        // means no RAM" answer (Sonic 3D Blast 5 and the Sachen/Makon carts,
+        // whose header fields are overrun by game data).
+        assert_eq!(Cartridge::from_bytes(&make_rom(MBC1, 0x20)).unwrap().ram_banks, 0);
+        assert_eq!(Cartridge::from_bytes(&make_rom(0x30, 0x32)).unwrap().ram_banks, 0);
+        // And an in-spec size byte is still honoured verbatim.
+        assert_eq!(Cartridge::from_bytes(&make_rom(MBC5_RAM_BATTERY, 0x03)).unwrap().ram_banks, 4);
+        assert_eq!(Cartridge::from_bytes(&make_rom(MBC5_RAM_BATTERY, 0x00)).unwrap().ram_banks, 0);
     }
 
     #[test]

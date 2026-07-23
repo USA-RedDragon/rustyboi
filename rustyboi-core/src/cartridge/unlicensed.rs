@@ -339,6 +339,29 @@ impl Cartridge {
             return UnlMapper::Gowin(GowinState::default());
         }
 
+        // Datel "Action Replay V4" cheat device (GameShark Online, Action
+        // Replay Online, Action Replay Xtreme). Keyed on the CRC32 of the 48
+        // bytes at $0104: on a pass-through cart the boot ROM's logo check is
+        // satisfied by the game in the slot, so Datel reused the logo block for
+        // ASCII menu strings. No licensed cart can hold anything but the logo
+        // there, and the header-type gate keeps this to bankless headers.
+        if crate::checksum::crc32(&data[0x104..0x134]) == super::ARV4_HEADER_CRC32
+            && data[CARTRIDGE_TYPE_OFFSET] == 0x00
+        {
+            return UnlMapper::ActionReplayV4(ArV4State::default());
+        }
+
+        // Future Console Design "Xploder GB". Same argument as the Action
+        // Replay above: a pass-through cheat cart carries no logo of its own,
+        // so the 48 bytes at $0104 hold an ASCII credit line instead. The
+        // header type gate is the board's garbage $69 (nothing in the Pan Docs
+        // table), which no licensed cart can have.
+        if crate::checksum::crc32(&data[0x104..0x134]) == super::XPLODER_HEADER_CRC32
+            && data[CARTRIDGE_TYPE_OFFSET] == 0x69
+        {
+            return UnlMapper::XploderGb(XploderState::default());
+        }
+
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
         // banked-size file) the publisher string in the ROM. The
         // string+type+size gate already implies the blank-header shape in
@@ -687,6 +710,45 @@ impl Cartridge {
             .map(|i| VF001Z_BANK_RESPONSES[i][3])
     }
 
+    /// Xploder GB cart-window write ($0000-$7FFF). Only the two bank registers
+    /// in the first bytes of the window do anything; the rest of the board's
+    /// register file has no effect this model needs, and the ROM behind them is
+    /// not writable.
+    pub(super) fn xploder_write(&mut self, addr: u16, value: u8) {
+        if let UnlMapper::XploderGb(ref mut st) = self.unl_mapper {
+            match addr {
+                XPLODER_REG_ROM_BANK => st.rom_bank = value,
+                XPLODER_REG_RAM_BANK => st.ram_bank = value,
+                _ => {}
+            }
+        }
+    }
+
+    /// Byte index into `ram_data` for an Xploder GB cart-RAM access, banked by
+    /// its $0007 register. `None` when the array is empty.
+    pub(super) fn xploder_ram_offset(&self, addr: u16) -> Option<usize> {
+        if self.ram_data.is_empty() {
+            return None;
+        }
+        let UnlMapper::XploderGb(st) = &self.unl_mapper else { return None };
+        let base = (st.ram_bank as usize % XPLODER_RAM_BANKS) * RAM_BANK_SIZE;
+        Some((base + (addr as usize - 0xA000)) % self.ram_data.len())
+    }
+
+    /// Xploder GB read for the switchable ROM window and the cart-RAM window.
+    /// `None` for anything else so the caller falls through.
+    pub(super) fn xploder_read(&self, st: XploderState, addr: u16) -> Option<u8> {
+        if (0x4000..0x8000).contains(&addr) {
+            let banks = (self.rom_data.len() / 0x4000).max(1);
+            let base = (st.rom_bank as usize % banks) * 0x4000;
+            return Some(self.rom_byte(base + (addr as usize - 0x4000)));
+        }
+        if (EXTERNAL_RAM_START..=EXTERNAL_RAM_END).contains(&addr) {
+            return Some(self.xploder_ram_offset(addr).map_or(0xFF, |o| self.ram_data[o]));
+        }
+        None
+    }
+
     /// Vast Fame 8 KiB dual-window ROM-bank write ($2000-$3FFF). A10 selects
     /// which 8 KiB page of the switchable area the value programs: low picks
     /// the $4000-$5FFF page, high the $6000-$7FFF page. There is no 16 KiB bank
@@ -699,6 +761,54 @@ impl Cartridge {
                 st.high = value;
             }
         }
+    }
+
+    /// Action Replay V4 cart-window write ($0000-$7FFF). $6000-$7FFF is the
+    /// board's SRAM; the two bank registers sit at the top of that window and
+    /// are written through to SRAM as well, so the firmware's occasional
+    /// read-back of $7FE2 (a register this model does not implement) still
+    /// returns what it last wrote. Everything below $6000 is ROM with no MBC
+    /// behind it, so those writes are dropped.
+    pub(super) fn arv4_write(&mut self, addr: u16, value: u8) {
+        if addr < 0x6000 {
+            return;
+        }
+        if (ARV4_REG_START..=ARV4_REG_END).contains(&addr) {
+            if addr == ARV4_REG_ROM_PAGE
+                && let UnlMapper::ActionReplayV4(ref mut st) = self.unl_mapper
+            {
+                st.rom_page = value;
+            }
+            return;
+        }
+        if let Some(offset) = self.arv4_ram_offset(addr) {
+            self.ram_data[offset] = value;
+        }
+    }
+
+    /// Byte index into `ram_data` for an Action Replay V4 access in its
+    /// $6000-$7FFF SRAM window. `None` when the array is empty.
+    fn arv4_ram_offset(&self, addr: u16) -> Option<usize> {
+        if self.ram_data.is_empty() {
+            return None;
+        }
+        Some((addr as usize - 0x6000) % self.ram_data.len())
+    }
+
+    /// Action Replay V4 switchable-window read ($4000-$7FFF): an 8 KiB ROM
+    /// page selected by $7FE1 in the low half, the SRAM bank selected by $7FE0
+    /// in the high half. Out-of-range pages wrap to the image like every other
+    /// board here.
+    pub(super) fn arv4_read(&self, st: ArV4State, addr: u16) -> u8 {
+        if (ARV4_REG_START..=ARV4_REG_END).contains(&addr) {
+            return 0x00;
+        }
+        if addr >= 0x6000 {
+            return self.arv4_ram_offset(addr).map_or(0xFF, |o| self.ram_data[o]);
+        }
+        let pages = (self.rom_data.len() / ARV4_PAGE).max(1);
+        let base = (st.rom_page as usize % pages) * ARV4_PAGE;
+        self.rom_data.get(base + (addr as usize & (ARV4_PAGE - 1))).copied().unwrap_or(0xFF)
     }
 
     /// Vast Fame 8 KiB dual-window ROM read ($4000-$7FFF). Each half is served

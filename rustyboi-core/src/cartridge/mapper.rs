@@ -280,6 +280,14 @@ impl Mapper {
             // payload and is applied by the $6000 write intercept + bank math,
             // so the board itself is stock MBC1 registers.
             UnlMapper::Gowin(_) => return mbc1(false),
+            // Action Replay V4: no MBC at all. Both bank registers ride in the
+            // `UnlMapper::ActionReplayV4` payload and the whole cart window is
+            // served by the read/write intercepts, so the board here is the
+            // bankless one - nothing in the generic dispatch may claim a
+            // register.
+            UnlMapper::ActionReplayV4(_) | UnlMapper::XploderGb(_) => {
+                return Mapper::NoMbc(NoMbc { battery: true })
+            }
         }
         let mbc3 = |has_ram, timer| {
             Mapper::Mbc3(Mbc3 { ram_enabled: false, rom_bank_low: 1, ram_bank: 0, has_ram, timer })

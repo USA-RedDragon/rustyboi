@@ -115,6 +115,23 @@ pub(super) fn is_documented_type(cartridge_type: u8) -> bool {
         | 0x20 | 0x22 | 0xFC | 0xFD | 0xFE | 0xFF)
 }
 
+/// Whether `$0147` names a board that carries an external RAM chip in the
+/// $A000-$BFFF window. MBC2's 512x4 cells and MBC7's EEPROM are on-die, not an
+/// external chip, so those types are excluded; TAMA5 and the Pocket Camera
+/// allocate their own storage from the type byte elsewhere.
+///
+/// Used only to size RAM when the RAM-size byte at $0149 is out of spec: the
+/// board named by the type byte physically has the chip, so the cart gets one
+/// bank rather than none.
+pub(super) fn header_type_has_external_ram(cartridge_type: u8) -> bool {
+    matches!(cartridge_type,
+        MBC1_RAM | MBC1_RAM_BATTERY | ROM_RAM | ROM_RAM_BATTERY
+        | 0x0C | 0x0D // MMM01+RAM, MMM01+RAM+BATTERY
+        | MBC3_TIMER_RAM_BATTERY | MBC3_RAM | MBC3_RAM_BATTERY
+        | MBC5_RAM | MBC5_RAM_BATTERY | MBC5_RUMBLE_RAM | MBC5_RUMBLE_RAM_BATTERY
+        | HUC3 | HUC1_RAM_BATTERY)
+}
+
 /// Byte sum of the 48-byte Nintendo logo at its usual $0104 location. Also
 /// consulted by the unlicensed-board detection in the container module.
 pub(super) const LOGO_SUM_NINTENDO: u32 = 5446;
