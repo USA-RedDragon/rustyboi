@@ -144,6 +144,15 @@ const ZELDA_DX_BETA_ROM_CRC32: [u32; 3] = [0x9367_653B, 0x3FD6_C8FC, 0x2F88_4286
 /// Tyrannosaurus Tex release, which is a genuine MBC5 build -- is re-mapped.
 const MBC5_HEADER_MBC3_PROTO_ROM_CRC32: [u32; 3] = [0x6648_82AC, 0xD414_9106, 0x1BD4_E588];
 
+/// Whole-ROM CRC32 (reflected IEEE) of Chongwu Xiao Jingling - Jiejin Ta Zhi
+/// Wang (Taiwan) (Unl) — a 1 MiB "DIGIMON"-titled MBC5+RAM+BATTERY cart that is
+/// plain MBC5 apart from a single boot-time protection read (`UnlMapper::Chongwu`).
+/// Keyed on the exact dump because the response byte the model returns is a
+/// single OBSERVED latch value, not a derived transform: gating on the whole-ROM
+/// hash confines it to this one file, so no other cart can ever see the observed
+/// constant.
+const CHONGWU_ROM_CRC32: u32 = 0x620E_785D;
+
 /// Window and CRC32 (reflected IEEE) of the "New GB Color" HK-PCB protection
 /// trampoline (`UnlMapper::NewGbHk`). It lives in the dead space between the
 /// interrupt vectors and the header, and is 46 bytes of protection-specific
@@ -808,7 +817,58 @@ pub enum UnlMapper {
     /// menu pick), so the detection here is our own; see
     /// `NTNEW_SPLIT_STUB_CRC32`.
     NtNew(NtNewState),
+    /// Chongwu Xiao Jingling - Jiejin Ta Zhi Wang (Taiwan) ("DIGIMON", 1 MiB).
+    /// Electrically a plain MBC5+RAM+BATTERY in every respect except one boot-time
+    /// protection read. The entry point at $01E0 opens a protection port
+    /// (`$7003 <- $60`), selects ROM bank $20, reads $41C3, and requires the byte
+    /// $5D; a mismatch jumps to a stack-smashing dead end that hangs at $00D4. The
+    /// raw ROM byte at bank $20 / offset $01C3 is $69, so the protection chip
+    /// substitutes $5D there while the port is open. Eight instructions later the
+    /// game closes the port (`$7003 <- $00`) and never reopens it (verified over
+    /// 1800 frames of real gameplay: the only $70xx writes ever are $7003=$60 and
+    /// $7003=$00). Satisfying this one read reaches full overworld gameplay.
+    ///
+    /// PROVENANCE — this is an OBSERVED value, not a derived transform. $5D is the
+    /// single byte the live chip was seen to return for the single (bank $20,
+    /// $41C3, port-open) read the boot performs; the chip's actual function is
+    /// underdetermined by that one 8-bit observation (>= 6 mutually-inconsistent
+    /// models fit it equally — identity-with-offset, table lookup, XOR, add, etc.),
+    /// so no general board model is claimed here and none is honest to claim. The
+    /// definitive fix is a hardware read of the real board: write $60 to $7003,
+    /// dump $4000-$7FFF for banks $1E/$1F/$20/$21; write $00, dump the same four;
+    /// compare. That would replace this single observed byte with the real
+    /// transform. Until then the substitution is gated to the exact whole-ROM CRC32
+    /// (`CHONGWU_ROM_CRC32`) so it can never touch another cart, and it fires only
+    /// for the exact observed condition (port open AND bank $20 AND address $41C3).
+    /// The one bit of board state (`prot_open`) rides in the variant payload so no
+    /// other cart's bincode savestate layout shifts.
+    Chongwu(ChongwuState),
 }
+
+/// Protection-port state of `UnlMapper::Chongwu`, carried inside the enum variant
+/// (not as a `Cartridge` field) so every other cart's bincode savestate layout
+/// stays byte-identical. Power-on is closed, i.e. a plain MBC5; the latch only
+/// matters for the ~8-instruction window the boot code holds it open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ChongwuState {
+    /// Set by `$7003 <- $60`, cleared by any other value written to $7003. While
+    /// open the protection read at bank $20 / $41C3 returns the observed latch
+    /// byte instead of the underlying ROM byte.
+    prot_open: bool,
+}
+
+/// Ports and observed value of `UnlMapper::Chongwu`. `CHONGWU_PORT` is the
+/// protection port the boot writes ($7003, in MBC5's ignored $6000-$7FFF block);
+/// `$60` opens it and any other value (the boot writes `$00`) closes it. While
+/// open, a read of address `CHONGWU_PROT_ADDR` ($41C3) with ROM bank
+/// `CHONGWU_PROT_BANK` ($20) mapped returns the OBSERVED latch byte
+/// `CHONGWU_PROT_VALUE` ($5D) — see the `UnlMapper::Chongwu` provenance note; the
+/// raw ROM byte there is $69.
+const CHONGWU_PORT: u16 = 0x7003;
+const CHONGWU_OPEN_VALUE: u8 = 0x60;
+const CHONGWU_PROT_ADDR: u16 = 0x41C3;
+const CHONGWU_PROT_BANK: usize = 0x20;
+const CHONGWU_PROT_VALUE: u8 = 0x5D;
 
 /// Split-window state of `UnlMapper::NtNew`, carried inside the enum variant
 /// (not as `Cartridge` fields) so every other cart's bincode savestate layout
@@ -1675,6 +1735,9 @@ impl Cartridge {
             // NT "new": the split latch and both page registers are volatile;
             // power up un-armed, i.e. as a plain MBC5.
             UnlMapper::NtNew(_) => UnlMapper::NtNew(NtNewState::default()),
+            // Chongwu's protection port latch is volatile board logic; power up
+            // closed, i.e. as a plain MBC5, exactly like a cold cart.
+            UnlMapper::Chongwu(_) => UnlMapper::Chongwu(ChongwuState::default()),
             other => other,
         };
         Cartridge {
@@ -1928,6 +1991,11 @@ impl Cartridge {
             // to this board because some of them under-declare it; that is a
             // save-support guess, not a boot requirement, so it is not copied.)
             UnlMapper::NtNew(_) => {}
+            // Chongwu is electrically a plain MBC5+RAM+BATTERY and its header
+            // type ($1B) is truthful, so the header decode below is correct; the
+            // single observed protection byte is applied in the read/write
+            // intercepts.
+            UnlMapper::Chongwu(_) => {}
             // PKJD is electrically MBC3+TIMER+RAM+BATTERY and its header type
             // ($10) is truthful, so the header decode below is correct; the
             // D/E/F protection is applied in the read/write intercepts.
@@ -2879,6 +2947,19 @@ impl memory::Addressable for Cartridge {
                     return byte;
                 }
             }
+            // Chongwu: while the protection port is open, the single read the
+            // boot performs — ROM bank $20, address $41C3 — returns the OBSERVED
+            // latch byte $5D instead of the ROM's own $69. Gated to that exact
+            // condition (open AND bank AND address); every other read, and any
+            // read once the port closes, is plain MBC5. See the
+            // `UnlMapper::Chongwu` provenance note.
+            UnlMapper::Chongwu(st)
+                if st.prot_open
+                    && addr == CHONGWU_PROT_ADDR
+                    && self.get_rom_bank() == CHONGWU_PROT_BANK =>
+            {
+                return CHONGWU_PROT_VALUE;
+            }
             _ => {}
         }
         match addr {
@@ -3528,6 +3609,19 @@ impl memory::Addressable for Cartridge {
             {
                 self.gowin_write(value);
             }
+            // Chongwu: the $7003 protection port latches open on a $60 write and
+            // closed on anything else ($00 in the boot). It lives in MBC5's
+            // ignored $6000-$7FFF block, so every other write here is a no-op
+            // exactly as on a plain MBC5.
+            BANKING_MODE_START..=BANKING_MODE_END
+                if matches!(self.unl_mapper, UnlMapper::Chongwu(_)) =>
+            {
+                if addr == CHONGWU_PORT
+                    && let UnlMapper::Chongwu(ref mut st) = self.unl_mapper
+                {
+                    st.prot_open = value == CHONGWU_OPEN_VALUE;
+                }
+            }
             // Banking Mode Select (0x6000-0x7FFF)
             BANKING_MODE_START..=BANKING_MODE_END => {
                 // MBC3 timer carts latch the RTC on ANY write here (no edge
@@ -3995,6 +4089,79 @@ mod tests {
         // MBC5 -- MBC3 is what remaps a zero bank register to bank 1.
         let mapper = Mapper::from_header(&UnlMapper::ForceMbc3, 0x1B, false, 128, 4);
         assert!(matches!(mapper, Mapper::Mbc3(_)));
+    }
+
+    #[test]
+    fn chongwu_returns_the_observed_protection_byte() {
+        // Chongwu Xiao Jingling ("DIGIMON") is a plain MBC5+RAM+BATTERY apart
+        // from one boot-time protection read. Build a 1 MiB image whose whole-ROM
+        // CRC32 equals the real dump (0x620E785D) via a 4-byte forged tail, with
+        // the raw byte at bank $20 / $41C3 set to $69 exactly as on the cart; the
+        // rule keys purely on that whole-ROM CRC.
+        let mut rom = vec![0u8; 0x100000];
+        rom[CARTRIDGE_TYPE_OFFSET] = MBC5_RAM_BATTERY; // truthful $1B header
+        rom[ROM_SIZE_OFFSET] = 0x05; // 1 MiB / 64 banks
+        rom[RAM_SIZE_OFFSET] = 0x02; // 8 KiB
+        rom[CHONGWU_PROT_BANK * 0x4000 + 0x1C3] = 0x69; // raw byte the chip overrides
+        rom[0xFFFFC..0x100000].copy_from_slice(&[0xA6, 0x3F, 0x38, 0x67]);
+        assert_eq!(crate::checksum::crc32(&rom), CHONGWU_ROM_CRC32);
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::Chongwu(ChongwuState::default())
+        );
+
+        // Electrically a plain MBC5+RAM+BATTERY (header type truthful), and the
+        // board it decodes to is a stock MBC5 -- the protection is all intercept.
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(
+            cart.get_cartridge_type(),
+            CartridgeType::MBC5 { ram: true, battery: true, .. }
+        ));
+        assert!(matches!(
+            Mapper::from_header(
+                &UnlMapper::Chongwu(ChongwuState::default()),
+                MBC5_RAM_BATTERY,
+                false,
+                64,
+                1,
+            ),
+            Mapper::Mbc5(_)
+        ));
+
+        // Select ROM bank $20, as the boot does. With the port closed (power-on)
+        // the raw ROM byte $69 shows through, exactly like a plain MBC5.
+        cart.write(0x2000, CHONGWU_PROT_BANK as u8);
+        assert_eq!(cart.read(0x41C3), 0x69);
+
+        // Open the port ($7003 <- $60): the one protected read now returns the
+        // OBSERVED latch byte $5D instead of $69.
+        cart.write(0x7003, 0x60);
+        assert_eq!(cart.read(0x41C3), 0x5D);
+
+        // The override is confined to the exact observed condition: a different
+        // address in bank $20, or address $41C3 in a different bank, both read
+        // straight ROM ($00 here) even while the port stays open.
+        assert_eq!(cart.read(0x41C4), 0x00);
+        cart.write(0x2000, 0x21);
+        assert_eq!(cart.read(0x41C3), 0x00);
+        cart.write(0x2000, CHONGWU_PROT_BANK as u8);
+
+        // Close the port ($7003 <- $00, as the boot does): the raw $69 is back.
+        cart.write(0x7003, 0x00);
+        assert_eq!(cart.read(0x41C3), 0x69);
+
+        // Open iff the written value is $60: any other value closes the port.
+        cart.write(0x7003, 0x60);
+        assert_eq!(cart.read(0x41C3), 0x5D);
+        cart.write(0x7003, 0x99);
+        assert_eq!(cart.read(0x41C3), 0x69);
+
+        // A one-byte perturbation moves the whole-ROM CRC32, so the rule no
+        // longer matches and the image is left a plain MBC5 (no protection).
+        let mut perturbed = rom.clone();
+        perturbed[0x100] ^= 0x01;
+        assert_ne!(crate::checksum::crc32(&perturbed), CHONGWU_ROM_CRC32);
+        assert_eq!(Cartridge::detect_unl_mapper(&perturbed), UnlMapper::None);
     }
 
     // Clean-room 48-byte stand-in for the GGB81 secondary logo at $0184: a

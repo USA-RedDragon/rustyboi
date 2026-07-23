@@ -215,6 +215,19 @@ impl Cartridge {
             return UnlMapper::ForceMbc3;
         }
 
+        // Chongwu Xiao Jingling - Jiejin Ta Zhi Wang (Taiwan) ("DIGIMON", 1 MiB):
+        // a plain MBC5+RAM+BATTERY apart from one boot-time protection read. Its
+        // $0184 secondary logo is the LiCheng/Niutoude one, so a bare logo gate
+        // would route it to `UnlMapper::LiCheng` (where it hangs at $00D4 on the
+        // failed check). Keyed on the exact whole-ROM CRC32 — and ordered before
+        // the LiCheng arm — because the protection response the board returns is a
+        // single OBSERVED latch byte, not a derived transform: gating on the whole
+        // image confines the observed constant to this one file. See
+        // `UnlMapper::Chongwu`.
+        if rom_crc32 == super::CHONGWU_ROM_CRC32 {
+            return UnlMapper::Chongwu(ChongwuState::default());
+        }
+
         let claimed_size = 0x8000usize.checked_shl(u32::from(rom_size_code)).unwrap_or(0);
         if LICHENG_LOGO_CRC32.contains(&logo_crc32)
             && (data[CARTRIDGE_TYPE_OFFSET] == 0x01 || data.len() != claimed_size)

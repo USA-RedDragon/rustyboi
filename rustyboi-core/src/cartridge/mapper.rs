@@ -284,6 +284,12 @@ impl Mapper {
             // board here only has to provide MBC5's RAM-enable / RAM-bank
             // registers. Fall through to the header type.
             UnlMapper::NtNew(_) => {}
+            // Chongwu: a stock MBC5+RAM+BATTERY board (its header type $1B is
+            // truthful) whose only addition is one observed protection byte,
+            // applied in the read/write intercepts off the `UnlMapper::Chongwu`
+            // payload's `prot_open` latch. Fall through to the header type so it
+            // gets the real `Mapper::Mbc5` the intercept banks against.
+            UnlMapper::Chongwu(_) => {}
             // PKJD is electrically MBC3+TIMER+RAM+BATTERY (its header type $10 is
             // truthful); the D/E/F protection state lives in the
             // UnlMapper::PokeJadeDia payload and is applied by the $4000-$5FFF /
