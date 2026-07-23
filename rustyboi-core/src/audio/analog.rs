@@ -93,8 +93,10 @@ impl AnalogModel {
     /// always the DMG cycle rate over [`HOST_SAMPLE_RATE`] — an SGB1's slower
     /// crystal repitches the machine, not the filter.
     fn charge_per_sample(self) -> f32 {
-        self.charge_per_cycle()
-            .powf(DMG_CPU_HZ as f32 / HOST_SAMPLE_RATE)
+        // Deterministic pure-Rust `libm::powf` (not `f32::powf`, which routes to
+        // the platform libm and is not bit-identical across targets), mirroring
+        // color_mix.rs's gamma path so the audio hash is portable.
+        libm::powf(self.charge_per_cycle(), DMG_CPU_HZ as f32 / HOST_SAMPLE_RATE)
     }
 }
 
