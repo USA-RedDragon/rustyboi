@@ -20,7 +20,7 @@ impl Mmio {
     /// Freeze/unfreeze the OAM-DMA across the STOP speed-switch unhalt window
     /// (hardware's halted branch — the OAM-DMA position stays put).
     pub(crate) fn set_oam_dma_stop_freeze(&mut self, freeze: bool) {
-        self.oam_dma_stop_freeze = freeze;
+        self.dma.oam.oam_dma_stop_freeze = freeze;
         if freeze {
             // Hardware advances the OAM-DMA by the STOP's own
             // M-cycle before halting; arm the
@@ -38,8 +38,8 @@ impl Mmio {
             // hdma_transition_speedchange_oamdma) must stay frozen at its calibrated
             // position — those read the in-flight byte after the switch — so the
             // grace is gated OFF for them, keeping them byte-identical to baseline.
-            if self.dma.active && self.dma.pos >= 158 {
-                self.stop_oam_grace = 1;
+            if self.dma.oam.active && self.dma.oam.pos >= 158 {
+                self.dma.oam.stop_oam_grace = 1;
             }
         }
     }
@@ -62,14 +62,14 @@ impl Mmio {
             // a strict board leaves the bus floating 0xFF (the
             // srcE000_readFE00 cgb04c capture, RAMG on).
             DmaSrcKind::ExternalBus => {
-                let src = self.dma.source_base.wrapping_add(pos as u16);
+                let src = self.dma.oam.source_base.wrapping_add(pos as u16);
                 match &self.cartridge {
                     Some(cart) => cart.dma_sram_bus_read(src),
                     None => 0xFF,
                 }
             }
             DmaSrcKind::Wram => {
-                let src = self.dma.source_base.wrapping_add(pos as u16);
+                let src = self.dma.oam.source_base.wrapping_add(pos as u16);
                 let wram_byte = self.dma_conflict_wram_read(src);
                 // DMG src E000-FFFF: the echo fetch also asserts the external-RAM
                 // /CS on the bus WRAM shares with the cartridge (gb-ctr: all
@@ -79,12 +79,12 @@ impl Mmio {
                 // DMG reaches this arm above E0 -- `dma_src_kind` routes CGB
                 // E000+ to `ExternalBus`, where WRAM is not on the cart bus at
                 // all. No-op below E0 and on strict boards / RAMG off.
-                match (&self.cartridge, self.dma.source_base >> 8 >= 0xE0) {
+                match (&self.cartridge, self.dma.oam.source_base >> 8 >= 0xE0) {
                     (Some(cart), true) => wram_byte & cart.dma_sram_bus_read(src),
                     _ => wram_byte,
                 }
             },
-            _ => self.read_during_dma(self.dma.source_base.wrapping_add(pos as u16)),
+            _ => self.read_during_dma(self.dma.oam.source_base.wrapping_add(pos as u16)),
         }
     }
 
@@ -110,8 +110,8 @@ impl Mmio {
     /// and TCAGBD §9.6.3's VRAM-read corruption describes the GDMA/HDMA engine, not
     /// OAM-DMA. The AND-with-fetcher model is from real-silicon .dump captures.
     fn dma_vram_conflict_or_source_byte(&mut self, pos: u8) -> u8 {
-        let dma_addr = self.dma.source_base.wrapping_add(pos as u16);
-        if self.dma_src_kind() != DmaSrcKind::Vram || !self.fetcher_bus_locked {
+        let dma_addr = self.dma.oam.source_base.wrapping_add(pos as u16);
+        if self.dma_src_kind() != DmaSrcKind::Vram || !self.dma.oam.fetcher_bus_locked {
             // DMG mode-2 fetcher-prefetch onset: one M-cycle before the mode-3
             // lock, the fetcher already drives the first tile-NUMBER (tilemap)
             // address, so a VRAM-source DMA read here conflicts as the
@@ -120,25 +120,25 @@ impl Mmio {
             // following first locked M-cycle is the warmup (clean) byte.
             if self.dma_src_kind() == DmaSrcKind::Vram
                 && !self.cgb_features_enabled
-                && self.dmg_prefetch_active
+                && self.dma.oam.dmg_prefetch_active
             {
-                self.poison_tiledata_base = None;
-                let eff_addr = dma_addr & self.dmg_prefetch_addr;
+                self.dma.oam.poison_tiledata_base = None;
+                let eff_addr = dma_addr & self.dma.oam.dmg_prefetch_addr;
                 return self.vram.read(eff_addr);
             }
             // Non-VRAM source, or VRAM free (HBlank/mode 0): true source byte.
-            self.poison_tiledata_base = None;
+            self.dma.oam.poison_tiledata_base = None;
             return self.dma_source_byte(pos);
         }
-        if self.fetcher_bus_warmup {
+        if self.dma.oam.fetcher_bus_warmup {
             // First locked M-cycle of the line: the fetcher has not settled a
             // displayed-tile byte on the bus yet, so this reads clean VRAM.
-            self.fetcher_bus_warmup = false;
-            self.poison_tiledata_base = None;
+            self.dma.oam.fetcher_bus_warmup = false;
+            self.dma.oam.poison_tiledata_base = None;
             return self.dma_source_byte(pos);
         }
-        let fa = self.fetcher_bus_addr;
-        let bank = self.fetcher_bus_bank;
+        let fa = self.dma.oam.fetcher_bus_addr;
+        let bank = self.dma.oam.fetcher_bus_bank;
         let is_tile_number = (0x9800..=0x9FFF).contains(&fa);
         if !self.cgb_features_enabled {
             // DMG bus conflict. The DMG VRAM data bus behaves as an OR (not the
@@ -147,7 +147,7 @@ impl Mmio {
             // address's row bits high while the DMA address otherwise passes
             // through. A tile-NUMBER read on the bus does not conflict (reads true
             // VRAM), and does not poison.
-            self.poison_tiledata_base = None;
+            self.dma.oam.poison_tiledata_base = None;
             if is_tile_number {
                 return self.dma_source_byte(pos);
             }
@@ -159,13 +159,13 @@ impl Mmio {
             // next read.
             let a = dma_addr & fa;
             let tile = self.read_vram_bank_internal(0, a);
-            self.poison_tiledata_base = Some(0x8000u16.wrapping_add((tile as u16) << 4));
+            self.dma.oam.poison_tiledata_base = Some(0x8000u16.wrapping_add((tile as u16) << 4));
             a
         } else {
             // Tile-data read on the bus: substitute the poisoned tile's data base
             // (carried from the preceding tilemap read) for tile 0's, keeping this
             // read's own row low nibble, then AND the DMA address.
-            let poisoned_fa = match self.poison_tiledata_base {
+            let poisoned_fa = match self.dma.oam.poison_tiledata_base {
                 Some(base) => base | (fa & 0x000F),
                 None => fa,
             };
@@ -185,29 +185,29 @@ impl Mmio {
     pub(super) fn dma_advance_one_mcycle(&mut self) {
         // Apply any deferred CGB VRAM-source conflict-read OAM zero before this
         // M-cycle places a new byte (hardware zeroes inside the read itself).
-        let pending = self.pending_oam_zero.get();
+        let pending = self.dma.oam.pending_oam_zero.get();
         if pending >= 0 {
             self.oam.write(OAM_START + pending as u16, 0);
-            self.pending_oam_zero.set(-1);
+            self.dma.oam.pending_oam_zero.set(-1);
         }
 
-        self.dma.pos = self.dma.pos.wrapping_add(1);
+        self.dma.oam.pos = self.dma.oam.pos.wrapping_add(1);
 
-        if self.dma.pos == self.dma.start_pos {
+        if self.dma.oam.pos == self.dma.oam.start_pos {
             // OAM-DMA start: transfer (re)starts from the top.
-            self.dma.pos = 0;
-            self.dma.start_pos = 0;
+            self.dma.oam.pos = 0;
+            self.dma.oam.start_pos = 0;
         }
 
-        if self.dma.pos < 160 {
-            let byte = self.dma_vram_conflict_or_source_byte(self.dma.pos);
-            self.oam.write(OAM_START + self.dma.pos as u16, byte);
-        } else if self.dma.pos == 160 {
+        if self.dma.oam.pos < 160 {
+            let byte = self.dma_vram_conflict_or_source_byte(self.dma.oam.pos);
+            self.oam.write(OAM_START + self.dma.oam.pos as u16, byte);
+        } else if self.dma.oam.pos == 160 {
             // OAM-DMA end: park the engine. Because no restart was requested
             // (`dma.start_pos == 0`), idle `dma.pos` at -2 and stop.
-            if self.dma.start_pos == 0 {
-                self.dma.pos = 0xFE;
-                self.dma.active = false;
+            if self.dma.oam.start_pos == 0 {
+                self.dma.oam.pos = 0xFE;
+                self.dma.oam.active = false;
             }
         }
     }
@@ -230,14 +230,14 @@ impl Mmio {
     /// the next 16-bit word the GDMA drove), not `mem[src]`. Pan Docs: "the PPU
     /// reads whatever 16-bit word the DMA unit is writing to OAM".
     pub(super) fn dma_conflict_advance(&mut self, src: u16, data: u8, back_to_back: bool) {
-        self.dma.pos = self.dma.pos.wrapping_add(1);
+        self.dma.oam.pos = self.dma.oam.pos.wrapping_add(1);
 
-        if self.dma.pos == self.dma.start_pos {
-            self.dma.pos = 0;
-            self.dma.start_pos = 0;
+        if self.dma.oam.pos == self.dma.oam.start_pos {
+            self.dma.oam.pos = 0;
+            self.dma.oam.start_pos = 0;
         }
 
-        if (self.dma.pos as usize) < OAM_SIZE {
+        if (self.dma.oam.pos as usize) < OAM_SIZE {
             let p = (src & 0xFF) as usize;
             // Second-block re-wrap into the 8-byte word-bus gap shadow: the four
             // OAM-DMA M-cycles between the two back-to-back FF55 writes advance the
@@ -267,10 +267,10 @@ impl Mmio {
                 // with 0xE7 (the non-AGB branch).
                 self.oam_high[(p & 0xE7) - 0xA0] = data;
             }
-        } else if self.dma.pos as usize == OAM_SIZE
-            && self.dma.start_pos == 0 {
-                self.dma.pos = 0xFE;
-                self.dma.active = false;
+        } else if self.dma.oam.pos as usize == OAM_SIZE
+            && self.dma.oam.start_pos == 0 {
+                self.dma.oam.pos = 0xFE;
+                self.dma.oam.active = false;
             }
     }
 
@@ -280,10 +280,10 @@ impl Mmio {
         if (0x8000..=0x9FFF).contains(&src) || src >= 0xE000 {
             return 0xFF;
         }
-        let saved = self.dma.active;
-        self.dma.active = false;
+        let saved = self.dma.oam.active;
+        self.dma.oam.active = false;
         let byte = <Self as memory::Addressable>::read(self, src);
-        self.dma.active = saved;
+        self.dma.oam.active = saved;
         byte
     }
 
@@ -292,13 +292,13 @@ impl Mmio {
     /// a transfer is already running schedules a restart at that point, leaving
     /// the in-flight transfer to continue until then (DMA-restart behavior).
     pub(in crate::memory) fn start_oam_dma(&mut self, value: u8) {
-        self.dma.start_pos = self.dma.pos.wrapping_add(2);
-        self.dma.subcycle = 0;
-        self.dma.source_base = (value as u16) << 8;
-        self.dma.active = true;
+        self.dma.oam.start_pos = self.dma.oam.pos.wrapping_add(2);
+        self.dma.oam.subcycle = 0;
+        self.dma.oam.source_base = (value as u16) << 8;
+        self.dma.oam.active = true;
         // Fresh OAM-DMA lifetime: the next GDMA-conflict pass is the FIRST, not a
         // back-to-back second block.
-        self.gdma_conflict_ran = false;
+        self.dma.hdma.gdma_conflict_ran = false;
         self.io_registers.write(REG_DMA, value);
     }
 
@@ -307,7 +307,7 @@ impl Mmio {
         // Fast path (the common case: no OAM-DMA in flight): inlined into the
         // per-dot loop so no wasm call is made. Firefox pays a real cost per
         // wasm call on the ~4M-dots/sec hot path; the cold work is outlined.
-        if self.oam_dma_stall_suppress == 0 && !self.dma.active {
+        if self.dma.hdma.oam_dma_stall_suppress == 0 && !self.dma.oam.active {
             return;
         }
         self.step_dma_slow();
@@ -318,20 +318,20 @@ impl Mmio {
         // During the GDMA/HDMA stall the OAM-DMA was already advanced inside the
         // transfer loop (hardware folds it into the DMA event); skip the dots that
         // re-tick the same transfer time so the OAM-DMA is not double-advanced.
-        if self.oam_dma_stall_suppress > 0 {
-            self.oam_dma_stall_suppress -= 1;
+        if self.dma.hdma.oam_dma_stall_suppress > 0 {
+            self.dma.hdma.oam_dma_stall_suppress -= 1;
             return;
         }
-        if !self.dma.active {
+        if !self.dma.oam.active {
             return;
         }
 
         // One source byte is transferred per M-cycle (4 dots), not per dot.
-        self.dma.subcycle += 1;
-        if self.dma.subcycle < 4 {
+        self.dma.oam.subcycle += 1;
+        if self.dma.oam.subcycle < 4 {
             return;
         }
-        self.dma.subcycle = 0;
+        self.dma.oam.subcycle = 0;
         // STOP speed-switch unhalt window: the CPU is halted for the
         // 0x20000 cycles, so the OAM-DMA takes its halted branch
         // and freezes the OAM position. Mid-transfer OAM-DMA must stay put across the
@@ -343,10 +343,10 @@ impl Mmio {
         // whose final byte (pos 159 -> 160 = OAM-DMA end) lands in that window
         // completes before the freeze. Same shape as the `cpu_halted` branch
         // below: one grace M-cycle, plus the pos==159 final-byte bypass.
-        if self.oam_dma_stop_freeze {
-            if self.stop_oam_grace > 0 {
-                self.stop_oam_grace -= 1;
-            } else if self.dma.pos != 159 {
+        if self.dma.oam.oam_dma_stop_freeze {
+            if self.dma.oam.stop_oam_grace > 0 {
+                self.dma.oam.stop_oam_grace -= 1;
+            } else if self.dma.oam.pos != 159 {
                 return;
             }
             // grace M-cycle, or the final byte: fall through to advance.
@@ -362,7 +362,7 @@ impl Mmio {
         if self.cpu_halted {
             if self.halt.oam_grace > 0 {
                 self.halt.oam_grace -= 1;
-            } else if self.dma.pos != 159 {
+            } else if self.dma.oam.pos != 159 {
                 // Freeze the OAM-DMA mid-transfer during HALT. EXCEPTION: the very
                 // last byte (pos 159 -> 160 = OAM-DMA end). Hardware
                 // advances the OAM-DMA twice at halt entry, before
@@ -387,23 +387,23 @@ impl Mmio {
     /// Read the pending DMA stall without consuming it or arming the post-DMA
     /// STAT-read bias (unlike `take_dma_stall`).
     pub(crate) fn peek_dma_stall(&self) -> u32 {
-        self.pending_dma_stall
+        self.dma.hdma.pending_dma_stall
     }
 
     /// Drop `amount` cc from the pending DMA stall (saturating). Used to absorb a
     /// deferred stop_halt HDMA block's transfer span into the STOP unhalt window
     /// rather than charging it as a separate post-window stall.
     pub(crate) fn reduce_dma_stall(&mut self, amount: u32) {
-        self.pending_dma_stall = self.pending_dma_stall.saturating_sub(amount);
+        self.dma.hdma.pending_dma_stall = self.dma.hdma.pending_dma_stall.saturating_sub(amount);
     }
 
     /// Consume the CPU-cycle stall owed for completed HDMA/GDMA transfers.
     pub(crate) fn take_dma_stall(&mut self) -> u32 {
-        let stall = std::mem::take(&mut self.pending_dma_stall);
+        let stall = std::mem::take(&mut self.dma.hdma.pending_dma_stall);
         if stall > 0 {
             // Arm the post-DMA STAT-read bias (prefetch absorption) so the
             // first FF41 mode read after the stall resolves at hardware's read cc.
-            self.dma.prefetch_stat_bias = true;
+            self.dma.oam.prefetch_stat_bias = true;
         }
         stall
     }
@@ -411,19 +411,19 @@ impl Mmio {
     /// Whether the next FF41 STAT-mode read should apply the post-DMA prefetch
     /// bias (resolve at `master_cc - 1`). Consumes the flag.
     pub(crate) fn take_dma_prefetch_stat_bias(&mut self) -> bool {
-        std::mem::take(&mut self.dma.prefetch_stat_bias)
+        std::mem::take(&mut self.dma.oam.prefetch_stat_bias)
     }
 
     /// Whether the OAM-DMA engine is armed/running. Used by the bus to decide whether
     /// the DMA M-cycle must be advanced before resolving a CPU write.
     pub(crate) fn dma_active(&self) -> bool {
-        self.dma.active
+        self.dma.oam.active
     }
 
     /// True while a transfer is actively placing bytes into OAM (the window in
     /// which the CPU bus conflicts with OAM DMA). Mirrors `dma.pos < 160`.
     pub(in crate::memory) fn dma_transfer_in_progress(&self) -> bool {
-        self.dma.active && self.dma.pos < 160
+        self.dma.oam.active && self.dma.oam.pos < 160
     }
 
     /// Public view of the OAM-DMA "placing bytes" window (`OAM-DMA start` ..
@@ -437,8 +437,8 @@ impl Mmio {
     /// Take (and clear) the pending-CPU-OAM-write flag. The PPU drains this each
     /// dot to fire the sprite snapshot on an OAM write.
     pub(crate) fn take_oam_write_pending(&mut self) -> bool {
-        let p = self.oam_write_pending;
-        self.oam_write_pending = false;
+        let p = self.dma.oam.oam_write_pending;
+        self.dma.oam.oam_write_pending = false;
         p
     }
 
@@ -466,7 +466,7 @@ impl Mmio {
     /// rows C0-FF match the native-CGB grid, not the DMG one).
     fn dma_src_kind(&self) -> DmaSrcKind {
         let cgb = self.is_cgb();
-        let src_high = (self.dma.source_base >> 8) as u8;
+        let src_high = (self.dma.oam.source_base >> 8) as u8;
         let wram_top: u16 = if cgb { 0xE0 } else { 0x100 };
         if src_high < 0xA0 {
             if src_high < 0x80 { DmaSrcKind::Rom } else { DmaSrcKind::Vram }
@@ -483,7 +483,7 @@ impl Mmio {
     /// the fixed bank-0
     /// block (area 0) and the currently SVBK-banked block (area 1).
     fn dma_conflict_wram_area(&self) -> u8 {
-        ((self.dma.source_base >> 8) >> 4 & 1) as u8
+        ((self.dma.oam.source_base >> 8) >> 4 & 1) as u8
     }
 
     /// Bank index for an OAM-DMA-conflict WRAM access, or `None` for the base
@@ -542,7 +542,7 @@ impl Mmio {
         if !self.dma_transfer_in_progress() || !self.dma_address_conflicts(addr) {
             return false;
         }
-        let pos = self.dma.pos as u16;
+        let pos = self.dma.oam.pos as u16;
         if self.is_cgb() {
             if addr < WRAM_START {
                 // rom/sram/vram source: OAM latches the CPU byte (0 for vram).
@@ -570,7 +570,7 @@ impl Mmio {
 
     /// As `dma_transfer_in_progress`, but using the read-observed position.
     pub(in crate::memory) fn dma_read_conflict_active(&self) -> bool {
-        self.dma.active && self.dma.pos < 160
+        self.dma.oam.active && self.dma.oam.pos < 160
     }
 
     /// Byte the CPU sees on a conflicting bus read while OAM DMA is mid-transfer.
@@ -587,12 +587,12 @@ impl Mmio {
         if self.is_cgb() && self.dma_src_kind() != DmaSrcKind::Wram && addr >= WRAM_START {
             return self.dma_conflict_wram_read(addr);
         }
-        let byte = self.oam.read(OAM_START + self.dma.pos as u16);
+        let byte = self.oam.read(OAM_START + self.dma.oam.pos as u16);
         // CGB with a VRAM source: the conflict read returns OAM[pos] but then
         // zeroes that OAM byte. Defer the zero to
         // the next DMA advance so the &self read path can record it.
         if self.is_cgb() && self.dma_src_kind() == DmaSrcKind::Vram {
-            self.pending_oam_zero.set(self.dma.pos as i16);
+            self.dma.oam.pending_oam_zero.set(self.dma.oam.pos as i16);
         }
         byte
     }
@@ -670,7 +670,7 @@ impl Mmio {
     /// window last dot, `process_oam_reader_events` is a guaranteed no-op.
     #[inline]
     pub(crate) fn oam_snoop_event_possible(&self) -> bool {
-        self.dma.active || self.oam_write_pending
+        self.dma.oam.active || self.dma.oam.oam_write_pending
     }
 
     /// Whether the per-dot OAM-DMA bus-conflict publish
@@ -678,6 +678,6 @@ impl Mmio {
     /// resolution inside `step_dma_slow` runs only under this same predicate.
     #[inline]
     pub(crate) fn oam_dma_bus_snoop_needed(&self) -> bool {
-        self.dma.active || self.oam_dma_stall_suppress != 0
+        self.dma.oam.active || self.dma.hdma.oam_dma_stall_suppress != 0
     }
 }

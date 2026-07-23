@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 
-use crate::memory::dma::{HaltHdmaState, HdmaEngine, OamDmaEngine};
+use crate::memory::dma::{Dma, HaltHdmaState};
 
 pub(in crate::memory) const EMPTY_BYTE: u8 = 0xFF;
 
@@ -57,10 +57,6 @@ fn oam_high_index(lo: u8, cgb: bool, cgb_de: bool) -> usize {
     } else {
         lo as usize - 0xA0
     }
-}
-
-fn default_pending_oam_zero() -> std::cell::Cell<i16> {
-    std::cell::Cell::new(-1)
 }
 
 const BIOS_START: u16 = 0x0000;
@@ -415,7 +411,7 @@ pub struct Mmio {
     #[serde(default)]
     passive_pages_valid: bool,
 
-    pub(in crate::memory) hdma: HdmaEngine,
+    pub(in crate::memory) dma: Dma,
     // Carried CPU lag: passive-read M-cycles whose world resolution was
     // deferred ACROSS an instruction boundary (see Bus::tick_remaining's
     // carry gate). Pulled into the next Bus's lag at construction, so the
@@ -427,68 +423,6 @@ pub struct Mmio {
     hram: memory::Memory<HRAM_START, HRAM_SIZE>,
     ie_register: u8,
     audio: audio::Audio,
-
-    pub(in crate::memory) dma: OamDmaEngine,
-    // Set when a CPU write lands in OAM (0xFE00-0xFE9F) this M-cycle, so the PPU
-    // can fire the sprite snapshot on an OAM write.
-    // Drained by the PPU each dot.
-    #[serde(default)]
-    pub(in crate::memory) oam_write_pending: bool,
-    // CGB VRAM-source OAM-DMA conflict reads return OAM[dma.pos] and then
-    // zero that OAM byte. The read path is &self,
-    // so record the position here and apply the zero on the next DMA advance.
-    // -1 = none.
-    #[serde(skip, default = "default_pending_oam_zero")]
-    pub(in crate::memory) pending_oam_zero: std::cell::Cell<i16>,
-
-    // OAM-DMA-source VRAM bus-conflict model. The PPU pushes its BG fetcher's
-    // current VRAM data-bus address/bank here each dot during mode 3 (VRAM locked).
-    // A VRAM-source OAM-DMA read while `fetcher_bus_locked` is set returns
-    // VRAM[(dma_src_addr & fetcher_bus_addr)] — both the fetcher and the DMA drive
-    // the VRAM address bus, so the array is indexed by their bitwise-AND (the real
-    // hardware "OAM DMA bus conflict"). Cleared each dot the PPU is not mode-3.
-    // Not in Pan Docs, TCAGBD, or GBCTR (GBCTR marks "OAM DMA bus conflicts" TODO;
-    // TCAGBD §9.6.3's VRAM-read corruption is the GDMA/HDMA engine, not OAM-DMA);
-    // the AND-with-fetcher formula is from real-silicon .dump captures.
-    #[serde(skip, default)]
-    pub(in crate::memory) fetcher_bus_addr: u16,
-    #[serde(skip, default)]
-    pub(in crate::memory) fetcher_bus_bank: u8,
-    #[serde(skip, default)]
-    pub(in crate::memory) fetcher_bus_locked: bool,
-    // The first OAM-DMA VRAM-source read after the fetcher bus lock engages (a
-    // fresh mode-3 entry) still resolves to true VRAM: the BG fetcher has not yet
-    // settled a displayed-tile byte on the conflict bus during the line's warmup,
-    // so the first locked M-cycle reads cleanly (the dumps show the first mode-3
-    // byte of each crossed line is identity). Set on the lock's rising edge,
-    // consumed by the first conflicting read.
-    #[serde(skip, default)]
-    pub(in crate::memory) fetcher_bus_warmup: bool,
-    // DMG-only mode-2 fetcher-prefetch onset. On DMG the BG fetcher's first
-    // tile-NUMBER fetch begins one M-cycle (4 dots) BEFORE the official mode-3
-    // VRAM lock — the mode-2->mode-3 prefetch. A VRAM-source OAM-DMA M-cycle in
-    // that prefetch window already sees the fetcher driving the first tilemap
-    // address, so the conflict engages one M-cycle EARLIER than the CGB
-    // `state==PixelTransfer` lock: the onset byte is `VRAM[dma_addr & tilemap0]`
-    // (tile-number address-line AND), not the clean source. The dumps show the
-    // crossed line's first conflict byte at the LAST mode-2 M-cycle on DMG, while
-    // the subsequent first locked M-cycle is still the warmup (clean) byte. The
-    // PPU publishes the predicted first tilemap address here for the 4-dot window
-    // preceding the mode-3 arm; `dmg_prefetch_addr` is 0 when inactive.
-    #[serde(skip, default)]
-    pub(in crate::memory) dmg_prefetch_active: bool,
-    #[serde(skip, default)]
-    pub(in crate::memory) dmg_prefetch_addr: u16,
-    // Second-order conflict: when an OAM-DMA M-cycle reads VRAM while the BG
-    // fetcher is driving a TILE-NUMBER (tilemap) address, both the DMA byte and the
-    // tile number the fetcher would latch are `VRAM[tilemap_addr & dma_src]`. That
-    // poisoned tile number shifts the tile-data address the fetcher drives on the
-    // NEXT M-cycle, so the following tile-data DMA read sees
-    // `VRAM[tiledata(poisoned_tile,row) & dma_src]`. We carry the poisoned tile's
-    // tile-data base (0x8000 + tile*16) here from the tilemap read to the next
-    // tile-data read; the row low bits come from that read's own fetcher address.
-    #[serde(skip, default)]
-    pub(in crate::memory) poison_tiledata_base: Option<u16>,
 
     // Set true when the CPU writes to a register that affects the STAT line
     // (FF40 LCDC, FF41 STAT, FF45 LYC). Consumed by the PPU between CPU
@@ -523,34 +457,6 @@ pub struct Mmio {
 
     // CGB WRAM banks 2-7 (bank 1 is the existing wram_bank field)
     pub(in crate::memory) wram_banks: Vec<memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>>, // Banks 2-7
-    // Back-to-back GDMA word-bus conflict: set true while an OAM DMA is active once a
-    // GDMA-conflict pass has run in this OAM-DMA lifetime, so the NEXT GDMA block (no
-    // OAM-DMA completion in between) is recognised as a back-to-back second block.
-    // Not in Pan Docs, TCAGBD, or GBCTR; the 2x-GDMA word-bus first-word duplication
-    // is from real-silicon oamdumper .dump captures (not modelled by prior emulators).
-    #[serde(skip, default)]
-    pub(in crate::memory) gdma_conflict_ran: bool,
-    // CPU-cycle stall owed for HDMA/GDMA blocks already transferred; the CPU
-    // idles these cycles (peripherals keep ticking) before its next fetch.
-    // Serialized (additive `default`): owed cycles can straddle an instruction
-    // boundary, so a state saved with a stall pending must resume with it.
-    #[serde(default)]
-    pub(in crate::memory) pending_dma_stall: u32,
-    // VRAM-source GDMA first-word latch. A GDMA whose source is VRAM reads
-    // nothing (same-bus read: floats 0xFF), EXCEPT the transfer's first 16-bit
-    // word, which latches the byte the CPU's absorbed next-opcode prefetch
-    // left on the data
-    // bus - duplicated into both bytes by the word bus. AntonioND
-    // hdma_valid_sources real_gbc.sav row 8000 reads `3E 3E FF FF ...` (0x3E =
-    // the `ld a,` opcode following the FF55 write). The prefetch byte is only
-    // known at the CPU's next fetch, so `execute_gdma` arms this with the
-    // first dest word's VRAM address (+ bank), and `Bus::fetch_opcode` patches
-    // the two bytes with the fetched opcode. Consume-once.
-    // Base (VRAM-source DMA = "two unknown bytes then FFh"): TCAGBD §9.6.3; the
-    // identity of the two bytes (the word-duplicated prefetch opcode) is from the
-    // AntonioND hdma_valid_sources captures — not in Pan Docs/GBCTR.
-    #[serde(skip, default)]
-    pub(in crate::memory) gdma_vram_src_fixup: Option<(u16, bool)>,
     // Joypad IRQ input-filter delay for the JOYP select-write edge, in master
     // cc (dots) remaining until the IF bit is raised; 0 = idle. The P1 lines
     // pass through an analog filter, so a select write that pulls a held
@@ -562,43 +468,8 @@ pub struct Mmio {
     // instruction boundaries, so a state saved mid-delay must resume it.
     #[serde(default)]
     joypad_irq_delay: u32,
-    // OAM-DMA advance suppression for the GDMA/HDMA stall window. `execute_gdma`
-    // / `run_hdma_block` fold the OAM-DMA's M-cycle advances INTO the transfer
-    // loop. The same
-    // transfer cc are then drained as a CPU `pending_dma_stall`, during which
-    // `step_dma` would advance the OAM-DMA a SECOND time. This counts those
-    // already-folded dots so `step_dma` skips them (the OAM-DMA stays frozen
-    // at its post-loop position until the next OAM-DMA update).
-    // Serialized (additive `default`): the suppression window drains across the
-    // CPU stall, spanning instruction boundaries.
-    #[serde(default)]
-    pub(in crate::memory) oam_dma_stall_suppress: u32,
 
     pub(in crate::memory) halt: HaltWake,
-    // True while the CPU is parked in the STOP speed-switch unhalt window
-    // (0x20000 cycles). The CPU is halted for this
-    // window, so the OAM-DMA takes its halted branch (elapsed time is
-    // consumed WITHOUT moving `dma.pos`). rustyboi drains the
-    // window via `stop_unhalt_cycles` without setting `cpu_halted`, so the
-    // OAM-DMA must be frozen here too. Set on STOP entry, cleared at unhalt.
-    // Serialized (additive `default`): the freeze persists across the whole STOP
-    // window, spanning instruction boundaries.
-    #[serde(default)]
-    pub(in crate::memory) oam_dma_stop_freeze: bool,
-    // Mirror of the HALT-entry `halt.oam_grace`, but for the STOP speed-switch.
-    // Hardware advances the OAM-DMA by the STOP instruction's own M-cycle before
-    // halting, so that M-cycle advances the
-    // OAM-DMA one step before the freeze, and a transfer whose final byte's
-    // M-cycle lands in that window completes (OAM-DMA end) rather than stalling to
-    // unhalt. Without it rustyboi froze one byte short (pos 158 vs hardware's 160),
-    // so the post-window mode-2 sprite scan read the in-flight 0xFF source instead
-    // of the completed OAM (oamdma_late_speedchange_stat_2: the line's left-edge
-    // sprite goes unmapped, mode-0 time -11, STAT read mode 0 where hardware reads
-    // mode 3). Set on STOP entry alongside the freeze; consumed in `step_dma`.
-    // Serialized (additive `default`): persists across the STOP window like the
-    // freeze it pairs with.
-    #[serde(default)]
-    pub(in crate::memory) stop_oam_grace: u8,
 
     // True while the CPU is in HALT. Hardware suppresses the period-edge
     // HDMA request while halted; the
@@ -825,22 +696,12 @@ impl Mmio {
             ir_device: crate::ir::IrDevice::Disconnected,
             passive_pages: [PassivePage::Fallback; 16],
             passive_pages_valid: false,
-            hdma: HdmaEngine::default(),
+            dma: Dma::default(),
             cpu_lag: 0,
             io_registers: memory::Memory::new(),
             hram: memory::Memory::new(),
             ie_register: 0,
             audio: audio::Audio::new(),
-            dma: OamDmaEngine::default(),
-            oam_write_pending: false,
-            pending_oam_zero: std::cell::Cell::new(-1),
-            dmg_prefetch_active: false,
-            dmg_prefetch_addr: 0,
-            fetcher_bus_addr: 0,
-            fetcher_bus_bank: 0,
-            fetcher_bus_locked: false,
-            fetcher_bus_warmup: false,
-            poison_tiledata_base: None,
             stat_register_write_pending: false,
             ff41_write_pending: false,
             cpu_t_phase: 0,
@@ -856,14 +717,8 @@ impl Mmio {
             key1_switch_armed: false,  // No speed switch armed initially
             vram_bank1: Box::new(memory::Memory::new()),
             wram_banks: (0..6).map(|_| memory::Memory::new()).collect(), // Banks 2-7
-            gdma_conflict_ran: false,
-            pending_dma_stall: 0,
-            gdma_vram_src_fixup: None,
             joypad_irq_delay: 0,
-            oam_dma_stall_suppress: 0,
             halt: HaltWake::default(),
-            oam_dma_stop_freeze: false,
-            stop_oam_grace: 0,
             m2_halt_stall_charged_cgb: false,
             ssds_haltskew_ly_advance: false,
             m3_lcdc_write_seen: false,
@@ -1450,11 +1305,11 @@ impl Mmio {
             & (ppu::LCDCFlags::DisplayEnable as u8)
             != 0;
         !lcd_on
-            && !self.dma.active
-            && self.oam_dma_stall_suppress == 0
+            && !self.dma.oam.active
+            && self.dma.hdma.oam_dma_stall_suppress == 0
             && self.halt.oam_grace == 0
-            && !self.hdma.enabled
-            && !self.hdma.req_pending
+            && !self.dma.hdma.enabled
+            && !self.dma.hdma.req_pending
             && !self.audio.is_powered()
             && !self.serial.is_active()
             && self.joypad_irq_delay == 0
@@ -2378,7 +2233,7 @@ impl Mmio {
     /// currently flagged req so it does not double-fire on unhalt.
     /// Coarse fallback (no PPU access): uses the cached per-step period.
     pub(crate) fn on_cpu_halt(&mut self) {
-        let in_period = self.hdma.is_in_period_cached;
+        let in_period = self.dma.hdma.is_in_period_cached;
         self.on_cpu_halt_with_period(Some(in_period));
     }
 
@@ -2412,9 +2267,9 @@ impl Mmio {
         // A fresh HALT is a new resume context — drop any stale resume
         // pre-transfer shadow window (bounds the IME-on arm's lifetime so it cannot
         // leak a stale pre-byte into a later unrelated VRAM read).
-        if self.hdma.resume_shadow_window {
-            self.hdma.resume_shadow_window = false;
-            self.hdma.resume_pre_shadow.clear();
+        if self.dma.hdma.resume_shadow_window {
+            self.dma.hdma.resume_shadow_window = false;
+            self.dma.hdma.resume_pre_shadow.clear();
         }
         // FAST EI-loop: entering HALT ends any prior EI fast-dispatch stream; the
         // HALT-woken ISR observes the timer IF re-flag on the LATE grid.
@@ -2448,8 +2303,8 @@ impl Mmio {
         self.set_halt_entry_cc(Some(self.master_cc()));
         // A fresh HALT supersedes any pending High-unhalt edge-consume (the prior
         // unhalt's stream has ended); never let it span halts.
-        self.hdma.high_unhalt_consume = false;
-        self.hdma.peraccess_consume_pending = false;
+        self.dma.hdma.high_unhalt_consume = false;
+        self.dma.hdma.peraccess_consume_pending = false;
         if !self.cgb_features_enabled {
             self.halt.hdma_state = HaltHdmaState::Low;
             return;
@@ -2460,8 +2315,8 @@ impl Mmio {
         // block that is *owed but not yet serviced* this period (would still be
         // flagged in hardware) maps to `Requested`; one already serviced maps to
         // `High`.
-        let mut period = in_period.unwrap_or(self.hdma.is_in_period_cached);
-        let mut block_done = block_done_override.unwrap_or(self.hdma.block_done_this_period);
+        let mut period = in_period.unwrap_or(self.dma.hdma.is_in_period_cached);
+        let mut block_done = block_done_override.unwrap_or(self.dma.hdma.block_done_this_period);
         // HALT-coincident HDMA fire rollback (hardware's flag-then-event
         // ordering). rustyboi services an HBlank-DMA block greedily the dot its m0
         // edge latches; hardware instead FLAGS it and runs the block
@@ -2481,10 +2336,10 @@ impl Mmio {
         // Use the PRE-fire enabled flag: a final block (length underflow) clears
         // `hdma.enabled` inside `run_hdma_block`, but hardware still holds it enabled
         // and `Requested` at the coincident HALT.
-        let pre_fire_enabled = self.hdma.pre_fire_state.map(|s| s.3).unwrap_or(false);
+        let pre_fire_enabled = self.dma.hdma.pre_fire_state.map(|s| s.3).unwrap_or(false);
         // Record whether HDMA was armed at HALT entry (the value-read-downstream
         // family) vs requested only in the wakeup ISR (`hdma_cycles_2`).
-        self.hdma.enabled_at_halt = self.hdma.enabled || pre_fire_enabled;
+        self.dma.hdma.enabled_at_halt = self.dma.hdma.enabled || pre_fire_enabled;
         // The m0 edge that latches the block can land anywhere within the HALT's own
         // prefetch M-cycle (4cc, or 8cc at double speed): scx shifts the mode-3->0
         // boundary a couple dots relative to the HALT cc. Treat a fire within that
@@ -2494,29 +2349,29 @@ impl Mmio {
             // An interleaving OAM-DMA advanced its own position inside the fired
             // block; rolling the block back would double-advance it (the same guard
             // `reorder_late_hdma_after_pushes` uses). Leave the synchronous fire.
-            && !self.dma.active
+            && !self.dma.oam.active
             && self
-                .hdma.last_fire_cc
+                .dma.hdma.last_fire_cc
                 .map(|fc| fc <= halt_cc && halt_cc - fc < mcycle)
                 .unwrap_or(false);
         if coincident_fire
-            && let Some((src, dst, len, en)) = self.hdma.pre_fire_state {
-                self.hdma.pending_writes.clear();
-                self.hdma.source = src;
-                self.hdma.dest = dst;
-                self.hdma.length = len;
-                self.hdma.enabled = en;
-                self.pending_dma_stall = 0;
-                self.hdma.write_delay = 0;
-                self.hdma.last_fire_cc = None;
-                self.hdma.pre_fire_state = None;
-                self.hdma.block_done_this_period = false;
+            && let Some((src, dst, len, en)) = self.dma.hdma.pre_fire_state {
+                self.dma.hdma.pending_writes.clear();
+                self.dma.hdma.source = src;
+                self.dma.hdma.dest = dst;
+                self.dma.hdma.length = len;
+                self.dma.hdma.enabled = en;
+                self.dma.hdma.pending_dma_stall = 0;
+                self.dma.hdma.write_delay = 0;
+                self.dma.hdma.last_fire_cc = None;
+                self.dma.hdma.pre_fire_state = None;
+                self.dma.hdma.block_done_this_period = false;
                 period = true;
                 block_done = false;
             }
-        self.halt.hdma_state = if self.hdma.req_pending {
+        self.halt.hdma_state = if self.dma.hdma.req_pending {
             HaltHdmaState::Requested
-        } else if self.hdma.enabled && period {
+        } else if self.dma.hdma.enabled && period {
             if block_done {
                 HaltHdmaState::High
             } else {
@@ -2526,7 +2381,7 @@ impl Mmio {
             HaltHdmaState::Low
         };
         // Hardware acks the DMA request after copying the flag.
-        self.hdma.req_pending = false;
+        self.dma.hdma.req_pending = false;
     }
 
     /// CGB STOP speed-switch entry. Like
@@ -2542,10 +2397,10 @@ impl Mmio {
             self.in_stop_window = true;
             return;
         }
-        self.halt.hdma_state = if self.hdma.req_pending {
+        self.halt.hdma_state = if self.dma.hdma.req_pending {
             HaltHdmaState::Requested
-        } else if self.hdma.enabled && in_period_now {
-            if self.hdma.block_done_this_period {
+        } else if self.dma.hdma.enabled && in_period_now {
+            if self.dma.hdma.block_done_this_period {
                 HaltHdmaState::High
             } else {
                 HaltHdmaState::Requested
@@ -2554,7 +2409,7 @@ impl Mmio {
             HaltHdmaState::Low
         };
         // Hardware acks the DMA request after copying the flag.
-        self.hdma.req_pending = false;
+        self.dma.hdma.req_pending = false;
         self.in_stop_window = true;
     }
 
@@ -2582,7 +2437,7 @@ impl Mmio {
     ) {
         self.in_stop_window = false;
         let reflag = matches!(self.halt.hdma_state, HaltHdmaState::Requested)
-            || (self.hdma.enabled
+            || (self.dma.hdma.enabled
                 && in_period_unhalt
                 && matches!(self.halt.hdma_state, HaltHdmaState::Low));
         if reflag {
@@ -2598,13 +2453,13 @@ impl Mmio {
         // anchor, so the equivalent boundary is `edge > unhalt_cc - 12`.
         if matches!(self.halt.hdma_state, HaltHdmaState::High)
             && in_period_unhalt
-            && self.hdma.enabled
-            && !self.hdma.block_done_this_period
+            && self.dma.hdma.enabled
+            && !self.dma.hdma.block_done_this_period
             && let Some((edge, unhalt_cc)) = window_end_edge
             && edge > unhalt_cc - 12
         {
             self.set_hdma_req();
-            self.hdma.block_done_this_period = true;
+            self.dma.hdma.block_done_this_period = true;
             self.fire_pending_hdma_mcycle();
         }
     }
@@ -2811,12 +2666,12 @@ impl Mmio {
     pub(crate) fn set_fetcher_vram_bus(&mut self, addr: u16, bank: u8, locked: bool) {
         // Rising edge of the lock (mode-3 entry): arm the warmup so the first
         // VRAM-source OAM-DMA M-cycle of this lock window reads clean VRAM.
-        if locked && !self.fetcher_bus_locked {
-            self.fetcher_bus_warmup = true;
+        if locked && !self.dma.oam.fetcher_bus_locked {
+            self.dma.oam.fetcher_bus_warmup = true;
         }
-        self.fetcher_bus_addr = addr;
-        self.fetcher_bus_bank = bank;
-        self.fetcher_bus_locked = locked;
+        self.dma.oam.fetcher_bus_addr = addr;
+        self.dma.oam.fetcher_bus_bank = bank;
+        self.dma.oam.fetcher_bus_locked = locked;
     }
 
     /// DMG-only: the PPU publishes the predicted first-tilemap address here for the
@@ -2827,8 +2682,8 @@ impl Mmio {
     /// clears the window. The CGB path never sets this (the AND lock at mode-3
     /// entry already byte-matches its dumps).
     pub(crate) fn set_dmg_prefetch_bus(&mut self, addr: u16, active: bool) {
-        self.dmg_prefetch_active = active;
-        self.dmg_prefetch_addr = if active { addr } else { 0 };
+        self.dma.oam.dmg_prefetch_active = active;
+        self.dma.oam.dmg_prefetch_addr = if active { addr } else { 0 };
     }
 
     /// Undocumented MGB (Game Boy Pocket) OAM-DMA-during-HALT merge.
@@ -2852,13 +2707,13 @@ impl Mmio {
     /// does, the corrupted entry is suppressed (returns the offscreen Y $00) so no
     /// sprite draws, matching hardware.
     pub(in crate::memory) fn mgb_frozen_oam_entry(&self, entry: u8) -> Option<[u8; 4]> {
-        if !self.is_mgb || !self.cpu_halted || !self.dma.active || self.halt.oam_grace > 0 {
+        if !self.is_mgb || !self.cpu_halted || !self.dma.oam.active || self.halt.oam_grace > 0 {
             return None;
         }
-        if self.dma.pos >= 160 {
+        if self.dma.oam.pos >= 160 {
             return None;
         }
-        let n = self.dma.pos.wrapping_add(1);
+        let n = self.dma.oam.pos.wrapping_add(1);
         // The pending write must land on a sprite entry's C byte (offset 2) for the
         // Y/C and X/F merge pairing the frozen bus produces.
         if n % 4 != 2 || n as usize + 1 >= OAM_SIZE {
@@ -2884,13 +2739,13 @@ impl Mmio {
     /// like a *non-disabled* OAM window: the frozen bus is stuck, so the Y/X scan
     /// reads the merged OAM (via `peek_oam_pos`) rather than the DMA-window ghost.
     pub(crate) fn mgb_frozen_merge_active(&self) -> bool {
-        if !self.is_mgb || !self.cpu_halted || !self.dma.active || self.halt.oam_grace > 0 {
+        if !self.is_mgb || !self.cpu_halted || !self.dma.oam.active || self.halt.oam_grace > 0 {
             return false;
         }
-        if self.dma.pos >= 160 {
+        if self.dma.oam.pos >= 160 {
             return false;
         }
-        let n = self.dma.pos.wrapping_add(1);
+        let n = self.dma.oam.pos.wrapping_add(1);
         n % 4 == 2 && (n as usize + 1) < OAM_SIZE
     }
 
@@ -3065,10 +2920,10 @@ impl Mmio {
         if was_on
             && now_off
             && self.cgb_features_enabled
-            && self.hdma.enabled
-            && !self.hdma.block_done_this_period
+            && self.dma.hdma.enabled
+            && !self.dma.hdma.block_done_this_period
         {
-            self.hdma.req_pending = true;
+            self.dma.hdma.req_pending = true;
         }
     }
 
@@ -3116,12 +2971,12 @@ impl Mmio {
     /// when `dma.active`, which is excluded). Returns `master_cc()` when no
     /// quiet span is available.
     pub(crate) fn quiet_span_end(&self, target: u64) -> u64 {
-        if self.dma.active
-            || self.oam_dma_stall_suppress != 0
+        if self.dma.oam.active
+            || self.dma.hdma.oam_dma_stall_suppress != 0
             || self.joypad_irq_delay != 0
             || self.serial.is_active()
             || self.serial_device.drives_external_clock()
-            || self.hdma.resume_lockstep_window
+            || self.dma.hdma.resume_lockstep_window
         {
             return self.timer.abs_cc();
         }
@@ -3350,7 +3205,7 @@ impl Mmio {
             // vram_dumper), so zeroed VRAM is kept to leave the larger set passing.
             // Power-on HDMA5 reads 0xFF (no transfer armed). With bit 7 set the
             // read is `hdma.length | 0x80`, so seed the length to 0x7F.
-            self.hdma.length = 0x7F;
+            self.dma.hdma.length = 0x7F;
             // FF46 (OAM-DMA register) is fully readable and reads back its last
             // written value; its CGB post-boot value is 0x00
             // (fexx_ffxx_dumper_cgb / ioregs_reset reference), seeded here so an
@@ -3753,13 +3608,13 @@ impl memory::Addressable for Mmio {
         // Any IO write may move HDMA-relevant state (FF40 LCD off, FF55 kick,
         // KEY1, STAT...): wake the HDMA tracker.
         if addr >= 0xFF00 {
-            self.hdma.tracker_sleep_until = 0;
+            self.dma.hdma.tracker_sleep_until = 0;
         }
         // While an OAM DMA is running the CPU bus operates normally except for
         // (1) the source-region conflict, which redirects the write into OAM,
         // and (2) OAM itself, which the DMA owns. Everything else (non-conflict
         // ROM/VRAM/SRAM/WRAM/IO writes) proceeds as usual.
-        if self.dma.active && self.dma_write_conflict(addr, value) {
+        if self.dma.oam.active && self.dma_write_conflict(addr, value) {
             return;
         }
         {
@@ -3802,7 +3657,7 @@ impl memory::Addressable for Mmio {
                         // on an OAM write. Only Y/X
                         // (bytes 0,1 of each entry) feed the snapshot, but hardware
                         // signals a snapshot change on any OAM write, so flag unconditionally.
-                        self.oam_write_pending = true;
+                        self.dma.oam.oam_write_pending = true;
                     }
                 }
                 // CGB OAM mirror (0xFEA0-0xFEFF). Writable only when the OAM bus

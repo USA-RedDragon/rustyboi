@@ -24,8 +24,8 @@ impl Mmio {
     fn copy_dma_byte(&mut self, src: u16, dst: u16) -> u8 {
         // Bypass DMA-active gating while we drive the bus read internally:
         // GDMA / HDMA are separate transfer engines from OAM DMA.
-        let saved_dma_active = self.dma.active;
-        self.dma.active = false;
+        let saved_dma_active = self.dma.oam.active;
+        self.dma.oam.active = false;
 
         let byte = if (0x8000..=0x9FFF).contains(&src) {
             0xFF
@@ -51,14 +51,14 @@ impl Mmio {
             self.vram.write(vram_addr, byte);
         }
 
-        self.dma.active = saved_dma_active;
+        self.dma.oam.active = saved_dma_active;
         byte
     }
 
     /// Consume the pending VRAM-source GDMA first-word latch (see the field
     /// doc); returns the first dest word's VRAM address + bank flag.
     pub(crate) fn take_gdma_vram_src_fixup(&mut self) -> Option<(u16, bool)> {
-        self.gdma_vram_src_fixup.take()
+        self.dma.hdma.gdma_vram_src_fixup.take()
     }
 
     /// Patch the latched first word with the absorbed-prefetch byte.
@@ -74,8 +74,8 @@ impl Mmio {
     }
 
     /// Execute a CGB General-Purpose DMA (GDMA) transfer synchronously.
-    /// Copies `length` bytes from `self.hdma.source` into VRAM starting at
-    /// `self.hdma.dest`. Matches hardware:
+    /// Copies `length` bytes from `self.dma.hdma.source` into VRAM starting at
+    /// `self.dma.hdma.dest`. Matches hardware:
     ///   - If the LCD is off, GDMA does not run.
     ///   - Destination clamped if it would overflow the 16-bit address
     ///     space.
@@ -89,8 +89,8 @@ impl Mmio {
         // clean OAM-DMA pass overwrite the conflict bytes.
 
         self.snapshot_dma_dest0_pre();
-        let mut src = self.hdma.source;
-        let mut dst = self.hdma.dest;
+        let mut src = self.dma.hdma.source;
+        let mut dst = self.dma.hdma.dest;
 
         let effective_length = if (dst as usize) + length >= 0x10000 {
             0x10000 - dst as usize
@@ -99,7 +99,7 @@ impl Mmio {
         };
 
         // Arm the VRAM-source first-word latch (see `gdma_vram_src_fixup`).
-        self.gdma_vram_src_fixup = if (0x8000..=0x9FFF).contains(&src) && effective_length >= 2 {
+        self.dma.hdma.gdma_vram_src_fixup = if (0x8000..=0x9FFF).contains(&src) && effective_length >= 2 {
             let into_bank1 = self.cgb_features_enabled && self.vram_bank == 1;
             Some((VRAM_START | (dst & 0x1FFF), into_bank1))
         } else {
@@ -124,14 +124,14 @@ impl Mmio {
         // bypassed it, advancing `dma.pos` ~16 bytes and shifting the post-switch
         // in-flight conflict byte (hdma_transition_speedchange_oamdma: read 0x60
         // where hardware's frozen position reads 0x71).
-        let interleave = self.dma.active && !self.oam_dma_stop_freeze;
+        let interleave = self.dma.oam.active && !self.dma.oam.oam_dma_stop_freeze;
         // The one-M-cycle catch-up corrects the `step_dma` tick that ran before this
         // FF55 write resolved. A back-to-back second block follows its predecessor
         // with no intervening `step_dma` (the two FF55 writes are adjacent), so its
         // OAM-DMA position was already caught up by the first block — catching up
         // again would end the OAM DMA one M-cycle early (drops the last conflict
         // clobber, e.g. OAM[45] in oamdmasrcC000_..._2xgdmalen09).
-        if interleave && !self.gdma_conflict_ran {
+        if interleave && !self.dma.hdma.gdma_conflict_ran {
             self.dma_advance_one_mcycle();
         }
         // Back-to-back second GDMA block: the OAM DMA is still mid-flight from a
@@ -140,19 +140,19 @@ impl Mmio {
         // word-written low OAM cells across the FF55-rewrite boundary gap, so this
         // block's low-address re-wrap must not re-clobber them (see
         // `dma_conflict_advance`). A single long GDMA (one pass) is never back-to-back.
-        let back_to_back = interleave && self.gdma_conflict_ran;
+        let back_to_back = interleave && self.dma.hdma.gdma_conflict_ran;
         // `loam` tracks the OAM-DMA's relative update cursor: it starts at
         // `-dma.subcycle` (dots already elapsed in the current M-cycle) and the
         // per-byte cc advance is compared against `loam + 3` (gate `cc-3 > loam`).
         let mut cc: i64 = 0;
-        let mut loam: i64 = -(self.dma.subcycle as i64);
+        let mut loam: i64 = -(self.dma.oam.subcycle as i64);
 
         for _ in 0..effective_length {
             let data = self.copy_dma_byte(src, dst);
             cc += per_byte_cc;
-            if interleave && self.dma.active && cc - 3 > loam {
+            if interleave && self.dma.oam.active && cc - 3 > loam {
                 loam += 4;
-                self.gdma_conflict_ran = true;
+                self.dma.hdma.gdma_conflict_ran = true;
                 self.dma_conflict_advance(src, data, back_to_back);
             }
             src = src.wrapping_add(1);
@@ -162,17 +162,17 @@ impl Mmio {
         // residual `loam` phase becomes the next M-cycle's sub-cycle offset so
         // `step_dma` resumes on the correct dot (the OAM-DMA update cursor carries
         // the residual phase forward).
-        if interleave && self.dma.active {
+        if interleave && self.dma.oam.active {
             // Dots elapsed since the last OAM-DMA M-cycle fired. `step_dma` fires
             // when `dma.subcycle` reaches 4, so the residual phase `(cc - loam)`
             // (mod 4) is exactly the count already accrued toward the next
             // M-cycle (the OAM-DMA update cursor carries `loam` forward and
             // recomputes the sub-cycle phase as `(cc - cursor) >> 2`).
-            self.dma.subcycle = (cc - loam).rem_euclid(4) as u8;
+            self.dma.oam.subcycle = (cc - loam).rem_euclid(4) as u8;
         }
 
-        self.hdma.source = src;
-        self.hdma.dest = dst;
+        self.dma.hdma.source = src;
+        self.dma.hdma.dest = dst;
 
         // Hardware charges `2 + 2*ds` cc per byte for the entire
         // transfer plus a single trailing `cc += 4`, regardless of block count
@@ -203,11 +203,11 @@ impl Mmio {
         // and 1 (out0, mode 0) — 4 cc, one M-cycle apart — while 2xshort_ds sat at
         // 4 and 1, a 3 cc spread that no pair of reads one M-cycle apart can have.
         let (per_byte, mut setup) = if self.is_double_speed_mode() { (4, 5) } else { (2, 4) };
-        let prefetch_fudge = if self.dma.prefetch_stat_bias { 0 } else { 5 };
-        if self.is_double_speed_mode() && self.dma.prefetch_stat_bias {
+        let prefetch_fudge = if self.dma.oam.prefetch_stat_bias { 0 } else { 5 };
+        if self.is_double_speed_mode() && self.dma.oam.prefetch_stat_bias {
             setup -= 1;
         }
-        self.pending_dma_stall += (effective_length as u32) * per_byte + setup + prefetch_fudge;
+        self.dma.hdma.pending_dma_stall += (effective_length as u32) * per_byte + setup + prefetch_fudge;
         // The OAM-DMA M-cycles for the transfer were folded into the loop above.
         // Suppress `step_dma` for the true dma-event duration (the transfer
         // `per_byte` cc plus the single trailing `cc += 4`), NOT the extra `+5`
@@ -215,7 +215,7 @@ impl Mmio {
         // event then catches the OAM-DMA up afterward; the residual
         // post-stall cc advance the OAM-DMA normally toward the next access.
         if interleave {
-            self.oam_dma_stall_suppress = (effective_length as u32) * per_byte + 4;
+            self.dma.hdma.oam_dma_stall_suppress = (effective_length as u32) * per_byte + 4;
         }
     }
 }

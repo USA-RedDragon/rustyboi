@@ -9,6 +9,19 @@ mod oam;
 mod gdma;
 mod hdma;
 
+fn default_pending_oam_zero() -> std::cell::Cell<i16> {
+    std::cell::Cell::new(-1)
+}
+
+/// The DMA subsystem's owned state: the OAM-DMA (FF46) engine and the CGB
+/// VRAM-DMA (GDMA + HBlank-HDMA, FF51-FF55) engine. `Mmio` holds exactly one
+/// `dma: Dma` field; all DMA state lives here.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub(in crate::memory) struct Dma {
+    pub(in crate::memory) oam: OamDmaEngine,
+    pub(in crate::memory) hdma: HdmaEngine,
+}
+
 /// Source-region classification of the active OAM DMA, as decoded from the
 /// FF46 source-high byte. Drives the per-region bus-conflict rules.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -307,6 +320,45 @@ pub(in crate::memory) struct HdmaEngine {
     // ISR AFTER the HALT; the immediate FF41 STAT read needs the +6).
     #[serde(skip, default)]
     pub(in crate::memory) enabled_at_halt: bool,
+    // Back-to-back GDMA word-bus conflict: set true while an OAM DMA is active once a
+    // GDMA-conflict pass has run in this OAM-DMA lifetime, so the NEXT GDMA block (no
+    // OAM-DMA completion in between) is recognised as a back-to-back second block.
+    // Not in Pan Docs, TCAGBD, or GBCTR; the 2x-GDMA word-bus first-word duplication
+    // is from real-silicon oamdumper .dump captures (not modelled by prior emulators).
+    #[serde(skip, default)]
+    pub(in crate::memory) gdma_conflict_ran: bool,
+    // CPU-cycle stall owed for HDMA/GDMA blocks already transferred; the CPU
+    // idles these cycles (peripherals keep ticking) before its next fetch.
+    // Serialized (additive `default`): owed cycles can straddle an instruction
+    // boundary, so a state saved with a stall pending must resume with it.
+    #[serde(default)]
+    pub(in crate::memory) pending_dma_stall: u32,
+    // VRAM-source GDMA first-word latch. A GDMA whose source is VRAM reads
+    // nothing (same-bus read: floats 0xFF), EXCEPT the transfer's first 16-bit
+    // word, which latches the byte the CPU's absorbed next-opcode prefetch
+    // left on the data
+    // bus - duplicated into both bytes by the word bus. AntonioND
+    // hdma_valid_sources real_gbc.sav row 8000 reads `3E 3E FF FF ...` (0x3E =
+    // the `ld a,` opcode following the FF55 write). The prefetch byte is only
+    // known at the CPU's next fetch, so `execute_gdma` arms this with the
+    // first dest word's VRAM address (+ bank), and `Bus::fetch_opcode` patches
+    // the two bytes with the fetched opcode. Consume-once.
+    // Base (VRAM-source DMA = "two unknown bytes then FFh"): TCAGBD §9.6.3; the
+    // identity of the two bytes (the word-duplicated prefetch opcode) is from the
+    // AntonioND hdma_valid_sources captures — not in Pan Docs/GBCTR.
+    #[serde(skip, default)]
+    pub(in crate::memory) gdma_vram_src_fixup: Option<(u16, bool)>,
+    // OAM-DMA advance suppression for the GDMA/HDMA stall window. `execute_gdma`
+    // / `run_hdma_block` fold the OAM-DMA's M-cycle advances INTO the transfer
+    // loop. The same
+    // transfer cc are then drained as a CPU `pending_dma_stall`, during which
+    // `step_dma` would advance the OAM-DMA a SECOND time. This counts those
+    // already-folded dots so `step_dma` skips them (the OAM-DMA stays frozen
+    // at its post-loop position until the next OAM-DMA update).
+    // Serialized (additive `default`): the suppression window drains across the
+    // CPU stall, spanning instruction boundaries.
+    #[serde(default)]
+    pub(in crate::memory) oam_dma_stall_suppress: u32,
 }
 
 /// OAM DMA (FF46) engine: the in-flight transfer cursor and the prefetch
@@ -340,6 +392,89 @@ pub(in crate::memory) struct OamDmaEngine {
     // Not in Pan Docs, TCAGBD, or GBCTR; sub-cycle STAT-bias timing from test-ROM refs.
     #[serde(skip, default)]
     pub(in crate::memory) prefetch_stat_bias: bool,
+    // Set when a CPU write lands in OAM (0xFE00-0xFE9F) this M-cycle, so the PPU
+    // can fire the sprite snapshot on an OAM write.
+    // Drained by the PPU each dot.
+    #[serde(default)]
+    pub(in crate::memory) oam_write_pending: bool,
+    // CGB VRAM-source OAM-DMA conflict reads return OAM[dma.pos] and then
+    // zero that OAM byte. The read path is &self,
+    // so record the position here and apply the zero on the next DMA advance.
+    // -1 = none.
+    #[serde(skip, default = "default_pending_oam_zero")]
+    pub(in crate::memory) pending_oam_zero: std::cell::Cell<i16>,
+    // OAM-DMA-source VRAM bus-conflict model. The PPU pushes its BG fetcher's
+    // current VRAM data-bus address/bank here each dot during mode 3 (VRAM locked).
+    // A VRAM-source OAM-DMA read while `fetcher_bus_locked` is set returns
+    // VRAM[(dma_src_addr & fetcher_bus_addr)] — both the fetcher and the DMA drive
+    // the VRAM address bus, so the array is indexed by their bitwise-AND (the real
+    // hardware "OAM DMA bus conflict"). Cleared each dot the PPU is not mode-3.
+    // Not in Pan Docs, TCAGBD, or GBCTR (GBCTR marks "OAM DMA bus conflicts" TODO;
+    // TCAGBD §9.6.3's VRAM-read corruption is the GDMA/HDMA engine, not OAM-DMA);
+    // the AND-with-fetcher formula is from real-silicon .dump captures.
+    #[serde(skip, default)]
+    pub(in crate::memory) fetcher_bus_addr: u16,
+    #[serde(skip, default)]
+    pub(in crate::memory) fetcher_bus_bank: u8,
+    #[serde(skip, default)]
+    pub(in crate::memory) fetcher_bus_locked: bool,
+    // The first OAM-DMA VRAM-source read after the fetcher bus lock engages (a
+    // fresh mode-3 entry) still resolves to true VRAM: the BG fetcher has not yet
+    // settled a displayed-tile byte on the conflict bus during the line's warmup,
+    // so the first locked M-cycle reads cleanly (the dumps show the first mode-3
+    // byte of each crossed line is identity). Set on the lock's rising edge,
+    // consumed by the first conflicting read.
+    #[serde(skip, default)]
+    pub(in crate::memory) fetcher_bus_warmup: bool,
+    // DMG-only mode-2 fetcher-prefetch onset. On DMG the BG fetcher's first
+    // tile-NUMBER fetch begins one M-cycle (4 dots) BEFORE the official mode-3
+    // VRAM lock — the mode-2->mode-3 prefetch. A VRAM-source OAM-DMA M-cycle in
+    // that prefetch window already sees the fetcher driving the first tilemap
+    // address, so the conflict engages one M-cycle EARLIER than the CGB
+    // `state==PixelTransfer` lock: the onset byte is `VRAM[dma_addr & tilemap0]`
+    // (tile-number address-line AND), not the clean source. The dumps show the
+    // crossed line's first conflict byte at the LAST mode-2 M-cycle on DMG, while
+    // the subsequent first locked M-cycle is still the warmup (clean) byte. The
+    // PPU publishes the predicted first tilemap address here for the 4-dot window
+    // preceding the mode-3 arm; `dmg_prefetch_addr` is 0 when inactive.
+    #[serde(skip, default)]
+    pub(in crate::memory) dmg_prefetch_active: bool,
+    #[serde(skip, default)]
+    pub(in crate::memory) dmg_prefetch_addr: u16,
+    // Second-order conflict: when an OAM-DMA M-cycle reads VRAM while the BG
+    // fetcher is driving a TILE-NUMBER (tilemap) address, both the DMA byte and the
+    // tile number the fetcher would latch are `VRAM[tilemap_addr & dma_src]`. That
+    // poisoned tile number shifts the tile-data address the fetcher drives on the
+    // NEXT M-cycle, so the following tile-data DMA read sees
+    // `VRAM[tiledata(poisoned_tile,row) & dma_src]`. We carry the poisoned tile's
+    // tile-data base (0x8000 + tile*16) here from the tilemap read to the next
+    // tile-data read; the row low bits come from that read's own fetcher address.
+    #[serde(skip, default)]
+    pub(in crate::memory) poison_tiledata_base: Option<u16>,
+    // True while the CPU is parked in the STOP speed-switch unhalt window
+    // (0x20000 cycles). The CPU is halted for this
+    // window, so the OAM-DMA takes its halted branch (elapsed time is
+    // consumed WITHOUT moving `dma.pos`). rustyboi drains the
+    // window via `stop_unhalt_cycles` without setting `cpu_halted`, so the
+    // OAM-DMA must be frozen here too. Set on STOP entry, cleared at unhalt.
+    // Serialized (additive `default`): the freeze persists across the whole STOP
+    // window, spanning instruction boundaries.
+    #[serde(default)]
+    pub(in crate::memory) oam_dma_stop_freeze: bool,
+    // Mirror of the HALT-entry `halt.oam_grace`, but for the STOP speed-switch.
+    // Hardware advances the OAM-DMA by the STOP instruction's own M-cycle before
+    // halting, so that M-cycle advances the
+    // OAM-DMA one step before the freeze, and a transfer whose final byte's
+    // M-cycle lands in that window completes (OAM-DMA end) rather than stalling to
+    // unhalt. Without it rustyboi froze one byte short (pos 158 vs hardware's 160),
+    // so the post-window mode-2 sprite scan read the in-flight 0xFF source instead
+    // of the completed OAM (oamdma_late_speedchange_stat_2: the line's left-edge
+    // sprite goes unmapped, mode-0 time -11, STAT read mode 0 where hardware reads
+    // mode 3). Set on STOP entry alongside the freeze; consumed in `step_dma`.
+    // Serialized (additive `default`): persists across the STOP window like the
+    // freeze it pairs with.
+    #[serde(default)]
+    pub(in crate::memory) stop_oam_grace: u8,
 }
 
 impl Default for HdmaEngine {
@@ -380,6 +515,10 @@ impl Default for HdmaEngine {
             last_fire_cc: None,
             pre_fire_state: None,
             enabled_at_halt: false,
+            gdma_conflict_ran: false,
+            pending_dma_stall: 0,
+            gdma_vram_src_fixup: None,
+            oam_dma_stall_suppress: 0,
         }
     }
 }
@@ -393,6 +532,17 @@ impl Default for OamDmaEngine {
             start_pos: 0,
             subcycle: 0,
             prefetch_stat_bias: false,
+            oam_write_pending: false,
+            pending_oam_zero: std::cell::Cell::new(-1),
+            fetcher_bus_addr: 0,
+            fetcher_bus_bank: 0,
+            fetcher_bus_locked: false,
+            fetcher_bus_warmup: false,
+            dmg_prefetch_active: false,
+            dmg_prefetch_addr: 0,
+            poison_tiledata_base: None,
+            oam_dma_stop_freeze: false,
+            stop_oam_grace: 0,
         }
     }
 }
