@@ -4,7 +4,9 @@ mod fetcher;
 mod fifo;
 mod frame_out;
 mod hdma;
+mod lcdc;
 mod reads;
+mod window_glitch;
 mod stat_irq;
 
 pub use controller::{
