@@ -137,8 +137,11 @@ const VF001Z_THUNK: [u8; 17] = [
 const LICHENG_LOGO_CRC32: [u32; 2] = [0xD2B5_7657, 0x20D0_92E2];
 
 /// CRC32 (reflected IEEE) of the 48-byte Vast Fame secondary logo at $0184 on
-/// BBD boards. Same detection basis as LiCheng (mGBA `_detectUnlMBC`).
-const BBD_LOGO_CRC32: [u32; 2] = [0x6D1E_A662, 0xC7D8_C1DF];
+/// BBD boards. Same detection basis as LiCheng (mGBA `_detectUnlMBC`). The third
+/// entry is King of Fighters R2, whose $0184 block is the "S-GBC" logo (byte-sum
+/// 3334) that hhugboy `CartDetection` also routes to BBD; it has a distinct
+/// CRC32 from the two mGBA-documented logos so it needs its own whitelist entry.
+const BBD_LOGO_CRC32: [u32; 3] = [0x6D1E_A662, 0xC7D8_C1DF, 0xEA3E_443A];
 
 /// BBD data-line reorder tables (mGBA `_bbdDataReordering`), indexed by the
 /// current data swap mode; applied to every $4000-$7FFF ROM read. output bit
@@ -3109,6 +3112,33 @@ mod tests {
         let mut cracked = rom.clone();
         cracked[0x7FFF] = 0x01;
         assert_eq!(Cartridge::detect_unl_mapper(&cracked), UnlMapper::None);
+    }
+
+    // Clean-room 48-byte stand-in for the "S-GBC" $0184 block on King of Fighters
+    // R2: an ASCII banner (44 bytes) plus a 4-byte suffix computed so the block's
+    // CRC32 equals BBD_LOGO_CRC32[2] (0xEA3E_443A). KoF R2's real $0184 sums to
+    // 3334, which hhugboy `CartDetection` routes to BBD, but its CRC32 differs
+    // from the two mGBA-documented BBD logos, so it needs its own whitelist entry.
+    // No copyrighted bytes.
+    const BBD_KOF_LOGO: [u8; 48] =
+        *b"RUSTYBOI BBD KOF-R2 SGBC CLEANROOM STANDIN!!\xA4\xEB\xB8\x57";
+
+    #[test]
+    fn bbd_kof_r2_logo_detects_as_bbd() {
+        // 1MB MBC5+RAM+BATTERY image wearing the KoF-R2 "S-GBC" $0184 block, with
+        // the same $7FFF!=$01 still-protected guard the real cart carries.
+        let mut rom = vec![0u8; 0x100000];
+        rom[CARTRIDGE_TYPE_OFFSET] = MBC5_RAM_BATTERY;
+        rom[ROM_SIZE_OFFSET] = 0x05; // 1MB
+        rom[0x184..0x1B4].copy_from_slice(&BBD_KOF_LOGO);
+        rom[0x7FFF] = 0x08; // as the real cart
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::Bbd(BbdState::default())
+        );
+        // A cracked dump ($7FFF==$01) still runs plain.
+        rom[0x7FFF] = 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
     }
 
     // Clean-room 48-byte stand-in for the GGB81 secondary logo at $0184: a
