@@ -296,6 +296,18 @@ impl Cartridge {
         // byte-identical "V.fame" logo behind a spoofed MBC1 header ($01) but
         // speaks the *challenge-response* dialect of the board, handled by the
         // `Vf001Zook` arm below.
+        // Gedou Jian Shen KF: same board and same "SOUL" $0184 logo as the Soul
+        // Falchion trio, but wired for the VF001A config seed ($10). Keyed on the
+        // exact dump because the logo CRC32 and the title are shared with the
+        // three Soul Falchion images, which must keep the $00 seed. Ordered
+        // before the logo arm below, which would otherwise claim it.
+        if rom_crc32 == super::VF001A_SEED_OVER_SOUL_ROM_CRC32 {
+            return UnlMapper::Vf001Gen(Box::new(Vf001gState {
+                config_seed: super::VF001A_CONFIG_SEED,
+                ..Default::default()
+            }));
+        }
+
         if super::VF001G_LOGO_CRC32.contains(&logo_crc32)
             && matches!(data[CARTRIDGE_TYPE_OFFSET], 0x19..=0x1E)
         {

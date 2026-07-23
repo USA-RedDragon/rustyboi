@@ -264,6 +264,22 @@ const VF001A_STUB_CRC32: u32 = 0xCEC2_1544;
 /// injection pointing somewhere else.
 const VF001A_CONFIG_SEED: u8 = 0x10;
 
+/// Whole-ROM CRC32 (reflected IEEE) of Gedou Jian Shen KF (Taiwan) (En) (Unl),
+/// the one cart that carries the "SOUL" $0184 logo (`VF001G_LOGO_CRC32[1]`,
+/// shared with the three Soul Falchion dumps) but is wired for the VF001A
+/// config seed. Its boot config stream is byte-identical to Soul Falchion's
+/// except for the first data byte ($2D instead of $25), and $2D XOR $25 = $08 =
+/// `ror($10)` -- i.e. the cart pre-compensates for exactly the $10 seed, so
+/// under it the accumulator lands on the SAME protection config Soul Falchion
+/// programs (inject `01 B3 44` at bank-0 $0225, over the cart's own `01 00 40`
+/// -- both images hold those identical three bytes there). Under the $00 seed
+/// it instead programs bank $02 / $062D, an address no ROM byte matches and
+/// that the board's own bank gate can never trigger, so the injection never
+/// fires and the boot dead-ends. Keyed on the exact dump because the logo CRC32
+/// and the title are shared with the Soul Falchion trio, which must keep the
+/// $00 seed.
+const VF001A_SEED_OVER_SOUL_ROM_CRC32: u32 = 0x1907_02B3;
+
 /// Window and CRC32 (reflected IEEE) of the Dragon Ball - Final Bout protection
 /// thunk (`UnlMapper::VfAdder`). Those 40 bytes at $3F50 are the entire
 /// protocol — park the ROM-bank register out of range at $C0/$80, push the two
@@ -3877,6 +3893,47 @@ mod tests {
         plain[CARTRIDGE_TYPE_OFFSET] = MBC5_RAM_BATTERY;
         plain[0x184..0x1B4].copy_from_slice(&VF001G_LOGO);
         assert_eq!(Cartridge::detect_unl_mapper(&plain), UnlMapper::Vf001Gen(Box::default()));
+    }
+
+    /// Clean-room 48-byte stand-in for the "SOUL" $0184 block shared by Gedou
+    /// Jian Shen KF and the three Soul Falchion dumps: an ASCII banner plus a
+    /// 4-byte suffix computed so the block's CRC32 equals
+    /// `VF001G_LOGO_CRC32[1]`. No cartridge bytes are embedded.
+    const VF001G_SOUL_LOGO: [u8; 48] =
+        *b"RUSTYBOI VF001 SOUL CLEANROOM STANDIN SIG!!!e\x08\xCBf";
+
+    #[test]
+    fn vf001a_seed_applies_to_the_one_soul_logo_cart_that_needs_it() {
+        // Gedou Jian Shen KF wears the same "SOUL" $0184 logo as the three Soul
+        // Falchion dumps, so only the whole-ROM CRC32 can tell it apart -- and
+        // that rule must run BEFORE the logo arm. Build a 32 KiB image with the
+        // SOUL logo (which the logo arm would otherwise claim at seed $00) whose
+        // whole-ROM CRC32 equals the real KF dump's, via a 4-byte forged tail.
+        let build = || {
+            let mut rom = vec![0u8; 0x8000];
+            rom[CARTRIDGE_TYPE_OFFSET] = MBC5; // KF's truthful $19 header
+            rom[ROM_SIZE_OFFSET] = 0x00;
+            rom[0x184..0x1B4].copy_from_slice(&VF001G_SOUL_LOGO);
+            rom[0x7FFC..0x8000].copy_from_slice(&[0x48, 0xF6, 0x8B, 0xE4]);
+            rom
+        };
+        let rom = build();
+        assert_eq!(crate::checksum::crc32(&rom[0x184..0x1B4]), VF001G_LOGO_CRC32[1]);
+        assert_eq!(crate::checksum::crc32(&rom), VF001A_SEED_OVER_SOUL_ROM_CRC32);
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::Vf001Gen(Box::new(Vf001gState {
+                config_seed: VF001A_CONFIG_SEED,
+                ..Default::default()
+            }))
+        );
+        // The near-miss that makes an image hash necessary: the Soul Falchion
+        // dumps carry the same logo and the same "Gals Fighters" title but must
+        // keep the plain $00 seed.
+        let mut other = build();
+        other[0x134..0x141].copy_from_slice(b"Gals Fighters");
+        assert_ne!(crate::checksum::crc32(&other), VF001A_SEED_OVER_SOUL_ROM_CRC32);
+        assert_eq!(Cartridge::detect_unl_mapper(&other), UnlMapper::Vf001Gen(Box::default()));
     }
 
     #[test]
