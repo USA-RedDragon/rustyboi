@@ -120,6 +120,12 @@ struct Row {
     hash_all: String,
     /// (frame, hash) pairs for localizing where two runs diverge.
     checkpoints: Vec<(usize, String)>,
+    /// FNV fold of every frame's mixed-output audio hash (s16le samples) over the whole run.
+    #[serde(default)]
+    audio_hash_all: String,
+    /// (frame, audio_hash) pairs, same frames as `checkpoints`, for localizing audio divergence.
+    #[serde(default)]
+    audio_checkpoints: Vec<(usize, String)>,
     boot_ok: bool,
     changed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -658,6 +664,11 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
                             .into_iter()
                             .map(|(f, h)| (f, format!("{h:016x}")))
                             .collect(),
+                        // BIOS boot rows carry no audio fingerprint (the boot
+                        // path stays media-gated); empty = a no-op in the
+                        // compare audio gate via its is_empty() guard.
+                        audio_hash_all: String::new(),
+                        audio_checkpoints: Vec::new(),
                         boot_ok: true,
                         changed: true,
                         fps: None,
@@ -804,6 +815,8 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
         frames: cfg.frames,
         hash_all: String::new(),
         checkpoints: Vec::new(),
+        audio_hash_all: String::new(),
+        audio_checkpoints: Vec::new(),
         boot_ok: false,
         changed: false,
         fps: None,
@@ -883,6 +896,12 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
             row.hash_all = format!("{:016x}", out.hash_all);
             row.checkpoints = out
                 .checkpoints
+                .into_iter()
+                .map(|(f, h)| (f, format!("{h:016x}")))
+                .collect();
+            row.audio_hash_all = format!("{:016x}", out.audio_hash_all);
+            row.audio_checkpoints = out
+                .audio_checkpoints
                 .into_iter()
                 .map(|(f, h)| (f, format!("{h:016x}")))
                 .collect();
@@ -974,6 +993,8 @@ struct EmuOut {
     hardware: String,
     hash_all: u64,
     checkpoints: Vec<(usize, u64)>,
+    audio_hash_all: u64,
+    audio_checkpoints: Vec<(usize, u64)>,
     boot_ok: bool,
     changed: bool,
     fps: f64,
@@ -988,6 +1009,13 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
     gb.insert(cart);
     gb.skip_bios();
 
+    // Audio fingerprint: collect the final mixed stereo output (same tap as
+    // `--dump-pcm`) so APU/mix/DAC regressions are gated alongside the frame
+    // hash. Always on in the regression path — the sink is drained every frame
+    // below so it never buffers the whole run.
+    let sink = SampleSink::default();
+    gb.enable_audio(Box::new(sink.clone())).map_err(|e| format!("audio: {e}"))?;
+
     // Checkpoints at warmup and every ~quarter of the measured window.
     let span = cfg.frames - cfg.warmup;
     let checkpoint_at: Vec<usize> = (0..=4)
@@ -997,6 +1025,8 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash_all: u64 = 0xcbf2_9ce4_8422_2325;
     let mut checkpoints = Vec::with_capacity(checkpoint_at.len());
+    let mut audio_hash_all: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut audio_checkpoints = Vec::with_capacity(checkpoint_at.len());
     let mut first_hash = None;
     let mut changed = false;
     let mut ever_nonblank = false;
@@ -1009,11 +1039,29 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
             timer = Some(Instant::now());
         }
         gb.set_input_state(masher(f, seed));
-        let (frame, _bp) = gb.run_until_frame(false);
+        let (frame, _bp) = gb.run_until_frame(true);
         let h = frame_hash(&gb, &frame);
         hash_all = (hash_all ^ h).wrapping_mul(FNV_PRIME);
         if checkpoint_at.contains(&(f + 1)) {
             checkpoints.push((f + 1, hash_all));
+        }
+        // Fold this frame's mixed-output samples (as s16le, quantized like the
+        // sink the `--dump-pcm` tee uses) into a per-frame hash, then into the
+        // whole-run fold — at the SAME checkpoint frames as video. An all-silent
+        // (empty) frame still advances `audio_hash_all` deterministically via the
+        // outer fold, so a regression that adds/removes samples is caught. Drained
+        // every frame so the sink never accumulates the whole run.
+        let mut buf = sink.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ah: u64 = 0xcbf2_9ce4_8422_2325;
+        for (l, r) in buf.iter() {
+            for b in f32_to_s16le(*l) { ah ^= b as u64; ah = ah.wrapping_mul(FNV_PRIME); }
+            for b in f32_to_s16le(*r) { ah ^= b as u64; ah = ah.wrapping_mul(FNV_PRIME); }
+        }
+        buf.clear();
+        drop(buf);
+        audio_hash_all = (audio_hash_all ^ ah).wrapping_mul(FNV_PRIME);
+        if checkpoint_at.contains(&(f + 1)) {
+            audio_checkpoints.push((f + 1, audio_hash_all));
         }
         match first_hash {
             None => first_hash = Some(h),
@@ -1048,6 +1096,8 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
         hardware: format!("{hardware:?}"),
         hash_all,
         checkpoints,
+        audio_hash_all,
+        audio_checkpoints,
         boot_ok: ever_nonblank,
         changed,
         fps: measured / elapsed.as_secs_f64(),
@@ -1909,6 +1959,18 @@ fn cmd_compare(args: &[String]) -> Result<bool, String> {
             behavior.push(match first_diff {
                 Some(fr) => format!("{}: diverges by frame {fr}", label(c)),
                 None => format!("{}: diverges after last checkpoint", label(c)),
+            });
+        }
+        // Audio gate, parallel to the video hash. The is_empty() guards make a
+        // comparison against a pre-audio baseline (or a BIOS row) a no-op instead
+        // of a spurious failure.
+        if !b.audio_hash_all.is_empty() && !c.audio_hash_all.is_empty()
+            && b.audio_hash_all != c.audio_hash_all {
+            let first_diff = b.audio_checkpoints.iter().zip(&c.audio_checkpoints)
+                .find(|(x, y)| x.1 != y.1).map(|(x, _)| x.0);
+            behavior.push(match first_diff {
+                Some(fr) => format!("{}: audio diverges by frame {fr}", label(c)),
+                None => format!("{}: audio diverges after last checkpoint", label(c)),
             });
         }
         if let (Some(bf), Some(cf)) = (b.fps, c.fps)
