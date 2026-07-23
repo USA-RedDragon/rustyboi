@@ -56,8 +56,8 @@ impl Ppu {
         self.win.window_y_triggered = false;
         self.win.window_started_this_line = false;
         self.win.win_weoff_deferred_tail = false;
-        self.first_line_after_enable = false;
-        self.line_153_ly_zeroed = false;
+        self.clk.first_line_after_enable = false;
+        self.clk.line_153_ly_zeroed = false;
         self.m3.m3_pixels_discarded = 0;
         self.m0.scheduled_mode0_dot = None;
         self.m0.m0_time_master = None;
@@ -68,7 +68,7 @@ impl Ppu {
         // Mode 2 holds no HDMA period edges, LY changes, or block fires; the
         // tracker can sleep until just before the pixel-transfer arm (80/82),
         // which installs the next (mode-3) sleep bound.
-        if mmio.is_cgb_features_enabled() && !self.first_line_after_enable {
+        if mmio.is_cgb_features_enabled() && !self.clk.first_line_after_enable {
             let ds = mmio.is_double_speed_mode() as u32;
             mmio.set_hdma_tracker_sleep(mmio.master_cc().wrapping_add(76 << ds));
         }
@@ -101,7 +101,7 @@ impl Ppu {
     fn cgbp_begin_exact(&self, mmio: &mmio::Mmio) -> u64 {
         let ds = mmio.is_double_speed_mode() as i64;
         let plus1 = self.ly_plus1();
-        let ly_time = self.p_now as i64 + self.ly_counter(mmio).time as i64 + plus1;
+        let ly_time = self.clk.p_now as i64 + self.ly_counter(mmio).time as i64 + plus1;
         (ly_time - ((456 - (80 - ds)) << ds)).max(0) as u64
     }
 
@@ -124,7 +124,7 @@ impl Ppu {
         let should_anticipate_mode2 = match self.state {
             State::HBlank => self.ticks == mode2_anticipate_dot && mmio.read(LY) < 143,
             State::VBlank => self.ticks == mode2_anticipate_dot
-                && (mmio.read(LY) == 153 || self.line_153_ly_zeroed),
+                && (mmio.read(LY) == 153 || self.clk.line_153_ly_zeroed),
             _ => false,
         };
         if should_anticipate_mode2 && (mmio.read(LCD_STATUS) & 0x03) != 2 {
@@ -145,7 +145,7 @@ impl Ppu {
             self.state = State::OAMSearch;
             // First line after enable: STAT reports mode 0 (not 2), no
             // Mode 2 STAT IRQ fires, and M3 starts later than usual.
-            self.first_line_after_enable = true;
+            self.clk.first_line_after_enable = true;
             // First-frame-after-enable blanking: the panel shows the LCD-off
             // blank for the frame produced immediately after this enable.
             self.out.frames_since_enable = 0;
@@ -153,7 +153,7 @@ impl Ppu {
             // the STAT resolve reports mode 0 (suppresses mode 2/3) for `cc < lu_`.
             {
                 let ds_u = mmio.is_double_speed_mode() as u32;
-                self.display_enable_inactive_until =
+                self.clk.display_enable_inactive_until =
                     mmio.master_cc().wrapping_add((80u64 << ds_u) + 1);
             }
             // Carried-edge LYC=0 IRQ on enable (the LCDC-enable write): when
@@ -171,15 +171,15 @@ impl Ppu {
             Self::set_lcd_status_mode(mmio, 0);
             // Initialize the event-scheduled IRQ clock at enable: LY=0,
             // line_cycle=0. Mirror the hardware LCDC-change enable branch.
-            self.line_cycle = 0;
-            self.internal_ly_val = 0;
+            self.clk.line_cycle = 0;
+            self.clk.internal_ly_val = 0;
             // Anchor the PPU dot-clock onto the master cc at LCD enable
             // (hardware seeds the PPU-clock base here). `abs_cc` keeps its accumulated
             // value across an off/on cycle. The derive at the end of THIS step
             // must reproduce the old post-increment value (pre + 1<<ds), so the
             // anchor subtracts that one dot the old accumulator added below.
             let ds_inc = 1u64 << mmio.is_double_speed_mode() as u32;
-            self.p_now = mmio.master_cc().wrapping_sub(self.abs_cc + ds_inc);
+            self.clk.p_now = mmio.master_cc().wrapping_sub(self.clk.abs_cc + ds_inc);
             self.speed.lytime_no_plus1 = false;
             self.speed.sc_mode3_pullback_pending = false;
             self.latch.wy2 = mmio.read(WY);
@@ -190,23 +190,23 @@ impl Ppu {
             self.latch.scy_apply_cc = wy2_disabled();
             self.latch.scx_delayed = mmio.read(SCX);
             self.latch.scx_apply_cc = wy2_disabled();
-            self.stat_reg_committed = mmio.read(LCD_STATUS);
+            self.clk.stat_reg_committed = mmio.read(LCD_STATUS);
             // See note in `enable_display`: LYC/STAT timing follows the CGB
             // LCD controller on CGB hardware regardless of DMG-compat mode.
-            self.lyc_irq.set_cgb(mmio.is_cgb());
-            self.lyc_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
-            self.mstat_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
-            self.lyc_irq.lcd_reset();
-            self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg_src());
+            self.clk.lyc_irq.set_cgb(mmio.is_cgb());
+            self.clk.lyc_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
+            self.clk.mstat_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
+            self.clk.lyc_irq.lcd_reset();
+            self.clk.mstat_irq.lcd_reset(self.clk.lyc_irq.lyc_reg_src());
             self.reschedule_all_stat_events(mmio);
-            self.sched_m0irq = stat_irq::DISABLED_TIME;
-            self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
+            self.clk.sched_m0irq = stat_irq::DISABLED_TIME;
+            self.clk.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
             // OAM snapshot at LCD enable: zero the snapshot and
             // hold it inactive (no sprites) until `cc + (80<<ds) + 1`. abs_cc
             // is re-derived below; display-enable is anchored to that dot.
             {
                 let ds = mmio.is_double_speed_mode();
-                let cc = mmio.master_cc().wrapping_sub(self.p_now);
+                let cc = mmio.master_cc().wrapping_sub(self.clk.p_now);
                 self.objs.oam_reader.cgb = mmio.is_cgb_features_enabled();
                 self.objs.oam_reader.large_src =
                     self.lcdc_has(LCDCFlags::SpriteSize);
@@ -244,16 +244,17 @@ impl Ppu {
         let ds = mmio.is_double_speed_mode();
         if mmio.is_agb()
             && !ds
-            && self.internal_ly_val >= 143
-            && self.sched_m1irq.saturating_sub(self.abs_cc) <= 4
+            && self.clk.internal_ly_val >= 143
+            && self.clk.sched_m1irq.saturating_sub(self.clk.abs_cc) <= 4
         {
-            if self.mstat_irq.do_m1_event(self.stat_reg_committed) {
+            if self.clk.mstat_irq.do_m1_event(self.clk.stat_reg_committed) {
                 mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_M1);
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
             }
             mmio.request_interrupt(registers::InterruptFlag::VBlank);
-            self.m1_vblank_fired = true;
-            self.sched_m1irq = self
+            self.clk.m1_vblank_fired = true;
+            self.clk.sched_m1irq = self
+                .clk
                 .sched_m1irq
                 .wrapping_add(stat_irq::LCD_CYCLES_PER_FRAME << ds as u32);
         }
@@ -299,7 +300,7 @@ impl Ppu {
         // at the normal mode-2->3 boundary, even though the real pixel
         // fetch starts later at FIRST_FRAME_ARM_DOT. Matches the hardware
         // VRAM/OAM writability (line cycles-based, not mode-3 start).
-        if self.first_line_after_enable {
+        if self.clk.first_line_after_enable {
             let is_cgb = mmio.is_cgb_features_enabled();
             let lock_dot = if is_cgb { cgb_first_frame_lock_dot(mmio.is_double_speed_mode()) } else { DMG_FIRST_FRAME_LOCK_DOT };
             if self.ticks == lock_dot && (mmio.read(LCD_STATUS) & 0x03) != 3 {
@@ -327,7 +328,7 @@ impl Ppu {
         // Perform sprite search distributed across 80 ticks
         // Check one sprite every 2 ticks (40 sprites × 2 ticks = 80 ticks)
         // Skipped on the first scanline after LCD enable (no Mode 2 phase).
-        if !self.first_line_after_enable
+        if !self.clk.first_line_after_enable
             && self.ticks.is_multiple_of(2)
             && self.objs.current_oam_sprite_index < OAM_SPRITE_COUNT
         {
@@ -339,7 +340,7 @@ impl Ppu {
             // unchanged). Sampled BEFORE the OAM read so this entry uses
             // the size effective at its read cc (the hardware per-entry size latch).
             if self.objs.objsize_apply_cc != wy2_disabled() {
-                self.objs.scan_obj_size_large = self.objsize_large_at_cc(self.abs_cc);
+                self.objs.scan_obj_size_large = self.objsize_large_at_cc(self.clk.abs_cc);
             }
             // Record this slot's size for the snapshot rebuild, set for
             // every scanned slot (even once 10 sprites are found, so the
@@ -357,7 +358,7 @@ impl Ppu {
         }
 
         let is_cgb = mmio.is_cgb_features_enabled();
-        let pixel_transfer_arm_dot = if self.first_line_after_enable {
+        let pixel_transfer_arm_dot = if self.clk.first_line_after_enable {
             if is_cgb {
                 CGB_FIRST_FRAME_ARM_DOT
             } else {
@@ -378,7 +379,7 @@ impl Ppu {
             // OAM-scan-end snapshot flush + sprite mapping). On
             // the first line after enable there is no mode-2 scan; the
             // snapshot is held inactive (display-enable) so skip the rebuild.
-            if !self.first_line_after_enable {
+            if !self.clk.first_line_after_enable {
                 self.build_sprites_from_snapshot(mmio);
             }
             // Sort sprites by priority after OAM search is complete
@@ -434,7 +435,7 @@ impl Ppu {
                 // The hardware mode-3-start window checkpoint: if win_draw_start is set and
                 // the window is enabled, the window-draw state becomes win_draw_started
                 // and window Y position increments; otherwise the window-draw state clears.
-                if self.win.win_draw_start && win_en && !self.first_line_after_enable {
+                if self.win.win_draw_start && win_en && !self.clk.first_line_after_enable {
                     self.win.win_y_pos = self.win.win_y_pos.wrapping_add(1);
                     self.win.win_draw_started = true;
                     self.win.win_draw_started_at_x0 = true;
@@ -458,7 +459,7 @@ impl Ppu {
                     // only persistently clears the bit on lines where the
                     // window does not (re)start — which is what lets the DMG
                     // wxA6 START-NOW branch fire again when WY next matches.
-                    if win_en && !self.first_line_after_enable {
+                    if win_en && !self.clk.first_line_after_enable {
                         self.win.win_draw_started = false;
                     }
                 }
@@ -480,8 +481,8 @@ impl Ppu {
             // the relocated block at the mode-3 -> HBlank boundary below.
             // First scanline after enable is now armed; subsequent
             // lines use normal Mode 2 timing.
-            let was_first_line = self.first_line_after_enable;
-            self.first_line_after_enable = false;
+            let was_first_line = self.clk.first_line_after_enable;
+            self.clk.first_line_after_enable = false;
             self.m0.mode0_reported_this_line = false;
             self.m3.line_rendered_this_line = false;
             self.win.wxa6_lineend_applied = false;
@@ -606,7 +607,7 @@ impl Ppu {
                 // `prev_scx` is a count of PPU dots; convert to master cc
                 // (1 dot = 1<<ds cc) so the sample dot is phase-correct at
                 // double speed (where the f1 latch's apply cc is write_cc+4).
-                let sample_cc = self.abs_cc + (prev_scx << ds);
+                let sample_cc = self.clk.abs_cc + (prev_scx << ds);
                 self.m3.first_line_scx_override = Some(self.scx_f1_pending_at_cc(sample_cc));
             } else {
                 self.m3.first_line_scx_override = None;
@@ -767,10 +768,10 @@ impl Ppu {
                 // IF-write between the two cc cleared it (lycint143_m1irq_ifw
                 // `_2`, m2m1irq_ifw `_3`). Only flag if the m1 event did not
                 // (e.g. LCD enabled mid-frame with no armed m1 schedule).
-                if !self.m1_vblank_fired {
+                if !self.clk.m1_vblank_fired {
                     mmio.request_interrupt(registers::InterruptFlag::VBlank);
                 }
-                self.m1_vblank_fired = false;
+                self.clk.m1_vblank_fired = false;
             } else {
                 // Continue to next visible scanline
                 let next_ly = current_ly.saturating_add(1);
@@ -810,12 +811,12 @@ impl Ppu {
         } else {
             LINE_153_LY_ZERO_DOT
         };
-        if !self.line_153_ly_zeroed
+        if !self.clk.line_153_ly_zeroed
             && self.ticks == line_153_zero_dot
             && mmio.read(LY) == 153
         {
             mmio.write_ly_from_ppu(0);
-            self.line_153_ly_zeroed = true;
+            self.clk.line_153_ly_zeroed = true;
             if mmio.read(LYC) == 0 {
                 mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) | (1 << 2));
             } else {
@@ -826,18 +827,18 @@ impl Ppu {
         if self.ticks == 455 {
             self.ticks = 0;
             let current_ly = mmio.read(LY);
-            let end_of_frame = current_ly >= 153 || self.line_153_ly_zeroed;
+            let end_of_frame = current_ly >= 153 || self.clk.line_153_ly_zeroed;
 
             if end_of_frame {
                 mmio.write_ly_from_ppu(0);
-                self.line_153_ly_zeroed = false;
+                self.clk.line_153_ly_zeroed = false;
                 self.state = State::OAMSearch;
                 // Arm the DMG "line 154" STAT-write VBlank-IF glitch window
                 // at the exact frame-wrap dot (LY 153->0, VBlank exit). A
                 // FF41 write within this window clears the still-pending
                 // VBlank IF (see `l154_vblank_glitch_window`). Disarmed a few
                 // dots into the new frame by `step` (below).
-                self.l154_vblank_glitch_window = true;
+                self.clk.l154_vblank_glitch_window = true;
                 self.enter_scheduled_mode2(mmio);
                 self.objs.next_sprite_fetch_index = 0;
                 self.objs.sprite_fetch_stall = 0;

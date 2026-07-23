@@ -177,7 +177,7 @@ impl Ppu {
             None => (0, 0),
         };
         self.wg.wg_dpre = dpre;
-        self.wg.wg_anchor_cc = Some(self.abs_cc.saturating_sub(rb_absorb + chop));
+        self.wg.wg_anchor_cc = Some(self.clk.abs_cc.saturating_sub(rb_absorb + chop));
     }
 
     // CGB-compat window train tile-data-select sample lag, in dots, subtracted

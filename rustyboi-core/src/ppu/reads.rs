@@ -45,7 +45,7 @@ impl Ppu {
         if self.disabled {
             return Some(false);
         }
-        if self.internal_ly_val >= 144 {
+        if self.clk.internal_ly_val >= 144 {
             // The hardware OAM-readable/OAM-writable checks resolve the OAM line-wrap pre-lock
             // BEFORE the ly>=144 vblank accessibility: in the last `k` line-cycles
             // of a line the access already belongs to the NEXT line, and line 153's
@@ -54,13 +54,13 @@ impl Ppu {
             // into mode-1 successors and stay accessible (age oam-write cgbBCE /
             // ncmBCE: the delay-2 write at the line-0 frame-1 mode-2 edge lands on
             // line 153's tail and must be blocked).
-            if kind == 1 && self.internal_ly_val == 153 {
+            if kind == 1 && self.clk.internal_ly_val == 153 {
                 let cc = access_cc as i64;
                 let ds = double_speed as i64;
                 let wrap_lc = if is_read {
                     self.line_cycles_at(cc, ds)
                 } else {
-                    self.line_cycle as i64 - self.speed.lytime_no_plus1 as i64
+                    self.clk.line_cycle as i64 - self.speed.lytime_no_plus1 as i64
                 };
                 // CGB-D/E: the OAM-read line-wrap pre-lock keeps the SS threshold
                 // in double speed (the hardware line-start rule `oam_read_blocked = !ds ||
@@ -109,7 +109,7 @@ impl Ppu {
         // vram (0, r/w): cc + 2 - cgb + ds < lu_ (hardware cc + 1 - cgb + ds)
         // oam (1) read: cc + 5 < lu_ (hardware cc + 4)
         // oam (1) write: cc + 5 + ds < lu_ (hardware cc + 4 + ds)
-        if self.display_enable_inactive_until != 0 {
+        if self.clk.display_enable_inactive_until != 0 {
             let bias: i64 = match (kind, is_read) {
                 (2, _) => 1,
                 (0, _) => 2 - is_cgb as i64 + ds,
@@ -117,7 +117,7 @@ impl Ppu {
                 (1, false) => 5 + ds,
                 _ => 1,
             };
-            if cc + bias < self.display_enable_inactive_until as i64 {
+            if cc + bias < self.clk.display_enable_inactive_until as i64 {
                 return Some(false);
             }
         }
@@ -225,7 +225,7 @@ impl Ppu {
                     return Some(started);
                 }
                 let lcdoffset_extended =
-                    !double_speed && self.ticks > 80 && !self.first_line_after_enable;
+                    !double_speed && self.ticks > 80 && !self.clk.first_line_after_enable;
                 return Some(if lcdoffset_extended { false } else { started });
             }
         let m0t = self.m0.m0_time_master? as i64;
@@ -269,7 +269,7 @@ impl Ppu {
         } else if is_read {
             self.line_cycles_at(cc, ds)
         } else {
-            self.line_cycle as i64 - self.speed.lytime_no_plus1 as i64
+            self.clk.line_cycle as i64 - self.speed.lytime_no_plus1 as i64
         };
         if kind == 1 {
             // CGB-D/E read threshold: see the ly==153 wrap above.
@@ -279,7 +279,7 @@ impl Ppu {
                 3 + 2 * is_cgb as i64
             };
             if oam_line_cycle + k + close_bias >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
-                let ly = self.internal_ly_val as i64;
+                let ly = self.clk.internal_ly_val as i64;
                 let accessible = (143..153).contains(&ly);
                 return Some(!accessible);
             }
@@ -305,7 +305,7 @@ impl Ppu {
             // register (it reports mode 0), so `mode3_locked`/`cgbp_block_start_cc`
             // do not gate it; once past the inactive period it is simply blocked
             // (the `ended` test unblocks it at mode-0 time / mode 0).
-            (1, _) if self.first_line_after_enable => true,
+            (1, _) if self.clk.first_line_after_enable => true,
             // OAM (kind 1, blocked from mode 2): the register `mode3_locked`
             // already covers the mode-2 prefix; the cgbp anchor refines the dot.
             _ => match self.m0.cgbp_block_start_cc {
@@ -334,7 +334,7 @@ impl Ppu {
     /// Returns None when no closed-form mode-0 time exists (window / first line after
     /// enable) so the caller falls back to the renderer-mode lock.
     pub(crate) fn vram_readable_at_cc(&self, cc: u64, is_cgb: bool, ds: bool) -> Option<bool> {
-        if self.disabled || self.internal_ly_val >= 144 {
+        if self.disabled || self.clk.internal_ly_val >= 144 {
             return Some(true);
         }
         let m0t = self.m0.m0_time_master? as i64;
@@ -463,7 +463,7 @@ impl Ppu {
         late_rev: bool,
         halt_woken: bool,
     ) -> Option<u8> {
-        if self.disabled || self.internal_ly_val >= 144 {
+        if self.disabled || self.clk.internal_ly_val >= 144 {
             return None;
         }
         // Only refine when the renderer currently reports mode 3 (we are in the
@@ -566,7 +566,7 @@ impl Ppu {
         let cpf = stat_irq::LCD_CYCLES_PER_FRAME as i64;
         // the LY counter.time() in master-cc; time-to-next-LY = time - cc; line cycles =
         // 456 - (time-to-next-LY >> ds); frame cycles = ly*456 + line cycles.
-        let ly_time_master = self.p_now as i64 + lc.time as i64;
+        let ly_time_master = self.clk.p_now as i64 + lc.time as i64;
         let time_to_next_ly = ly_time_master - access_cc as i64;
         let line_cycles = cpl - (time_to_next_ly >> ds as i32);
         let frame_cycles = ly * cpl + line_cycles;
@@ -645,7 +645,7 @@ impl Ppu {
         // Mode 2 (OAM) at line END (the next line's OAM is anticipated from
         // line cycles >= cpl-3).
         if line_cycles >= cpl - 3 {
-            if (access_cc + 1) < self.display_enable_inactive_until {
+            if (access_cc + 1) < self.clk.display_enable_inactive_until {
                 return Some(0);
             }
             return Some(2);
@@ -653,7 +653,7 @@ impl Ppu {
         // Line tail before the mode-2 anticipation window (cpl-7 .. cpl-3): mode 3
         // iff cc+2 < mode-0 time, else mode 0.
         if let Some(m0t) = self.m0.m0_time_master {
-            if (access_cc + 1) < self.display_enable_inactive_until {
+            if (access_cc + 1) < self.clk.display_enable_inactive_until {
                 return Some(0);
             }
             if (access_cc as i64) + 2 < m0t as i64 {
@@ -719,7 +719,7 @@ impl Ppu {
         let ptz_wake = mmio.halt_wake_m0m2();
         let tail_thresh = if ds { cpl - 5 } else { cpl - 7 };
         if halt_skew && ptz_wake && is_cgb && line_cycles >= tail_thresh {
-            if (access_cc + 1) < self.display_enable_inactive_until {
+            if (access_cc + 1) < self.clk.display_enable_inactive_until {
                 return Some(0);
             }
             return Some(2);
@@ -740,7 +740,7 @@ impl Ppu {
         // `*_2b` reads are NOT in this mid-frame path (handled by the VBlank branch
         // in get_stat_mode_at_cc), so their genuine sub-dot collapse is untouched.
         if halt_skew && ptz_wake && line_cycles >= cpl - 5 {
-            if (access_cc + 1) < self.display_enable_inactive_until {
+            if (access_cc + 1) < self.clk.display_enable_inactive_until {
                 return Some(0);
             }
             return Some(2);
@@ -749,7 +749,7 @@ impl Ppu {
             // DMG line tail at line cycles 449/450: still mode 0 (the want-mode0
             // group extends to 450 on DMG). Fall through to the mode-3/mode-0
             // resolution below rather than deferring to the lagging renderer.
-            if (access_cc + 1) < self.display_enable_inactive_until {
+            if (access_cc + 1) < self.clk.display_enable_inactive_until {
                 return Some(0);
             }
             // mode 3 iff still before mode-0 time, else mode 0 (the line body).
@@ -767,7 +767,7 @@ impl Ppu {
         // Mode 2 (OAM search): start-of-line line cycles (< 77), or line-tail
         // anticipation.
         if line_cycles < 77 || line_cycles >= cpl - 3 {
-            if (access_cc + 1) < self.display_enable_inactive_until {
+            if (access_cc + 1) < self.clk.display_enable_inactive_until {
                 return Some(0);
             }
             return Some(2);
@@ -785,7 +785,7 @@ impl Ppu {
         if self.state != State::OAMSearch {
             match self.m0.m0_time_master {
                 Some(m0t) => {
-                    if (access_cc + 1) < self.display_enable_inactive_until {
+                    if (access_cc + 1) < self.clk.display_enable_inactive_until {
                         return Some(0);
                     }
                     let read_off: i64 = self.stat_read_off(ds, Self::late_rev(mmio), false);
@@ -823,8 +823,8 @@ impl Ppu {
             // enable_display frame*_m3stat_count / m0irq_count / ly0 streams whose
             // FF41 read lands at line cycles 78..80 during OAMSearch.
             let lc = self.ly_counter_obs(mmio); // read-path phase
-            let line_start = (self.p_now as i64 + lc.time as i64) - (456i64 << ds as u32);
-            let cur_m0t = if self.first_line_after_enable {
+            let line_start = (self.clk.p_now as i64 + lc.time as i64) - (456i64 << ds as u32);
+            let cur_m0t = if self.clk.first_line_after_enable {
                 // Exact first-line value already installed (carries the +1 the LY time
                 // correction the read boundary is co-tuned with, and the first-line
                 // mode-3-start line cycle+2 offset).
@@ -846,7 +846,7 @@ impl Ppu {
             // inactive suppression to the first line (using the global field there
             // would end the window one render dot late — see the comment above).
             let read_off: i64 = self.stat_read_off(ds, Self::late_rev(mmio), false);
-            if self.first_line_after_enable {
+            if self.clk.first_line_after_enable {
                 // `line_start` here (the raw the LY counter-derived line origin) sits one
                 // master-cc ABOVE the hardware enable cc anchor (it resets the LY counter to
                 // (0, enable cc)): cross-checked vs cctracer on frame0_m3stat_count_ds_2 the
@@ -977,7 +977,7 @@ impl Ppu {
             && !self.speed.lytime_no_plus1
             && mmio.is_cgb()
             && self.out.frames_since_enable == 0
-            && self.internal_ly_val != 0) as i64;
+            && self.clk.internal_ly_val != 0) as i64;
         // Double-speed LYC-comparator anticipation on CGB-D/E and AGB: ONE EXTRA DOT.
         //
         // `get_lyc_cmp_ly` models the comparator switching to the upcoming LY a
@@ -1026,7 +1026,7 @@ impl Ppu {
             (lc.ly == stat_irq::LCD_LINES_PER_FRAME - 1) as i64 * (1 + lc.ds as i64);
         let lc_master = stat_irq::LyCounter {
             ly: lc.ly,
-            time: (self.p_now as i64 + lc.time as i64 + ss_plus1 - ds_anticipate - wrap_anticipate)
+            time: (self.clk.p_now as i64 + lc.time as i64 + ss_plus1 - ds_anticipate - wrap_anticipate)
                 .max(0) as u64,
             ds: lc.ds,
         };
@@ -1118,7 +1118,7 @@ impl Ppu {
         const SSDS_PLAIN_TIME_ADJ: i64 = 3;
         let ssds_plain = ds && self.speed.ssds_mode3_ly_advance && !mmio.halt_wakeup_skew();
         let ds_corr: i64 = if ssds_plain { SSDS_PLAIN_TIME_ADJ } else { 0 };
-        let mut time = self.p_now as i64 + lc.time as i64 + 1 + ds_corr;
+        let mut time = self.clk.p_now as i64 + lc.time as i64 + 1 + ds_corr;
         // SS->DS-during-mode3: rustyboi's bridged renderer line phase trails
         // The hardware re-anchors the LY-counter time by ~5 DS-dots (10 cc) for the LY
         // read. Pull the read's `time` anchor onto the hardware LY time so the

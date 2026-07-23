@@ -57,7 +57,7 @@ impl Ppu {
     /// Current PPU master clock (`abs_cc`). Used by the interrupt-service LCD
     /// ack to position the IF clear at the exact dot (see
     /// `Bus::interrupt_low_push_ack`).
-    pub fn abs_cc(&self) -> u64 { self.abs_cc }
+    pub fn abs_cc(&self) -> u64 { self.clk.abs_cc }
 
     /// The accumulated STAT-phase carry (master-cc). The bus
     /// SUBTRACTS this from a CPU VRAM/OAM access cc so the render-visibility gate
@@ -491,7 +491,7 @@ impl Ppu {
             return None;
         }
         const OAM_BUG_ACCESS_DOT: u32 = 4;
-        let dot = self.line_cycle + OAM_BUG_ACCESS_DOT;
+        let dot = self.clk.line_cycle + OAM_BUG_ACCESS_DOT;
         // Mode 2 is the first 80 dots of the line (20 rows * 4 dots/M-cycle).
         if dot >= 80 {
             return None;
@@ -516,7 +516,7 @@ impl Ppu {
     pub(crate) fn oam_bug_mode2_row_read(&self) -> Option<u8> {
         let base = self.oam_bug_mode2_row()?;
         // Mode-2 prologue: reads sample the held row-0 (accessed_oam_row < 8), clean.
-        if self.line_cycle < 6 {
+        if self.clk.line_cycle < 6 {
             return Some(0);
         }
         Some(base)
@@ -539,7 +539,7 @@ impl Ppu {
     pub(crate) fn is_on_rendering_line(&self) -> bool {
         !self.disabled
             && self.lcdc_has(LCDCFlags::DisplayEnable)
-            && self.internal_ly_val < 144
+            && self.clk.internal_ly_val < 144
             && self.state != State::VBlank
     }
 

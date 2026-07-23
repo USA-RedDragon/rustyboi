@@ -2197,19 +2197,11 @@ impl Default for WindowState {
     }
 }
 
+/// The event-scheduled STAT/LY clock: the absolute dot clock and its LCD-enable
+/// anchor, the line/LY counters, the five scheduled IRQ slots with their cached
+/// fast-path bound, and the LYC/mode STAT-IRQ edge trackers they drive.
 #[derive(Serialize, Deserialize, Clone)]
-pub struct Ppu {
-    pub(in crate::ppu) fetcher: fetcher::Fetcher,
-    pub(in crate::ppu) disabled: bool,
-    pub(in crate::ppu) state: State,
-    pub(in crate::ppu) ticks: u128,
-    pub(in crate::ppu) x: u8,
-
-    pub(in crate::ppu) objs: ObjState,
-    // Window state tracking
-    pub(in crate::ppu) win: WindowState,
-
-    // STAT interrupt state tracking
+pub(in crate::ppu) struct PpuClock {
     // True for the first scanline after LCDC.7 transitions 0 -> 1. On real
     // hardware this line has no Mode 2 phase: STAT reports mode 0 until M3
     // begins, no Mode 2 STAT IRQ fires, and M3 starts later than usual
@@ -2226,9 +2218,6 @@ pub struct Ppu {
     // LY=0 Mode 2 pretrigger (both of which originally checked LY==153).
     #[serde(default)]
     pub(in crate::ppu) line_153_ly_zeroed: bool,
-    pub(in crate::ppu) m3: Mode3State,
-    pub(in crate::ppu) m0: Mode0Schedule,
-
     // Event-scheduled STAT/mode/LYC IRQ model. `abs_cc` is a monotonic absolute
     // dot clock; `line_cycle` (0..455) tracks position within the current 456-dot
     // line. Together they reproduce the reference `the LY counter` (`time` = abs_cc
@@ -2244,8 +2233,6 @@ pub struct Ppu {
     // enable, where it is seeded so the derived value equals the accumulator.
     #[serde(default = "pnow_disabled")]
     pub(in crate::ppu) p_now: u64,
-    pub(in crate::ppu) speed: SpeedPhase,
-    pub(in crate::ppu) latch: DelayedRegs,
     #[serde(default)]
     pub(in crate::ppu) line_cycle: u32,
     #[serde(default)]
@@ -2311,6 +2298,57 @@ pub struct Ppu {
     pub(in crate::ppu) mstat_irq: stat_irq::MStatIrq,
     #[serde(default)]
     pub(in crate::ppu) stat_reg_committed: u8,
+}
+
+// `p_now` powers on at the `pnow_disabled()` (u64::MAX) LCD-never-enabled
+// sentinel and all five scheduled IRQ slots at `stat_irq::DISABLED_TIME`
+// (u64::MAX/4, the "no event scheduled" marker the `min` folds ignore), so this
+// cannot be derived — a derived zero would make every slot come due at cc 0.
+impl Default for PpuClock {
+    fn default() -> Self {
+        PpuClock {
+            first_line_after_enable: false,
+            display_enable_inactive_until: 0,
+            line_153_ly_zeroed: false,
+            abs_cc: 0,
+            p_now: pnow_disabled(),
+            line_cycle: 0,
+            internal_ly_val: 0,
+            sched_lycirq: stat_irq::DISABLED_TIME,
+            sched_m1irq: stat_irq::DISABLED_TIME,
+            sched_m2irq: stat_irq::DISABLED_TIME,
+            sched_m0irq: stat_irq::DISABLED_TIME,
+            sched_oneshot_statirq: stat_irq::DISABLED_TIME,
+            fast_dots_left: 0,
+            fast_hold: 0,
+            sched_min: 0,
+            m1_vblank_fired: false,
+            l154_vblank_glitch_window: false,
+            lyc_irq: stat_irq::LycIrq::default(),
+            mstat_irq: stat_irq::MStatIrq::default(),
+            stat_reg_committed: 0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Ppu {
+    pub(in crate::ppu) fetcher: fetcher::Fetcher,
+    pub(in crate::ppu) disabled: bool,
+    pub(in crate::ppu) state: State,
+    pub(in crate::ppu) ticks: u128,
+    pub(in crate::ppu) x: u8,
+
+    pub(in crate::ppu) objs: ObjState,
+    // Window state tracking
+    pub(in crate::ppu) win: WindowState,
+
+    // STAT interrupt state tracking
+    pub(in crate::ppu) clk: PpuClock,
+    pub(in crate::ppu) m3: Mode3State,
+    pub(in crate::ppu) m0: Mode0Schedule,
+    pub(in crate::ppu) speed: SpeedPhase,
+    pub(in crate::ppu) latch: DelayedRegs,
 
     pub(in crate::ppu) plot: PlotHistory,
 
@@ -2337,30 +2375,11 @@ impl Ppu {
             x: 0,
             objs: ObjState::default(),
             win: WindowState::default(),
-            first_line_after_enable: false,
-            display_enable_inactive_until: 0,
-            line_153_ly_zeroed: false,
+            clk: PpuClock::default(),
             m3: Mode3State::default(),
             m0: Mode0Schedule::default(),
             speed: SpeedPhase::default(),
-            abs_cc: 0,
-            p_now: pnow_disabled(),
             latch: DelayedRegs::default(),
-            line_cycle: 0,
-            internal_ly_val: 0,
-            sched_lycirq: stat_irq::DISABLED_TIME,
-            sched_m1irq: stat_irq::DISABLED_TIME,
-            sched_m2irq: stat_irq::DISABLED_TIME,
-            sched_m0irq: stat_irq::DISABLED_TIME,
-            sched_oneshot_statirq: stat_irq::DISABLED_TIME,
-            sched_min: 0,
-            fast_dots_left: 0,
-            fast_hold: 0,
-            m1_vblank_fired: false,
-            l154_vblank_glitch_window: false,
-            lyc_irq: stat_irq::LycIrq::default(),
-            mstat_irq: stat_irq::MStatIrq::default(),
-            stat_reg_committed: 0,
             plot: PlotHistory::default(),
             out: FrameOut::default(),
             lcdc: LcdcState::default(),
@@ -2423,12 +2442,12 @@ impl Ppu {
         let line_cycle = video_cycles % stat_irq::LCD_CYCLES_PER_LINE;
 
         self.disabled = false;
-        self.internal_ly_val = ly;
-        self.line_cycle = line_cycle;
+        self.clk.internal_ly_val = ly;
+        self.clk.line_cycle = line_cycle;
         self.ticks = line_cycle as u128;
         // Both LY=144 (CGB) and LY=153 (DMG) land in VBlank.
         self.state = State::VBlank;
-        self.first_line_after_enable = false;
+        self.clk.first_line_after_enable = false;
 
         // On line 153 the LY *register* flips to 0 early (at dot
         // LINE_153_LY_ZERO_DOT), well before the line itself ends. The DMG
@@ -2437,7 +2456,7 @@ impl Ppu {
         // Mirror that transient state so the first FF44/FF41 read matches.
         let line_153_zeroed =
             ly == (stat_irq::LCD_LINES_PER_FRAME as u8 - 1) && line_cycle >= LINE_153_LY_ZERO_DOT as u32;
-        self.line_153_ly_zeroed = line_153_zeroed;
+        self.clk.line_153_ly_zeroed = line_153_zeroed;
         let ly_reg = if line_153_zeroed { 0 } else { ly };
 
         // Anchor the dot-clock origin: abs_cc = 0 at the post-boot instant so
@@ -2445,8 +2464,8 @@ impl Ppu {
         // with cc as the origin. p_now = master_cc keeps abs_cc = master_cc -
         // p_now consistent; the first step() folds abs_cc -> 1 and advances
         // line_cycle by one dot.
-        self.abs_cc = 0;
-        self.p_now = mmio.master_cc();
+        self.clk.abs_cc = 0;
+        self.clk.p_now = mmio.master_cc();
         self.speed.lytime_no_plus1 = false;
         self.speed.ssds_mode3_ly_advance = false;
 
@@ -2472,18 +2491,18 @@ impl Ppu {
         self.latch.wy2_apply_cc = wy2_disabled();
         self.latch.wy1 = mmio.read(WY);
         self.latch.wy1_apply_cc = wy2_disabled();
-        self.stat_reg_committed = mmio.read(LCD_STATUS);
+        self.clk.stat_reg_committed = mmio.read(LCD_STATUS);
         // The LYC/STAT interrupt machinery follows the LCD-controller silicon,
         // which is CGB whenever the hardware is CGB-like — even for a DMG cart in
         // DMG-compatibility mode (hardware gates the LYC IRQ on the console-is-CGB signal, which
         // is the CGB-console signal, not cart CGB-feature support). Use hardware
         // is-CGB, not `is_cgb_features_enabled()`.
-        self.lyc_irq.set_cgb(mmio.is_cgb());
-        self.lyc_irq.seed(mmio.read(LCD_STATUS), lyc);
-        self.mstat_irq.seed(mmio.read(LCD_STATUS), lyc);
+        self.clk.lyc_irq.set_cgb(mmio.is_cgb());
+        self.clk.lyc_irq.seed(mmio.read(LCD_STATUS), lyc);
+        self.clk.mstat_irq.seed(mmio.read(LCD_STATUS), lyc);
         self.reschedule_all_stat_events(mmio);
-        self.sched_m0irq = stat_irq::DISABLED_TIME;
-        self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
+        self.clk.sched_m0irq = stat_irq::DISABLED_TIME;
+        self.clk.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
     }
 
     /// True while the renderer is in pixel transfer (mode 3) — consumer: the
@@ -2595,14 +2614,14 @@ impl Ppu {
         // `fast_dots_left`), every piece gated on `!fast` below is a proven
         // no-op for this dot.
         let fast = if matches!(self.state, State::PixelTransfer) {
-            if self.fast_hold > 0 {
-                self.fast_hold -= 1;
-                self.fast_dots_left = 0;
-            } else if self.fast_dots_left == 0 {
-                self.fast_dots_left = self.mode3_fast_budget(mmio);
+            if self.clk.fast_hold > 0 {
+                self.clk.fast_hold -= 1;
+                self.clk.fast_dots_left = 0;
+            } else if self.clk.fast_dots_left == 0 {
+                self.clk.fast_dots_left = self.mode3_fast_budget(mmio);
             }
-            if self.fast_dots_left > 0 {
-                self.fast_dots_left -= 1;
+            if self.clk.fast_dots_left > 0 {
+                self.clk.fast_dots_left -= 1;
                 true
             } else {
                 false
@@ -2623,13 +2642,13 @@ impl Ppu {
         // within a speed epoch, so the derived clock advances exactly as the old
         // accumulator did. `p_now` is seeded at enable and re-based on the speed
         // change / STOP bridge (where the master cc and render-dot counts diverge).
-        self.abs_cc = mmio.master_cc().wrapping_sub(self.p_now);
-        self.line_cycle += 1;
-        if self.line_cycle >= stat_irq::LCD_CYCLES_PER_LINE {
-            self.line_cycle = 0;
-            self.internal_ly_val += 1;
-            if self.internal_ly_val as u32 >= stat_irq::LCD_LINES_PER_FRAME {
-                self.internal_ly_val = 0;
+        self.clk.abs_cc = mmio.master_cc().wrapping_sub(self.clk.p_now);
+        self.clk.line_cycle += 1;
+        if self.clk.line_cycle >= stat_irq::LCD_CYCLES_PER_LINE {
+            self.clk.line_cycle = 0;
+            self.clk.internal_ly_val += 1;
+            if self.clk.internal_ly_val as u32 >= stat_irq::LCD_LINES_PER_FRAME {
+                self.clk.internal_ly_val = 0;
             }
         }
         // Disarm the "line 154" STAT-write VBlank-IF glitch window once the new
@@ -2639,11 +2658,11 @@ impl Ppu {
         // window this narrow guarantees a normal mid-frame STAT write never
         // clears a legitimately-pending VBlank IRQ.
         if !fast
-            && self.l154_vblank_glitch_window
-            && (self.internal_ly_val > 1
-                || (self.internal_ly_val == 1 && self.line_cycle > 4))
+            && self.clk.l154_vblank_glitch_window
+            && (self.clk.internal_ly_val > 1
+                || (self.clk.internal_ly_val == 1 && self.clk.line_cycle > 4))
         {
-            self.l154_vblank_glitch_window = false;
+            self.clk.l154_vblank_glitch_window = false;
         }
 
         // Drive the lazy OAM sprite snapshot:
@@ -2727,7 +2746,7 @@ impl Ppu {
         let prefetch = lcd_on
             && !mmio.is_cgb_features_enabled()
             && self.state == State::OAMSearch
-            && !self.first_line_after_enable
+            && !self.clk.first_line_after_enable
             && self.ticks + 4 >= DMG_PIXEL_TRANSFER_ARM_DOT
             && self.ticks < DMG_PIXEL_TRANSFER_ARM_DOT;
         if prefetch {
@@ -2740,7 +2759,7 @@ impl Ppu {
             };
             let scy = mmio.read(SCY) as u16;
             let scx = mmio.read(SCX) as u16;
-            let bg_y = self.internal_ly_val as u16 + scy;
+            let bg_y = self.clk.internal_ly_val as u16 + scy;
             let map_y = (bg_y / 8) & 0x1F;
             let map_x = (scx / 8) & 0x1F;
             let map_addr = map_base + (map_y * 32 + map_x);
@@ -2807,7 +2826,7 @@ mod tests {
         let mut mmio = mmio::Mmio::new(); // DMG: CGB features off, has the bug
         let mut ppu = Ppu::new();
         ppu.disabled = true;
-        ppu.l154_vblank_glitch_window = true;
+        ppu.clk.l154_vblank_glitch_window = true;
         mmio.request_interrupt(registers::InterruptFlag::VBlank);
         let vblank = registers::InterruptFlag::VBlank as u8;
         assert_ne!(mmio.snapshot_serial_read(registers::INTERRUPT_FLAG) & vblank, 0);

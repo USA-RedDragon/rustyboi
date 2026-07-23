@@ -219,7 +219,7 @@ impl Ppu {
         // discarded by the cadence gate if no mode-3 partner lands within
         // BGP_SPIKE_CADENCE_CC.
         if self.state == State::OAMSearch && !_mmio.is_cgb() && !self.disabled {
-            self.plot.bgp_mode2_pending = Some((self.abs_cc, value));
+            self.plot.bgp_mode2_pending = Some((self.clk.abs_cc, value));
         }
         if self.state != State::PixelTransfer || self.disabled {
             return;
@@ -251,7 +251,7 @@ impl Ppu {
         // Record it with a never-painted victim column (>=160) so it is a cadence
         // neighbor only.
         if !_mmio.is_cgb() && self.in_previsible_prologue() {
-            self.plot.bgp_writes.push((self.abs_cc, 0xFF, value));
+            self.plot.bgp_writes.push((self.clk.abs_cc, 0xFF, value));
         }
         if !_mmio.is_cgb() && !self.in_previsible_prologue() {
             // The spike's victim is the pixel POPPING at the write's apply dot.
@@ -275,7 +275,7 @@ impl Ppu {
                 0xFF
             };
             let old = self.plot.bgp_history.last().map(|&(_, v)| v).unwrap_or(self.plot.bgp_delayed);
-            self.plot.bgp_writes.push((self.abs_cc, col, old | value));
+            self.plot.bgp_writes.push((self.clk.abs_cc, col, old | value));
         }
         let boundary = self.pal_write_boundary(lat);
         Self::push_pal_history(&mut self.plot.bgp_history, boundary, value);
@@ -663,7 +663,7 @@ impl Ppu {
         // at the frame wrap and disarmed a few dots into line 0/1, so only a write
         // at that exact boundary is affected. DMG-only (CGB has no STAT-write bug).
         if ff41_written
-            && self.l154_vblank_glitch_window
+            && self.clk.l154_vblank_glitch_window
             && !self.disabled
             && !mmio.is_cgb_features_enabled()
         {
@@ -684,7 +684,7 @@ impl Ppu {
             // on DMG it fires regardless of the written value.
             let live_stat = mmio.read(LCD_STATUS);
             let new_stat = live_stat & 0x78;
-            let old_stat = self.stat_reg_committed & 0x78;
+            let old_stat = self.clk.stat_reg_committed & 0x78;
             let lycflag = live_stat & 0x04 != 0;
             let old_lycen = old_stat & stat_irq::STAT_LYCEN != 0;
             let new_lycen = new_stat & stat_irq::STAT_LYCEN != 0;
@@ -696,14 +696,14 @@ impl Ppu {
             // Keep the IRQ sources' shadow registers current so a later enable
             // sees the right values (hardware runs its LCDSTAT / LYC-register change handling even
             // while off, just skipping event scheduling).
-            self.stat_reg_committed = new_stat;
+            self.clk.stat_reg_committed = new_stat;
             return;
         }
 
         let new_stat = mmio.read(LCD_STATUS) & 0x78;
         let new_lyc = mmio.read(LYC);
-        let old_stat = self.stat_reg_committed & 0x78;
-        let old_lyc = self.lyc_irq.lyc_reg_src();
+        let old_stat = self.clk.stat_reg_committed & 0x78;
+        let old_lyc = self.clk.lyc_irq.lyc_reg_src();
 
         // FF41 (STAT) write. Run unconditionally on any FF41 write (even a
         // same-value write) to reproduce the DMG STAT-write IRQ bug; the CGB
@@ -745,10 +745,10 @@ impl Ppu {
         // (OAMSearch): `m0_time_master` still holds the PREVIOUS line's value, so
         // keep the per-dot `sched_m0irq` (this line's armed m0). Both clamp below
         // next-LY so the "m0 ahead this line" branch is taken.
-        let sched_or_future = if self.sched_m0irq == stat_irq::DISABLED_TIME {
+        let sched_or_future = if self.clk.sched_m0irq == stat_irq::DISABLED_TIME {
             lc.time.saturating_sub(1)
         } else {
-            self.sched_m0irq.min(lc.time.saturating_sub(1))
+            self.clk.sched_m0irq.min(lc.time.saturating_sub(1))
         };
         match self.state {
             // Mode 0 active: report a time at/after the next LY so the "m0 has
@@ -803,7 +803,7 @@ impl Ppu {
         let is_cgb = mmio.is_cgb_features_enabled();
         let adv = self.m0irq_xpos166_advance(mmio, is_cgb);
         self.m0.m0_time_master
-            .map(|m0t| (m0t as i64 - ((1 + adv) << ds) - self.p_now as i64 - 1).max(0) as u64)
+            .map(|m0t| (m0t as i64 - ((1 + adv) << ds) - self.clk.p_now as i64 - 1).max(0) as u64)
     }
     /// The current-line mode-0 IRQ time for the FF41/FF45 *latch* comparisons
     /// (the hardware mode-0 IRQ event time). During mode 3 the closed-form
@@ -816,31 +816,31 @@ impl Ppu {
             State::PixelTransfer => self
                 .m0_irq_time_exact(mmio)
                 .map(|t| t.min(lc.time.saturating_sub(1)))
-                .unwrap_or(self.sched_m0irq),
-            _ => self.sched_m0irq,
+                .unwrap_or(self.clk.sched_m0irq),
+            _ => self.clk.sched_m0irq,
         }
     }
     /// Handles an LCD-STAT (FF41) change. `data` is the new FF41 enable bits (& 0x78).
     fn lcdstat_change(&mut self, data: u8, mmio: &mut mmio::Mmio) {
         let cc = self.write_cc(mmio.is_double_speed_mode());
         let lc = self.ly_counter(mmio);
-        let old = self.stat_reg_committed & 0x78;
-        self.stat_reg_committed = data;
-        self.lyc_irq.stat_reg_change(data, &lc, cc);
+        let old = self.clk.stat_reg_committed & 0x78;
+        self.clk.stat_reg_committed = data;
+        self.clk.lyc_irq.stat_reg_change(data, &lc, cc);
 
         // If m0 IRQ just got enabled and isn't scheduled, arm it from the
         // current line's mode-0 prediction.
-        if (data & stat_irq::STAT_M0EN != 0) && self.sched_m0irq == stat_irq::DISABLED_TIME {
-            self.arm_m0irq_for_current_line(mmio, self.first_line_after_enable);
+        if (data & stat_irq::STAT_M0EN != 0) && self.clk.sched_m0irq == stat_irq::DISABLED_TIME {
+            self.arm_m0irq_for_current_line(mmio, self.clk.first_line_after_enable);
         }
         let m2 = stat_irq::mode2_irq_schedule(data, &lc, cc);
-        self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off(mmio.is_double_speed_mode())) as u64 };
-        self.sched_lycirq = self.lyc_irq.time;
+        self.clk.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off(mmio.is_double_speed_mode())) as u64 };
+        self.clk.sched_lycirq = self.clk.lyc_irq.time;
 
         // STAT-write IRQ timing follows the CGB LCD controller on CGB hardware
         // (incl. DMG-compat mode), matching the hardware console-is-CGB gate.
         let cgb = mmio.is_cgb();
-        let lyc_reg = self.lyc_irq.lyc_reg_src();
+        let lyc_reg = self.clk.lyc_irq.lyc_reg_src();
         // The hardware STAT-change-triggers-STAT-IRQ (DMG) recomputes the current line's
         // m0 IRQ time when it is unscheduled but mode 0 is still ahead this
         // line. Reproduce that so enabling m0 during mode 2/3 sees a future m0.
@@ -870,11 +870,11 @@ impl Ppu {
         // during mode 3, keeping the per-dot `sched_m0irq` next-line value
         // elsewhere (HBlank/mode 2/window) — see `m0_irq_time_latch`.
         let m0_latch = self.m0_irq_time_latch(mmio, &lc);
-        self.mstat_irq.stat_reg_change(
+        self.clk.mstat_irq.stat_reg_change(
             data,
             m0_latch,
-            self.sched_m1irq,
-            self.sched_m2irq,
+            self.clk.sched_m1irq,
+            self.clk.sched_m2irq,
             cc,
             cgb,
         );
@@ -882,13 +882,13 @@ impl Ppu {
     }
     /// Handles an LYC-register change.
     fn lyc_reg_change(&mut self, data: u8, mmio: &mut mmio::Mmio) {
-        let old = self.lyc_irq.lyc_reg_src();
+        let old = self.clk.lyc_irq.lyc_reg_src();
         if data == old {
             return;
         }
         let cc = self.write_cc(mmio.is_double_speed_mode());
         let lc = self.ly_counter(mmio);
-        let stat = self.stat_reg_committed;
+        let stat = self.clk.stat_reg_committed;
         // LYC-write coincidence/IRQ timing follows the CGB LCD controller on CGB
         // hardware (incl. DMG-compat mode); hardware gates on the console-is-CGB signal.
         let cgb = mmio.is_cgb();
@@ -899,10 +899,10 @@ impl Ppu {
         // (166)) during mode 3, the per-dot `sched_m0irq` (next-line scheduled m0,
         // > lc.time) elsewhere — see `m0_irq_time_latch`.
         let m0_for_trigger = self.m0_irq_time_latch(mmio, &lc);
-        self.lyc_irq.lyc_reg_change(data, &lc, cc);
-        self.mstat_irq
-            .lyc_reg_change(data, m0_for_trigger, self.sched_m2irq, cc, ds, cgb);
-        self.sched_lycirq = self.lyc_irq.time;
+        self.clk.lyc_irq.lyc_reg_change(data, &lc, cc);
+        self.clk.mstat_irq
+            .lyc_reg_change(data, m0_for_trigger, self.clk.sched_m2irq, cc, ds, cgb);
+        self.clk.sched_lycirq = self.clk.lyc_irq.time;
 
         // Immediate-trigger m0 time = the hardware m0 event time, which
         // is the *current line's* m0 while it is still ahead (mode 2/3) and the next
@@ -923,7 +923,7 @@ impl Ppu {
         };
         if stat_irq::lyc_change_triggers_stat_irq(old, data, &lc, cc, stat, m0_for_imm, cgb) {
             if cgb && !ds {
-                self.sched_oneshot_statirq = cc + 5;
+                self.clk.sched_oneshot_statirq = cc + 5;
             } else {
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
             }
@@ -946,7 +946,7 @@ impl Ppu {
         // polling loops, so writes land on M-cycle (even) phases and this term
         // is 0; it remains wired for the rare odd-phase write (post-HALT-1cc).
         let sub = if ds { self.speed.write_subdot as i64 } else { 0 };
-        (self.abs_cc as i64 + off + sub).max(0) as u64
+        (self.clk.abs_cc as i64 + off + sub).max(0) as u64
     }
     /// LY value used for the LYC=LY comparison. On hardware the compare uses
     /// the next line's LY in the last 2 dots of the current line

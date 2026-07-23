@@ -13,7 +13,7 @@ impl Ppu {
             return None;
         }
         let m0 = self.m0.scheduled_mode0_dot? as i128;
-        let ly = self.internal_ly_val;
+        let ly = self.clk.internal_ly_val;
         if ly >= 144 {
             return Some(false);
         }
@@ -85,7 +85,7 @@ impl Ppu {
         if self.disabled {
             return None;
         }
-        if self.internal_ly_val >= 144 {
+        if self.clk.internal_ly_val >= 144 {
             return Some(false);
         }
         let m0t = self.m0.m0_time_master? as i64;
@@ -112,7 +112,7 @@ impl Ppu {
         if self.disabled {
             return None;
         }
-        if self.internal_ly_val >= 144 {
+        if self.clk.internal_ly_val >= 144 {
             return Some(false);
         }
         let m0t = self.m0.m0_time_master? as i64;
@@ -147,7 +147,7 @@ impl Ppu {
         if self.disabled {
             return None;
         }
-        if self.internal_ly_val >= 144 {
+        if self.clk.internal_ly_val >= 144 {
             return Some(false);
         }
         let m0t = self.m0.m0_time_master? as i64;
@@ -168,7 +168,7 @@ impl Ppu {
         if self.disabled {
             return None;
         }
-        if self.internal_ly_val >= 144 {
+        if self.clk.internal_ly_val >= 144 {
             return Some(false);
         }
         let m0t = self.m0.m0_time_master? as i64;
@@ -221,14 +221,14 @@ impl Ppu {
     /// and only the latter is enable-anchored. They are left as two formulas
     /// deliberately; collapsing them would be a semantic bet, not code motion.
     ///
-    /// The `LCD_CYCLES_PER_LINE - self.line_cycle` subtraction is u32 and is kept
+    /// The `LCD_CYCLES_PER_LINE - self.clk.line_cycle` subtraction is u32 and is kept
     /// verbatim: it is the original's arithmetic, including its debug-overflow
     /// behaviour if `line_cycle` were ever to exceed the line length.
     #[inline(always)]
     fn ly_time_master(&self, ds: i64) -> i64 {
         let plus1 = self.ly_plus1();
-        let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
-        self.p_now as i64 + self.abs_cc as i64 + (dots_to_next << ds) + plus1
+        let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.clk.line_cycle) as i64;
+        self.clk.p_now as i64 + self.clk.abs_cc as i64 + (dots_to_next << ds) + plus1
     }
 
     /// The hardware `line cycles(cc) = 456 - ((the LY time - cc) >> ds)`.
@@ -276,7 +276,7 @@ impl Ppu {
         if self.disabled {
             return None;
         }
-        if self.internal_ly_val >= 144 {
+        if self.clk.internal_ly_val >= 144 {
             return Some(false);
         }
         let m0t = self.m0.m0_time_master? as i64;

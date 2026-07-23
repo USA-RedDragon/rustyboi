@@ -26,7 +26,7 @@ impl Ppu {
         // checkpoint dot still reads the OLD bit here even though the live
         // `self.lcdc.reg` was committed one dot early by pending_lcdc_events.
         let win_en = match self.lcdc.we_win_bit_exact {
-            Some((commit_cc, _new, old)) if self.abs_cc <= commit_cc => old,
+            Some((commit_cc, _new, old)) if self.clk.abs_cc <= commit_cc => old,
             _ => self.lcdc_has(LCDCFlags::WindowDisplayEnable),
         };
         if !win_en {
@@ -53,7 +53,7 @@ impl Ppu {
 
         // The remaining checks ride the previous line's HBlank; on the first
         // line after enable there is no such prior line.
-        if self.first_line_after_enable {
+        if self.clk.first_line_after_enable {
             return;
         }
 
@@ -260,7 +260,7 @@ impl Ppu {
         if self.win.wxa6_lineend_applied {
             return;
         }
-        if is_cgb || self.first_line_after_enable || mmio.read(WX) != 166 {
+        if is_cgb || self.clk.first_line_after_enable || mmio.read(WX) != 166 {
             return;
         }
         self.win.wxa6_lineend_applied = true;
@@ -834,7 +834,7 @@ impl Ppu {
                                 event.kind,
                                 crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
                             ) {
-                                self.m3.subcc_last_tn_cc = self.abs_cc;
+                                self.m3.subcc_last_tn_cc = self.clk.abs_cc;
                             }
                             self.record_fetch_debug_event(event, mmio);
                         }
@@ -912,7 +912,7 @@ impl Ppu {
                 scx: self.latch.scx_delayed,
             }) {
                 if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::TileNumber) {
-                    self.m3.subcc_last_tn_cc = self.abs_cc;
+                    self.m3.subcc_last_tn_cc = self.clk.abs_cc;
                 }
                 if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo) {
                     push_this_dot = true;
@@ -1034,7 +1034,7 @@ impl Ppu {
                     // first displayed pixel. The dot delta must be scaled
                     // to master cc (1 dot = 1<<ds cc) so the gap resonance
                     // is in master cc at both speeds.
-                    let plot_cc = self.abs_cc as i64
+                    let plot_cc = self.clk.abs_cc as i64
                         + ((xpos as i64 - self.x as i64) << dsf);
                     // SS (validated Stage 1b, broke-0 across the full
                     // suite incl. DMG): the in-flight straddle flips to NEW
@@ -1396,7 +1396,7 @@ impl Ppu {
                     self.resolve_bgp_spikes(mmio);
                     // Leaving mode 3: drop any leftover preamble fast budget so the
                     // next line recomputes against the fresh schedule.
-                    self.fast_dots_left = 0;
+                    self.clk.fast_dots_left = 0;
                     self.state = State::HBlank;
                     return;
                 }
@@ -1418,7 +1418,7 @@ impl Ppu {
             // write lands on the correct iteration, instead of the
             // immediate register read whose visibility depends on the
             // per-dot PPU-step-vs-CPU-write ordering within a dot.
-            let scx_break_full = self.scx_f1_pending_at_cc(self.abs_cc);
+            let scx_break_full = self.scx_f1_pending_at_cc(self.clk.abs_cc);
             let scx_live = (scx_break_full & 0x07) as u32;
             if xpos % 8 == scx_live || xpos >= 80 {
                 // The hardware mode-3-start fine-scroll phase re-reads SCX live at its case-0 tile
@@ -1445,7 +1445,7 @@ impl Ppu {
                 let ds_u = mmio.is_double_speed_mode() as u32;
                 let back = ((xpos - case0_xpos) as u64) << ds_u;
                 let scx_col_full =
-                    self.scx_f1_pending_at_cc(self.abs_cc.wrapping_sub(back));
+                    self.scx_f1_pending_at_cc(self.clk.abs_cc.wrapping_sub(back));
                 let arm_col = ((self.m3.m3_arm_scx_full.max(0) as u16) >> 3) & 0x1F;
                 let brk_col = (scx_col_full as u16 >> 3) & 0x1F;
                 // CGB f1 first-tile re-fetch (both single and double speed):
@@ -1530,7 +1530,7 @@ impl Ppu {
         if !mmio.is_cgb_features_enabled()
             && self.x == 0
             && !self.fetcher.is_fetching_window()
-            && !self.first_line_after_enable
+            && !self.clk.first_line_after_enable
             && self.m3.m3_discard_target >= 0
             // Comparator WE tap (see we_dot_hist): delayed, not live.
             && self.window_y_active_with(mmio, self.win.we_dot_hist[1] && self.win.we_dot_hist[2])
@@ -1589,7 +1589,7 @@ impl Ppu {
                             event.kind,
                             crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
                         ) {
-                            self.m3.subcc_last_tn_cc = self.abs_cc;
+                            self.m3.subcc_last_tn_cc = self.clk.abs_cc;
                         }
                         self.record_fetch_debug_event(event, mmio);
                     }
@@ -1651,7 +1651,7 @@ impl Ppu {
             // not the master clock.
             self.wg.bg_anchor_dot = Some(self.ticks);
             if !mmio.is_cgb_features_enabled() {
-                self.wg.bg_anchor_cc = Some(self.abs_cc);
+                self.wg.bg_anchor_cc = Some(self.clk.abs_cc);
             }
         }
         let fetcher_lcdc_state =
@@ -1711,7 +1711,7 @@ impl Ppu {
                         event.kind,
                         crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
                     ) {
-                        self.m3.subcc_last_tn_cc = self.abs_cc;
+                        self.m3.subcc_last_tn_cc = self.clk.abs_cc;
                     }
                     self.record_fetch_debug_event(event, mmio);
                 }
@@ -1897,7 +1897,7 @@ impl Ppu {
                 self.resolve_bgp_spikes(mmio);
                 // Leaving mode 3: drop any leftover preamble fast budget so the
                 // next line recomputes against the fresh schedule.
-                self.fast_dots_left = 0;
+                self.clk.fast_dots_left = 0;
                 self.state = State::HBlank;
                 if !self.m0.mode0_reported_this_line {
                     self.m0.mode0_reported_this_line = true;
@@ -1908,7 +1908,7 @@ impl Ppu {
                 self.resolve_bgp_spikes(mmio);
                 // Leaving mode 3: drop any leftover preamble fast budget so the
                 // next line recomputes against the fresh schedule.
-                self.fast_dots_left = 0;
+                self.clk.fast_dots_left = 0;
                 self.state = State::HBlank;
             }
         }

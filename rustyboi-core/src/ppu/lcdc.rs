@@ -267,15 +267,15 @@ impl Ppu {
                     && (value & en) != 0;
                 if arm && !ds {
                     let s = self.fetcher.fetch_substep();
-                    let odd = self.abs_cc & 1 == 1;
+                    let odd = self.clk.abs_cc & 1 == 1;
                     let target = match s {
                         // About to read TileDataLow: glitch it (k=1), 2 dots out.
-                        1 => Some((self.abs_cc + 2, 1u8)),
+                        1 => Some((self.clk.abs_cc + 2, 1u8)),
                         // About to read TileDataHigh: glitch it (k=2), 2 dots out.
-                        2 => Some((self.abs_cc + 2, 2u8)),
+                        2 => Some((self.clk.abs_cc + 2, 2u8)),
                         // Tile boundary (Push next): an off-cadence write straddles
                         // into the next tile's HIGH read (+8); on-cadence is clean.
-                        3 if odd => Some((self.abs_cc + 8, 2u8)),
+                        3 if odd => Some((self.clk.abs_cc + 8, 2u8)),
                         _ => None,
                     };
                     if let Some(t) = target {
@@ -453,7 +453,7 @@ impl Ppu {
     }
 
     // The CGB tile-index-is-tile-data glitch for the BG data read about to run
-    // (`self.abs_cc`, substep `k`): true iff a falling LCDC.4 write armed exactly
+    // (`self.clk.abs_cc`, substep `k`): true iff a falling LCDC.4 write armed exactly
     // this (cc, k) read (see handle_lcdc_write / tidxtd_glitch). The glitch is a
     // single-read event, not a sustained level, so only the one read the hardware
     // 1-T-cycle tile-select-glitch window catches returns the tile index as data.
@@ -461,7 +461,7 @@ impl Ppu {
         let k = self.fetcher.fetch_substep();
         self.wg.tidxtd_glitch
             .iter()
-            .any(|&(cc, tk)| cc == self.abs_cc && tk == k)
+            .any(|&(cc, tk)| cc == self.clk.abs_cc && tk == k)
     }
 
     pub(in crate::ppu) fn fetcher_lcdc_state(&self) -> fetcher::FetcherLcdcState {
@@ -477,7 +477,7 @@ impl Ppu {
         // addressing method, TileDataHigh after it uses the new one.
         if let Some((commit_cc, new_val, old_val)) = self.lcdc.lcdc_b4_exact {
             let tds = LCDCFlags::BGWindowTileDataSelect as u8;
-            if self.abs_cc < commit_cc {
+            if self.clk.abs_cc < commit_cc {
                 // Pre-commit: old bit4.
                 let lcdc = (self.lcdc.reg & !tds) | (old_val & tds);
                 return fetcher::FetcherLcdcState {
@@ -654,7 +654,7 @@ impl Ppu {
                 // the first line after enable (LY=0), where the previous line's
                 // checkpoints never ran so `window_y_triggered` is still false even
                 // when WY==0 — exactly the late_enable_ly0 case.
-                let wy_ok = self.win.window_y_triggered || self.latch.wy2 == self.internal_ly_val;
+                let wy_ok = self.win.window_y_triggered || self.latch.wy2 == self.clk.internal_ly_val;
                 let wx_in_range = (0..=166).contains(&wx) && (cgb_features_enabled || wx != 166);
                 // The window penalty applies iff the enable lands BEFORE the
                 // fetcher reaches the window-tile commit dot. The window draws from

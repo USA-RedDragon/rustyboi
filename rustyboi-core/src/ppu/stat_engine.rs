@@ -18,10 +18,10 @@ impl Ppu {
         let ds = mmio.is_double_speed_mode();
         // `abs_cc` is in machine cycles (advances by 1<<ds per dot). `time` is
         // the machine-cycle clock at the next LY increment.
-        let dots_to_next_line = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as u64;
+        let dots_to_next_line = (stat_irq::LCD_CYCLES_PER_LINE - self.clk.line_cycle) as u64;
         stat_irq::LyCounter {
             ly: self.internal_ly() as u32,
-            time: self.abs_cc + (dots_to_next_line << ds as u32),
+            time: self.clk.abs_cc + (dots_to_next_line << ds as u32),
             ds,
         }
     }
@@ -47,7 +47,7 @@ impl Ppu {
     // The internal (clean) LY derived from the line clock, independent of the
     // LY register's mid-line transients (line 153 ly=0, etc.).
     pub(in crate::ppu) fn internal_ly(&self) -> u8 {
-        self.internal_ly_val
+        self.clk.internal_ly_val
     }
     /// Byte-exact hardware `mode-0 time` (master-cc) for the current line, given the
     /// closed-form mode-3 length `m3_len` (= the cycles-until-xpos-167 length in dots).
@@ -66,7 +66,7 @@ impl Ppu {
         let ds = mmio.is_double_speed_mode() as u32;
         let base: i64 = if is_cgb { 84 } else { 83 };
         let plus1 = self.ly_plus1();
-        let ly_time = self.p_now as i64 + self.ly_counter(mmio).time as i64 + plus1;
+        let ly_time = self.clk.p_now as i64 + self.ly_counter(mmio).time as i64 + plus1;
         let m0_line_cycle = m3_len as i64 + base + if first_line { 2 } else { 0 };
         (ly_time - ((456 - m0_line_cycle) << ds)).max(0) as u64
     }
@@ -126,14 +126,14 @@ impl Ppu {
             off += M0IRQ_DMG_FIRST_FRAME_OFFSET;
         }
         let dsf = 1i64 << ds as i32;
-        let abs = (self.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
+        let abs = (self.clk.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
         // The IRQ-dispatch arm keeps the calibrated offset form (the faithful
         // xpos-166-advance-time migration of THIS consumer is deferred — the
         // per-dot dispatch phase is co-tuned with the consume-site `+ds /
         // +cgb_ss_m0_anticip` anticipation). The faithful event cc is consumed
         // independently by the halt-exit `<2` fixup via `m0_irq_event_cc_master`,
         // captured at the m0 IRQ flag site.
-        self.sched_m0irq = abs;
+        self.clk.sched_m0irq = abs;
         self.stat_sched_touched();
     }
     /// FAITHFUL EVENTCC: the mode-0 STAT IRQ event time
@@ -171,8 +171,8 @@ impl Ppu {
             return;
         }
         self.reschedule_all_stat_events(mmio);
-        if self.sched_m0irq != stat_irq::DISABLED_TIME {
-            self.arm_m0irq_for_current_line(mmio, self.first_line_after_enable);
+        if self.clk.sched_m0irq != stat_irq::DISABLED_TIME {
+            self.arm_m0irq_for_current_line(mmio, self.clk.first_line_after_enable);
         }
     }
     /// Advance the renderer by `dots` dots during the CGB STOP speed-switch
@@ -188,7 +188,7 @@ impl Ppu {
             // cover, so the master cc does not advance for them. `step` derives
             // `abs_cc = master_cc - p_now`; pull `p_now` back by one dot first so
             // the derived clock still advances `1<<ds` this bridge step.
-            self.p_now = self.p_now.wrapping_sub(1 << mmio.is_double_speed_mode() as u32);
+            self.clk.p_now = self.clk.p_now.wrapping_sub(1 << mmio.is_double_speed_mode() as u32);
             self.step(mmio);
             self.step_lcdc_events(mmio);
         }
@@ -241,13 +241,13 @@ impl Ppu {
         }
         // --- STAT-phase region of `step` (no render match, no `ticks += 1`) ---
         self.dispatch_stat_events(mmio);
-        self.abs_cc = mmio.master_cc().wrapping_sub(self.p_now);
-        self.line_cycle += 1;
-        if self.line_cycle >= stat_irq::LCD_CYCLES_PER_LINE {
-            self.line_cycle = 0;
-            self.internal_ly_val += 1;
-            if self.internal_ly_val as u32 >= stat_irq::LCD_LINES_PER_FRAME {
-                self.internal_ly_val = 0;
+        self.clk.abs_cc = mmio.master_cc().wrapping_sub(self.clk.p_now);
+        self.clk.line_cycle += 1;
+        if self.clk.line_cycle >= stat_irq::LCD_CYCLES_PER_LINE {
+            self.clk.line_cycle = 0;
+            self.clk.internal_ly_val += 1;
+            if self.clk.internal_ly_val as u32 >= stat_irq::LCD_LINES_PER_FRAME {
+                self.clk.internal_ly_val = 0;
             }
         }
         self.process_oam_reader_events(mmio);
@@ -281,7 +281,7 @@ impl Ppu {
         for _ in 0..dots {
             self.step_scheduled_stat_events(mmio);
             let dot_cc = 1i64 << mmio.is_double_speed_mode() as u32;
-            self.p_now = self.p_now.wrapping_sub(dot_cc as u64);
+            self.clk.p_now = self.clk.p_now.wrapping_sub(dot_cc as u64);
             self.step_stat_phase_only(mmio);
             self.step_lcdc_events(mmio);
             // The STAT phase (line_cycle/abs_cc) just advanced one dot; the render
@@ -295,13 +295,13 @@ impl Ppu {
     /// `abs_cc` (used on LCD enable / LY-counter reset).
     pub(in crate::ppu) fn reschedule_all_stat_events(&mut self, mmio: &mmio::Mmio) {
         let lc = self.ly_counter(mmio);
-        let cc = self.abs_cc;
-        let stat = self.stat_reg_committed;
-        self.lyc_irq.reschedule(&lc, cc);
-        self.sched_lycirq = self.lyc_irq.time;
-        self.sched_m1irq = stat_irq::mode1_irq_schedule(&lc, cc);
+        let cc = self.clk.abs_cc;
+        let stat = self.clk.stat_reg_committed;
+        self.clk.lyc_irq.reschedule(&lc, cc);
+        self.clk.sched_lycirq = self.clk.lyc_irq.time;
+        self.clk.sched_m1irq = stat_irq::mode1_irq_schedule(&lc, cc);
         let m2 = stat_irq::mode2_irq_schedule(stat, &lc, cc);
-        self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off(mmio.is_double_speed_mode())) as u64 };
+        self.clk.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off(mmio.is_double_speed_mode())) as u64 };
         // m0irq is scheduled from the renderer's mode-0 prediction; (re)armed
         // when entering pixel transfer. Leave as-is here.
         self.stat_sched_touched();
@@ -322,7 +322,7 @@ impl Ppu {
         // the odd half-dot: the dispatch fast path tests abs + 2 < sched_min,
         // and the half-dot's abs is abs - 1, so abs + 1 < sched_min is the
         // identical no-op condition.
-        if self.abs_cc + 1 < self.sched_min {
+        if self.clk.abs_cc + 1 < self.clk.sched_min {
             return;
         }
         self.step_subdot_slow(mmio);
@@ -331,9 +331,9 @@ impl Ppu {
         // The preceding full `step` dispatched at the even cc N and advanced
         // `abs_cc` to N+2 (the next render dot). The odd half-dot is cc N+1, one
         // machine cycle earlier; dispatch any event due there, then restore.
-        self.abs_cc -= 1;
+        self.clk.abs_cc -= 1;
         self.dispatch_stat_events(mmio);
-        self.abs_cc += 1;
+        self.clk.abs_cc += 1;
     }
     /// Fire any STAT IRQ events whose scheduled time has arrived at the current
     /// `abs_cc`. Called once per dot from `step` (and at the DS odd half-dot
@@ -347,7 +347,7 @@ impl Ppu {
     /// the whole body is a no-op.
     #[inline]
     pub(in crate::ppu) fn dispatch_stat_events(&mut self, mmio: &mut mmio::Mmio) {
-        if self.abs_cc + 2 < self.sched_min {
+        if self.clk.abs_cc + 2 < self.clk.sched_min {
             return;
         }
         self.dispatch_stat_events_slow(mmio);
@@ -360,8 +360,8 @@ impl Ppu {
     /// a redundant slow call, never a missed event.
     #[inline]
     pub(in crate::ppu) fn stat_sched_touched(&mut self) {
-        self.sched_min = 0;
-        self.fast_dots_left = 0;
+        self.clk.sched_min = 0;
+        self.clk.fast_dots_left = 0;
     }
     /// Drop the mode-3 preamble fast budget. Called by the bus on any write
     /// at or above 0xFE00 (OAM/IO — LY/LYC/STAT/WY/LCDC/IE/IF and the OAM
@@ -369,19 +369,19 @@ impl Ppu {
     /// resume per-dot processing on the very next dot.
     #[inline]
     pub(crate) fn invalidate_fast_span(&mut self) {
-        self.fast_dots_left = 0;
-        self.fast_hold = 8;
+        self.clk.fast_dots_left = 0;
+        self.clk.fast_hold = 8;
     }
     /// Fresh mode-3 preamble fast budget in render dots: the sched_min slack
     /// (margin 12 covers every dispatch anticipation offset and the DS
     /// sub-dot), gated off entirely near line/frame transients.
     pub(in crate::ppu) fn mode3_fast_budget(&self, mmio: &mmio::Mmio) -> u32 {
-        if !(2..=152).contains(&self.internal_ly_val) || self.first_line_after_enable {
+        if !(2..=152).contains(&self.clk.internal_ly_val) || self.clk.first_line_after_enable {
             return 0;
         }
         let ds = mmio.is_double_speed_mode() as u32;
-        let abs_now = mmio.master_cc().wrapping_sub(self.p_now);
-        let slack = self.sched_min.saturating_sub(abs_now.saturating_add(12));
+        let abs_now = mmio.master_cc().wrapping_sub(self.clk.p_now);
+        let slack = self.clk.sched_min.saturating_sub(abs_now.saturating_add(12));
         (slack >> ds).min(512) as u32
     }
     /// Lower bound, in MASTER cc, on the next cc at which the PPU can raise an
@@ -406,9 +406,9 @@ impl Ppu {
         if self.disabled {
             return u64::MAX;
         }
-        let mut bound = self.sched_min.saturating_add(self.p_now);
-        if self.sched_m0irq == stat_irq::DISABLED_TIME
-            && self.stat_reg_committed & stat_irq::STAT_M0EN != 0
+        let mut bound = self.clk.sched_min.saturating_add(self.clk.p_now);
+        if self.clk.sched_m0irq == stat_irq::DISABLED_TIME
+            && self.clk.stat_reg_committed & stat_irq::STAT_M0EN != 0
         {
             // The m0 slot is only armed mid-stream at the pixel-transfer
             // transition (ticks 80/82 normal, 84/85 first-line-after-enable;
@@ -495,7 +495,7 @@ impl Ppu {
                 // snapshot rebuild sit past its end. A pending exact-cc
                 // OBJ-size override needs its per-dot/per-slot abs_cc
                 // resolution, so no batching then.
-                if self.first_line_after_enable || self.objs.objsize_apply_cc != wy2_disabled() {
+                if self.clk.first_line_after_enable || self.objs.objsize_apply_cc != wy2_disabled() {
                     return 0;
                 }
                 // A pending CPU OAM write must be consumed by
@@ -534,7 +534,7 @@ impl Ppu {
             }
             _ => return 0,
         }
-        if !(2..=152).contains(&self.internal_ly_val) {
+        if !(2..=152).contains(&self.clk.internal_ly_val) {
             return 0;
         }
         let t = self.ticks as u32;
@@ -546,8 +546,8 @@ impl Ppu {
         // (dirty) yields no skip; the slow dispatch on the next real dot
         // recomputes it.
         let ds = mmio.is_double_speed_mode() as u32;
-        let abs_now = mmio.master_cc().wrapping_sub(self.p_now);
-        let event_slack = self.sched_min.saturating_sub(abs_now.saturating_add(8));
+        let abs_now = mmio.master_cc().wrapping_sub(self.clk.p_now);
+        let event_slack = self.clk.sched_min.saturating_sub(abs_now.saturating_add(8));
         let to_event = event_slack >> ds;
         let n = ((interior.1 - t) as u64)
             .min(to_event)
@@ -575,10 +575,10 @@ impl Ppu {
             }
         }
         self.ticks += n as u128;
-        self.line_cycle += n;
+        self.clk.line_cycle += n;
         // Keep abs_cc exact through the skip: the CPU write hooks anchor
         // their delayed applies on it at the next access boundary.
-        self.abs_cc = self.abs_cc.wrapping_add((n as u64) << ds);
+        self.clk.abs_cc = self.clk.abs_cc.wrapping_add((n as u64) << ds);
         // The palette latch would have re-read the (unchanged) registers each
         // dot; leave it equal to the per-dot outcome.
         self.plot.bgp_delayed = mmio.ppu_io_reg(BGP);
@@ -596,13 +596,13 @@ impl Ppu {
         if self.disabled {
             return u64::MAX;
         }
-        let pos = self.internal_ly_val as u32 * stat_irq::LCD_CYCLES_PER_LINE + self.line_cycle;
+        let pos = self.clk.internal_ly_val as u32 * stat_irq::LCD_CYCLES_PER_LINE + self.clk.line_cycle;
         let total = stat_irq::LCD_LINES_PER_FRAME * stat_irq::LCD_CYCLES_PER_LINE;
         (total.saturating_sub(pos + 8) as u64) << (ds as u32)
     }
     fn dispatch_stat_events_slow(&mut self, mmio: &mut mmio::Mmio) {
         let ds = mmio.is_double_speed_mode();
-        let cc = self.abs_cc;
+        let cc = self.clk.abs_cc;
 
         // Disabled slots hold huge sentinels (u64::MAX / DISABLED_TIME), so the
         // min naturally excludes them.
@@ -612,13 +612,13 @@ impl Ppu {
             .min(self.latch.wy_recheck_cc)
             .min(self.latch.scy_apply_cc)
             .min(self.latch.scx_apply_cc)
-            .min(self.sched_oneshot_statirq)
-            .min(self.sched_m1irq)
-            .min(self.sched_lycirq)
-            .min(self.sched_m2irq)
-            .min(self.sched_m0irq);
+            .min(self.clk.sched_oneshot_statirq)
+            .min(self.clk.sched_m1irq)
+            .min(self.clk.sched_lycirq)
+            .min(self.clk.sched_m2irq)
+            .min(self.clk.sched_m0irq);
         if cc + 2 < min_sched {
-            self.sched_min = min_sched;
+            self.clk.sched_min = min_sched;
             return;
         }
 
@@ -643,10 +643,10 @@ impl Ppu {
             self.latch.scx_apply_cc = wy2_disabled();
         }
 
-        if self.sched_oneshot_statirq <= cc {
+        if self.clk.sched_oneshot_statirq <= cc {
             mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_LYC);
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
-            self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
+            self.clk.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
         }
         // Order matches the hardware next-memory-event priority for ties.
         // The m1 (VBlank) event (frame_cycle 144*456-2, an even `abs_cc`) is observed
@@ -661,11 +661,11 @@ impl Ppu {
         // timing dominates and the extra dot delivers the IRQ too early. Anticipate by
         // 2*ds only when m1-STAT is enabled, else by the half-dot +ds the LYC=LY/mode-0
         // events also carry. DS-only (ds=0 leaves the single-speed phase byte-identical).
-        let m1en = self.stat_reg_committed & (1 << 4) != 0;
+        let m1en = self.clk.stat_reg_committed & (1 << 4) != 0;
         let m1_anticip = if m1en { 2 * ds as u64 } else { ds as u64 };
-        if self.sched_m1irq <= cc + m1_anticip {
-            let stat = self.stat_reg_committed;
-            if self.mstat_irq.do_m1_event(stat) {
+        if self.clk.sched_m1irq <= cc + m1_anticip {
+            let stat = self.clk.stat_reg_committed;
+            if self.clk.mstat_irq.do_m1_event(stat) {
                 mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_M1);
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
             }
@@ -679,26 +679,26 @@ impl Ppu {
             // halves: out0 vs the correct out3, outE2 vs outE3). Flag VBlank here
             // at the faithful m1 event cc so both bits land coincident as on hardware;
             // the render machine's later fire is idempotent (same frame OR).
-            if self.internal_ly_val >= 143 {
+            if self.clk.internal_ly_val >= 143 {
                 mmio.request_interrupt(registers::InterruptFlag::VBlank);
                 // Mark so the render-machine ly143->144 transition does not re-flag
                 // VBlank after a CPU IF-write cleared it (hardware: single VBlank
                 // source). The flag covers the gap between this event (line_cycle
                 // 454) and the render transition (line_cycle 455/0).
-                self.m1_vblank_fired = true;
+                self.clk.m1_vblank_fired = true;
             }
-            self.sched_m1irq = self.sched_m1irq
+            self.clk.sched_m1irq = self.clk.sched_m1irq
                 .wrapping_add((stat_irq::LCD_CYCLES_PER_FRAME) << ds as u32);
         }
-        if self.sched_lycirq <= cc + ds as u64 {
+        if self.clk.sched_lycirq <= cc + ds as u64 {
             let lc = self.ly_counter(mmio);
-            if self.lyc_irq.do_event(&lc) {
+            if self.clk.lyc_irq.do_event(&lc) {
                 mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_LYC);
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
             }
-            self.sched_lycirq = self.lyc_irq.time;
+            self.clk.sched_lycirq = self.clk.lyc_irq.time;
         }
-        if self.sched_m2irq <= cc {
+        if self.clk.sched_m2irq <= cc {
             self.do_mode2_irq_event(mmio, ds);
         }
         // The mode-0 (HBlank) STAT IRQ schedules at an odd `abs_cc` (a half-dot)
@@ -716,36 +716,36 @@ impl Ppu {
         // the (already exact) m2/LYC phase. Fixes 10sprites/ly0/wxA5 m0irq and the
         // CGB m2int_m0irq_*_ifw IF-clear-vs-m0 ordering.
         let cgb_ss_m0_anticip = (!ds && mmio.is_cgb_features_enabled()) as u64;
-        if self.sched_m0irq <= cc + ds as u64 + cgb_ss_m0_anticip {
-            let stat = self.stat_reg_committed;
+        if self.clk.sched_m0irq <= cc + ds as u64 + cgb_ss_m0_anticip {
+            let stat = self.clk.stat_reg_committed;
             let ly = self.internal_ly() as u32;
             // FAITHFUL EVENTCC: capture this line's m0 IRQ event cc
             // (the xpos-166 advance time) BEFORE the mutable IF-flag borrow, so
             // the halt-exit `<2` fixup can read the cc the IF bit was raised at
             // (hardware flags the m0 STAT IRQ at its m0 event time).
             let m0_event_cc = self.m0_irq_event_cc_master(mmio);
-            let fired = self.mstat_irq.do_m0_event(ly, stat, self.lyc_irq.lyc_reg_src());
+            let fired = self.clk.mstat_irq.do_m0_event(ly, stat, self.clk.lyc_irq.lyc_reg_src());
             if fired {
                 mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_M0);
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
                 mmio.set_pending_m0_irq_fire_cc(m0_event_cc);
             }
             // m0irq re-arm happens at next pixel-transfer entry.
-            self.sched_m0irq = stat_irq::DISABLED_TIME;
+            self.clk.sched_m0irq = stat_irq::DISABLED_TIME;
         }
 
         // Refresh the cached fast-bail bound from the post-fire schedule.
-        self.sched_min = self
+        self.clk.sched_min = self
             .latch.wy2_apply_cc
             .min(self.latch.wy1_apply_cc)
             .min(self.latch.wy_recheck_cc)
             .min(self.latch.scy_apply_cc)
             .min(self.latch.scx_apply_cc)
-            .min(self.sched_oneshot_statirq)
-            .min(self.sched_m1irq)
-            .min(self.sched_lycirq)
-            .min(self.sched_m2irq)
-            .min(self.sched_m0irq);
+            .min(self.clk.sched_oneshot_statirq)
+            .min(self.clk.sched_m1irq)
+            .min(self.clk.sched_lycirq)
+            .min(self.clk.sched_m2irq)
+            .min(self.clk.sched_m0irq);
     }
     pub(in crate::ppu) fn m2_off(_ds: bool) -> i64 {
         // DS and SS converged on -1 after the double-speed STAT sub-dot step
@@ -756,14 +756,14 @@ impl Ppu {
         // doMode2IrqEvent: the LY used is the *next* line's LY if the m2 event
         // is within 16 cycles of the ly increment.
         let lc = self.ly_counter(mmio);
-        let near_ly_inc = lc.time.saturating_sub(self.sched_m2irq) < 16;
+        let near_ly_inc = lc.time.saturating_sub(self.clk.sched_m2irq) < 16;
         let ly = if near_ly_inc {
             if lc.ly == stat_irq::LCD_LINES_PER_FRAME - 1 { 0 } else { lc.ly + 1 }
         } else {
             lc.ly
         };
-        let stat = self.stat_reg_committed;
-        let fired = self.mstat_irq.do_m2_event(ly, stat, self.lyc_irq.lyc_reg_src());
+        let stat = self.clk.stat_reg_committed;
+        let fired = self.clk.mstat_irq.do_m2_event(ly, stat, self.clk.lyc_irq.lyc_reg_src());
         if fired {
             mmio.stage_lcd_raise_kind(mmio::LCD_RAISE_M2);
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
@@ -777,6 +777,6 @@ impl Ppu {
             mmio.set_last_m2_irq_ly(ly as u8);
         }
         let delta = stat_irq::mode2_reschedule_delta(ly, stat, ds);
-        self.sched_m2irq = self.sched_m2irq.wrapping_add(delta);
+        self.clk.sched_m2irq = self.clk.sched_m2irq.wrapping_add(delta);
     }
 }

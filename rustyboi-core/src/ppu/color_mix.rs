@@ -270,7 +270,7 @@ impl Ppu {
     }
 
     fn process_oam_reader_events_slow(&mut self, mmio: &mut mmio::Mmio) {
-        let cc = self.abs_cc;
+        let cc = self.clk.abs_cc;
 
         // Lazy seed for the current LCD-on session.
         if !self.objs.oam_reader_seeded {
@@ -350,7 +350,7 @@ impl Ppu {
     /// in one pass (sprite mapping). Replaces the per-dot live OAM scan.
     pub(in crate::ppu) fn build_sprites_from_snapshot(&mut self, mmio: &mut mmio::Mmio) {
         let lc = self.ly_counter(mmio);
-        let cc = self.abs_cc;
+        let cc = self.clk.abs_cc;
         // Re-derive the walk's OBJ-size source here (the per-dot refresh in
         // `process_oam_reader_events` is skipped on its no-event fast path).
         // `lcdc` is constant within a dot, so this matches the old per-dot value.
