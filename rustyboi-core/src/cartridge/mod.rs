@@ -793,7 +793,78 @@ pub enum UnlMapper {
     /// `($08>>1)+$82 = $86`. A wrong formula has a 1-in-256 chance of passing
     /// that, and the cart boots.
     VfAdder(VfAdderState),
+    /// NT "new" board (taizou's hhugboy `MbcUnlNtNew`, CC0) — the split-window
+    /// successor to `NtOld1`/`NtOld2`. Electrically MBC5 until the cart arms it
+    /// by writing $55 to $1400 (decoded `addr & $FF00`, inside MBC5's
+    /// RAM-enable block, where $55 is a no-op for a real MBC5). From then on
+    /// the switchable area is two INDEPENDENT 8 KiB pages instead of one 16 KiB
+    /// bank: a write to $2000 (`addr & $FF00`) selects the page at $4000-$5FFF
+    /// and one to $2400 the page at $6000-$7FFF. Each page number is taken at
+    /// 8 KiB granularity (`page << 13`), wrapped to the ROM, and — mirroring
+    /// MBC5's "bank 0 reads as bank 1" — a result inside the first 16 KiB is
+    /// pushed up by 16 KiB, so pages 0 and 1 present pages 2 and 3.
+    ///
+    /// hhugboy implements this board but never auto-detects it (it is a manual
+    /// menu pick), so the detection here is our own; see
+    /// `NTNEW_SPLIT_STUB_CRC32`.
+    NtNew(NtNewState),
 }
+
+/// Split-window state of `UnlMapper::NtNew`, carried inside the enum variant
+/// (not as `Cartridge` fields) so every other cart's bincode savestate layout
+/// stays byte-identical. Power-on is un-armed and MBC5-compatible; the two page
+/// registers only matter once the cart writes the $1400 arming value, and it
+/// programs both before it reads either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct NtNewState {
+    /// Set by `$1400 <- $55`. While clear the board is a plain MBC5.
+    split: bool,
+    /// 8 KiB page mapped at $4000-$5FFF (written to $2000).
+    low: u8,
+    /// 8 KiB page mapped at $6000-$7FFF (written to $2400).
+    high: u8,
+}
+
+impl NtNewState {
+    /// Whether a $0000-$3FFF write belongs to the board rather than to the
+    /// MBC5 underneath it. Pure, so it can gate the write-path match arm.
+    fn claims(self, addr: u16, value: u8) -> bool {
+        let port = addr & 0xFF00;
+        (port == NTNEW_ARM_PORT && value == NTNEW_ARM_VALUE)
+            || (self.split && (port == NTNEW_LOW_PORT || port == NTNEW_HIGH_PORT))
+    }
+}
+
+/// NT "new" board ports, all decoded `addr & $FF00` (taizou's hhugboy
+/// `MbcUnlNtNew`): $1400 arms the split window when it is written the magic
+/// $55, after which $2000 and $2400 are the two 8 KiB page registers.
+const NTNEW_ARM_PORT: u16 = 0x1400;
+const NTNEW_ARM_VALUE: u8 = 0x55;
+const NTNEW_LOW_PORT: u16 = 0x2000;
+const NTNEW_HIGH_PORT: u16 = 0x2400;
+/// Page size of the `UnlMapper::NtNew` split windows (8 KiB, half of a normal
+/// ROM bank).
+const NTNEW_PAGE: usize = 0x2000;
+
+/// Window and CRC32 (reflected IEEE) of the NT "new" board driver, in the dead
+/// space between the interrupt vectors and the header. hhugboy ships the board
+/// but never auto-detects it (it is a manual menu pick), so this gate is ours.
+/// These 37 bytes are the cart's whole board sequence — `ld a,$55 /
+/// ld ($1400),a` to arm the split window, then the CGB double-speed / WRAM-bank
+/// init around the far-call into the split half — and are byte-identical in the
+/// two library images that carry them (Capcom vs SNK - Millennium Fight 2001
+/// and Yingxiong Tianxia, one engine). A library-wide scan of all 3973 GB/GBC
+/// images finds this hash in exactly those two and nothing else; a scan for the
+/// bare arming write finds two more that must NOT take the board (Jieba
+/// Tianwang 4 arms it but also speaks the `Vf8k` $7000 handshake and already
+/// boots there; Super Color 26-in-1 merely embeds Jieba's engine inside a
+/// plain-MBC5 multicart that 8 KiB windows would break), which is why the gate
+/// is the driver hash and not the arming write. Keyed on the hash rather than
+/// the bytes so the first-party regression ROM can carry a clean-room block,
+/// the same basis as `NEWGBHK_STUB_CRC32`.
+const NTNEW_STUB_OFFSET: usize = 0x00B9;
+const NTNEW_STUB_LEN: usize = 37;
+const NTNEW_STUB_CRC32: u32 = 0x24FD_EE7B;
 
 /// Bank registers of `UnlMapper::XploderGb`, carried inside the enum variant
 /// (not as `Cartridge` fields) so every other cart's bincode savestate layout
@@ -1551,6 +1622,9 @@ impl Cartridge {
             UnlMapper::ActionReplayV4(_) => UnlMapper::ActionReplayV4(ArV4State::default()),
             // The Xploder's two bank registers are volatile board logic.
             UnlMapper::XploderGb(_) => UnlMapper::XploderGb(XploderState::default()),
+            // NT "new": the split latch and both page registers are volatile;
+            // power up un-armed, i.e. as a plain MBC5.
+            UnlMapper::NtNew(_) => UnlMapper::NtNew(NtNewState::default()),
             other => other,
         };
         Cartridge {
@@ -1798,6 +1872,12 @@ impl Cartridge {
             // The adder-protection board is electrically a stock
             // MBC5+RAM+BATTERY and its header type ($1B) is truthful.
             UnlMapper::VfAdder(_) => {}
+            // NT "new": electrically MBC5, and the one cart detected here
+            // declares $19 truthfully, so the header decode below is correct.
+            // (hhugboy forces 32 KiB of battery RAM onto everything it routes
+            // to this board because some of them under-declare it; that is a
+            // save-support guess, not a boot requirement, so it is not copied.)
+            UnlMapper::NtNew(_) => {}
             // PKJD is electrically MBC3+TIMER+RAM+BATTERY and its header type
             // ($10) is truthful, so the header decode below is correct; the
             // D/E/F protection is applied in the read/write intercepts.
@@ -2722,6 +2802,15 @@ impl memory::Addressable for Cartridge {
                     return byte;
                 }
             }
+            // NT "new": once armed, the switchable area is two independent
+            // 8 KiB pages, so it cannot go through the 16 KiB `rom_bank_bases`
+            // path at all. Un-armed it falls through to the plain MBC5 arm.
+            UnlMapper::NtNew(st)
+                if st.split
+                    && (mmio::CARTRIDGE_BANK_START..=mmio::CARTRIDGE_BANK_END).contains(&addr) =>
+            {
+                return self.ntnew_read(*st, addr);
+            }
             // Adder protection: while the bank register is out of ROM range the
             // switchable window answers with the operand sum instead of ROM.
             UnlMapper::VfAdder(st)
@@ -3104,6 +3193,15 @@ impl memory::Addressable for Cartridge {
                 if matches!(self.unl_mapper, UnlMapper::Sintax(_)) =>
             {
                 self.sintax_write(addr, value);
+            }
+            // NT "new": the arming write sits inside MBC5's RAM-enable block and
+            // the two page registers inside its ROM-bank block. Only the writes
+            // the board actually claims are taken here; everything else falls
+            // through to the plain MBC5 arms below.
+            RAM_ENABLE_START..=ROM_BANK_SELECT_END
+                if matches!(self.unl_mapper, UnlMapper::NtNew(st) if st.claims(addr, value)) =>
+            {
+                self.ntnew_write(addr, value);
             }
             // HITEK (Vast Fame): the whole $0000-$7FFF register space follows
             // mGBA `_GBHitek` (the two swap-mode ports layered over MBC5 write
@@ -4275,6 +4373,93 @@ mod tests {
         rom[0x4096] = 0x5A;
         rom[0x5000] = 0x3C;
         rom
+    }
+
+    /// Clean-room stand-in for the NT "new" board driver at $00B9. Detection
+    /// keys ONLY on the 37-byte CRC32, never the bytes, so this is an ASCII
+    /// banner plus a 4-byte suffix computed to hit `NTNEW_STUB_CRC32` -- the
+    /// same block the first-party ROM carries, and no cartridge code.
+    const NTNEW_SIG: [u8; 37] = *b"RUSTYBOI NTNEW SPLIT CLEANROOM!!!\xA6\x85\x5F\xCF";
+
+    /// 128KB image carrying the NT "new" signature: a truthful MBC5 header of
+    /// the declared size (the detection requires the two to agree), the $00B9
+    /// driver whose CRC32 keys detection, and one marker per 8 KiB page so both
+    /// windows are independently observable.
+    fn make_ntnew_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x20000]; // 8 banks = 16 pages
+        rom[CARTRIDGE_TYPE_OFFSET] = MBC5;
+        rom[ROM_SIZE_OFFSET] = 0x02; // 128KB, matching the image
+        rom[NTNEW_STUB_OFFSET..NTNEW_STUB_OFFSET + NTNEW_STUB_LEN].copy_from_slice(&NTNEW_SIG);
+        for page in 0..16usize {
+            rom[page * NTNEW_PAGE] = 0xA0 | page as u8;
+        }
+        rom
+    }
+
+    #[test]
+    fn ntnew_detects_and_splits_the_switchable_window() {
+        let rom = make_ntnew_rom();
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::NtNew(NtNewState::default())
+        );
+        // Truthful MBC5 header: decode falls through to it.
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(
+            cart.get_cartridge_type(),
+            CartridgeType::MBC5 { ram: false, battery: false, rumble: false }
+        ));
+
+        // Un-armed the board is a plain MBC5: one 16 KiB bank register moves
+        // BOTH halves of the window together.
+        cart.write(0x2000, 0x02);
+        assert_eq!(cart.read(0x4000), 0xA4); // bank 2 = pages 4 and 5
+        assert_eq!(cart.read(0x6000), 0xA5);
+        cart.write(0x2400, 0x03); // still just the same bank register
+        assert_eq!(cart.read(0x4000), 0xA6);
+        assert_eq!(cart.read(0x6000), 0xA7);
+        // Only the exact $55 magic arms it.
+        cart.write(0x1400, 0x54);
+        cart.write(0x2400, 0x02);
+        assert_eq!(cart.read(0x4000), 0xA4);
+
+        // Armed: $2000 and $2400 are two independent 8 KiB page registers, and
+        // they can express a pair no 16 KiB bank register can (page 5 is the
+        // upper half of bank 2, page 6 the lower half of bank 3).
+        cart.write(0x1400, 0x55);
+        cart.write(0x2000, 0x05);
+        cart.write(0x2400, 0x06);
+        assert_eq!(cart.read(0x4000), 0xA5);
+        assert_eq!(cart.read(0x6000), 0xA6);
+        // Independence: moving one window leaves the other alone.
+        cart.write(0x2400, 0x0B);
+        assert_eq!(cart.read(0x4000), 0xA5);
+        assert_eq!(cart.read(0x6000), 0xAB);
+        // Pages 0 and 1 fold up by 16 KiB, mirroring MBC5's bank-0 remap.
+        cart.write(0x2000, 0x00);
+        cart.write(0x2400, 0x01);
+        assert_eq!(cart.read(0x4000), 0xA2);
+        assert_eq!(cart.read(0x6000), 0xA3);
+        // Page numbers wrap to the image (16 pages here), and the fixed bank is
+        // never affected.
+        cart.write(0x2000, 0x14); // 0x14 % 16 = 4
+        assert_eq!(cart.read(0x4000), 0xA4);
+        assert_eq!(cart.read(0x0000), 0xA0);
+    }
+
+    #[test]
+    fn ntnew_requires_a_self_consistent_image() {
+        // The board's page arithmetic addresses 8 KiB windows of the real ROM,
+        // so an image whose size disagrees with its own header is not routed
+        // here -- the guard that keeps the 2x-inflated Yingxiong Tianxia dump
+        // (which does not run under the board) on plain MBC5.
+        let mut rom = make_ntnew_rom();
+        rom[ROM_SIZE_OFFSET] = 0x03; // declares 256KB in a 128KB image
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+        // A one-byte perturbation of the driver also moves its CRC32.
+        let mut rom = make_ntnew_rom();
+        rom[NTNEW_STUB_OFFSET] ^= 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
     }
 
     #[test]

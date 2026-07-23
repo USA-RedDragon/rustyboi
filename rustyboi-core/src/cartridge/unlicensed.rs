@@ -296,6 +296,28 @@ impl Cartridge {
         // byte-identical "V.fame" logo behind a spoofed MBC1 header ($01) but
         // speaks the *challenge-response* dialect of the board, handled by the
         // `Vf001Zook` arm below.
+        // NT "new" split-window board (taizou's hhugboy `MbcUnlNtNew`, CC0),
+        // which hhugboy only offers as a manual menu pick. Keyed on the CRC32
+        // of the board driver the cart runs out of the interrupt-vector dead
+        // space (see `NTNEW_STUB_CRC32` for why the arming write alone is not a
+        // safe gate), the MBC5-family header the board declares truthfully, and
+        // a self-consistent image: the board's page numbers address 8 KiB
+        // windows of the real ROM, so an image whose size disagrees with its own
+        // header cannot be mapped through it. That guard also excludes the one
+        // other image carrying this driver -- Yingxiong Tianxia, a 2x-inflated
+        // dump (128 banks, 64 distinct, every odd bank a byte-copy of the even
+        // one before it, declaring 1 MiB in a 2 MiB file) which was verified NOT
+        // to run under the board, de-duplicated or not.
+        if data.len() > super::NTNEW_STUB_OFFSET + super::NTNEW_STUB_LEN
+            && crate::checksum::crc32(
+                &data[super::NTNEW_STUB_OFFSET..super::NTNEW_STUB_OFFSET + super::NTNEW_STUB_LEN],
+            ) == super::NTNEW_STUB_CRC32
+            && matches!(data[CARTRIDGE_TYPE_OFFSET], 0x19..=0x1E)
+            && data.len() == claimed_size
+        {
+            return UnlMapper::NtNew(NtNewState::default());
+        }
+
         // Gedou Jian Shen KF: same board and same "SOUL" $0184 logo as the Soul
         // Falchion trio, but wired for the VF001A config seed ($10). Keyed on the
         // exact dump because the logo CRC32 and the title are shared with the
@@ -824,6 +846,37 @@ impl Cartridge {
                 st.high = value;
             }
         }
+    }
+
+    /// NT "new" board register write (taizou's hhugboy `MbcUnlNtNew`, CC0).
+    /// Only reached for the writes `NtNewState::claims` accepts: $1400 with the
+    /// magic $55 arms the split window, and once armed $2000/$2400 program the
+    /// two 8 KiB pages. Every other write in the block goes to the MBC5 under
+    /// the board.
+    pub(super) fn ntnew_write(&mut self, addr: u16, value: u8) {
+        if let UnlMapper::NtNew(ref mut st) = self.unl_mapper {
+            match addr & 0xFF00 {
+                super::NTNEW_ARM_PORT => st.split = true,
+                super::NTNEW_LOW_PORT => st.low = value,
+                _ => st.high = value,
+            }
+        }
+    }
+
+    /// NT "new" split-window ROM read ($4000-$7FFF), only reached while the
+    /// board is armed. Each half of the window is an independent 8 KiB page:
+    /// the page number is taken at 8 KiB granularity, wrapped to the ROM, and —
+    /// mirroring MBC5's "bank 0 reads as bank 1" — a result that lands inside
+    /// the first 16 KiB is pushed up by 16 KiB, so pages 0 and 1 present pages
+    /// 2 and 3.
+    pub(super) fn ntnew_read(&self, st: NtNewState, addr: u16) -> u8 {
+        let page = if addr < 0x6000 { st.low } else { st.high };
+        let pages = (self.rom_data.len() / NTNEW_PAGE).max(1);
+        let mut base = (page as usize % pages) * NTNEW_PAGE;
+        if base < 0x4000 {
+            base += 0x4000;
+        }
+        self.rom_data.get(base + (addr as usize & (NTNEW_PAGE - 1))).copied().unwrap_or(0xFF)
     }
 
     /// Action Replay V4 cart-window write ($0000-$7FFF). $6000-$7FFF is the

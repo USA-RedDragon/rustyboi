@@ -278,6 +278,12 @@ impl Mapper {
             // UnlMapper payload and the intercepts read the bank register off
             // the real `Mapper::Mbc5`, so fall through to the header.
             UnlMapper::VfAdder(_) => {}
+            // NT "new": a stock MBC5 board until the $1400 arming write; the
+            // split-window page registers live in the `UnlMapper::NtNew`
+            // payload and $4000-$7FFF is served by the read intercept, so the
+            // board here only has to provide MBC5's RAM-enable / RAM-bank
+            // registers. Fall through to the header type.
+            UnlMapper::NtNew(_) => {}
             // PKJD is electrically MBC3+TIMER+RAM+BATTERY (its header type $10 is
             // truthful); the D/E/F protection state lives in the
             // UnlMapper::PokeJadeDia payload and is applied by the $4000-$5FFF /
