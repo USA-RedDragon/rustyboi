@@ -141,7 +141,7 @@ JOBS="$RB_JOBS"
 # which is the /bin/bash that GitHub's macOS runners ship.
 threshold() {
     case "$1" in
-        rustyboi)           echo "52 20" ;;  # first-party RGBDS ROMs (test-roms/); png ROMs settle in <20 frames (mooneye ROMs run to their own done-marker budget, so the SGB ROMs' ~50-frame waits are unaffected)
+        rustyboi)           echo "53 20" ;;  # first-party RGBDS ROMs (test-roms/); png ROMs settle in <20 frames (mooneye ROMs run to their own done-marker budget, so the SGB ROMs' ~50-frame waits are unaffected)
         acid2)              echo "3 -" ;;
         cgb_acid_hell)      echo "1 -" ;;
         mealybug)           echo "51 -" ;;
