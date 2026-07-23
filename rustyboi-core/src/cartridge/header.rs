@@ -63,6 +63,13 @@ pub(super) const MBC5_RUMBLE: u8 = 0x1C;
 pub(super) const MBC5_RUMBLE_RAM: u8 = 0x1D;
 pub(super) const MBC5_RUMBLE_RAM_BATTERY: u8 = 0x1E;
 
+// MBC6: the one-off Mobile Adapter board ("Net de Get - Minigame @ 100"). Two
+// independent 8 KiB ROM/flash windows, two independent 4 KiB SRAM windows, and
+// a 1 MiB flash chip the game downloads minigames into. The type byte carries
+// no suffix (like POCKET CAMERA and TAMA5) but the board does have SRAM and a
+// battery. See `mbc6.rs`.
+pub(super) const MBC6: u8 = 0x20;
+
 // MBC7+SENSOR+RUMBLE+RAM+BATTERY (Kirby Tilt 'n' Tumble, Command Master).
 // The "RAM" is a 93LC56 serial EEPROM (256 bytes) and the sensor is a 2-axis
 // ADXL202E accelerometer; despite the official type name no MBC7 cart has a
@@ -98,9 +105,9 @@ pub(super) const POCKET_CAMERA: u8 = 0xFC;
 pub(super) const TAMA5: u8 = 0xFD;
 
 /// Whether `$0147` holds a value the Pan Docs cartridge-type table defines,
-/// implemented or not (MMM01 $0B-$0D, MBC6 $20 and TAMA5 $FD are listed here
-/// even though rustyboi has no board for them — the byte still names a real
-/// board, so it is not evidence of a garbage header).
+/// implemented or not (MMM01 $0B-$0D is listed here even though rustyboi has no
+/// board for it — the byte still names a real board, so it is not evidence of a
+/// garbage header).
 ///
 /// Anything outside this set is not a cartridge type at all: the header was
 /// never finalized, or game data/title text overran the field (the usual case
@@ -129,6 +136,9 @@ pub(super) fn header_type_has_external_ram(cartridge_type: u8) -> bool {
         | 0x0C | 0x0D // MMM01+RAM, MMM01+RAM+BATTERY
         | MBC3_TIMER_RAM_BATTERY | MBC3_RAM | MBC3_RAM_BATTERY
         | MBC5_RAM | MBC5_RAM_BATTERY | MBC5_RUMBLE_RAM | MBC5_RUMBLE_RAM_BATTERY
+        // MBC6's suffix-less type byte still names a board with a 32 KiB SRAM
+        // chip in the window (two 4 KiB halves x 8 banks).
+        | MBC6
         | HUC3 | HUC1_RAM_BATTERY)
 }
 

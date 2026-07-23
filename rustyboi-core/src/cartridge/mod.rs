@@ -31,6 +31,7 @@ mod mbc1;
 mod mbc2;
 mod mbc3;
 mod mbc5;
+mod mbc6;
 mod huc1;
 mod nombc;
 mod tama5;
@@ -1036,6 +1037,9 @@ pub(crate) enum CartridgeType {
     MBC2 { battery: bool },
     MBC3 { ram: bool, battery: bool, timer: bool },
     MBC5 { ram: bool, battery: bool, rumble: bool },
+    /// MBC6 ($20): split 8 KiB ROM / 4 KiB RAM windows plus an on-cart flash
+    /// chip (implies RAM+BATTERY). Only "Net de Get - Minigame @ 100" uses it.
+    MBC6,
     MBC7,
     HuC1,
     HuC3,
@@ -1821,6 +1825,7 @@ impl Cartridge {
             MBC5_RUMBLE => CartridgeType::MBC5 { ram: false, battery: false, rumble: true },
             MBC5_RUMBLE_RAM => CartridgeType::MBC5 { ram: true, battery: false, rumble: true },
             MBC5_RUMBLE_RAM_BATTERY => CartridgeType::MBC5 { ram: true, battery: true, rumble: true },
+            MBC6 => CartridgeType::MBC6,
             MBC7_SENSOR_RUMBLE_RAM_BATTERY => CartridgeType::MBC7,
             HUC1_RAM_BATTERY => CartridgeType::HuC1,
             HUC3 => CartridgeType::HuC3,
@@ -1870,6 +1875,7 @@ impl Cartridge {
             Mapper::Mbc2(m) => m.ram_enabled,
             Mapper::Mbc3(m) => m.ram_enabled,
             Mapper::Mbc5(m) => m.ram_enabled,
+            Mapper::Mbc6(m) => m.state.ram_enabled,
             Mapper::Mbc7(m) => m.ram_enabled,
             Mapper::Camera(m) => m.ram_enabled,
             Mapper::NtOld(m) => m.ram_enabled,
@@ -1916,6 +1922,16 @@ impl Cartridge {
     #[inline]
     pub fn rom_bases(&self) -> (usize, usize) {
         self.rom_bank_bases()
+    }
+
+    /// Whether $4000-$7FFF is two independently banked 8 KiB halves rather than
+    /// one 16 KiB bank. Only MBC6 is built that way among the licensed boards,
+    /// and its halves can also be showing flash instead of ROM, so no single
+    /// `rom_bases().1` describes the window and the passive-read page table
+    /// must not flat-map it.
+    #[inline]
+    pub fn has_split_rom_window(&self) -> bool {
+        matches!(self.mapper, Mapper::Mbc6(_))
     }
 
     /// Bounds-checked raw ROM byte (open-bus 0xFF past the image), mirroring
@@ -2136,7 +2152,10 @@ impl Cartridge {
             // CAMERA ($FC) implies RAM+BATTERY (the photo album).
             // TAMA5 ($FD) implies RAM+BATTERY+RTC (the TAMA6 keeps the pet
             // alive with the machine off).
-            CartridgeType::MBC7
+            // MBC6 ($20) carries a battery-backed 32 KiB SRAM alongside the
+            // flash (the flash keeps downloads, the SRAM keeps saves).
+            CartridgeType::MBC6
+            | CartridgeType::MBC7
             | CartridgeType::HuC1
             | CartridgeType::HuC3
             | CartridgeType::PocketCamera
@@ -2211,6 +2230,7 @@ impl Cartridge {
                 (true, false) => "MBC5+RAM",
                 _ => "MBC5",
             },
+            MBC6 => "MBC6+RAM+Battery+Flash",
             MBC7 => "MBC7+Sensor+Rumble+RAM+Battery",
             HuC1 => "HuC1+RAM+Battery",
             HuC3 => "HuC3+RTC+RAM+Battery",
@@ -2719,6 +2739,12 @@ impl memory::Addressable for Cartridge {
             }
             // ROM Bank 1-N (switchable)
             mmio::CARTRIDGE_BANK_START..=mmio::CARTRIDGE_BANK_END => {
+                // MBC6 splits this window into two independently banked 8 KiB
+                // halves, either of which can be showing the flash chip, so it
+                // cannot go through the single 16 KiB base at all.
+                if let Mapper::Mbc6(m) = &self.mapper {
+                    return self.mbc6_rom_read(&m.state, addr);
+                }
                 let offset =
                     (addr - mmio::CARTRIDGE_BANK_START) as usize + self.rom_bank_bases().1;
                 let byte = if offset < self.rom_data.len() {
@@ -2968,6 +2994,9 @@ impl memory::Addressable for Cartridge {
                     }
                     // TAMA5 exposes its whole register file here, not RAM.
                     Mapper::Tama5(m) => self.tama5_read(addr, &m.state),
+                    // MBC6 banks the two 4 KiB halves of this window
+                    // independently, so it cannot use `banked_ram_offset`.
+                    Mapper::Mbc6(m) => self.mbc6_ram_read(&m.state, addr),
                     Mapper::NoMbc(_) => {
                         // Pan Docs "No MBC": optional RAM (up to 8KB) is wired
                         // straight through at A000-BFFF -- no banking, no
@@ -3022,6 +3051,13 @@ impl memory::Addressable for Cartridge {
                         m.rom_bank_low = (value & 0x0F).max(1);
                     }
                 }
+            }
+            // MBC6: its register file is decoded at 1 KiB granularity and does
+            // not line up with any other board's quarters, and $4000-$7FFF is
+            // the flash chip's own command bus rather than dead ROM space, so
+            // the whole cart window is intercepted before the generic arms.
+            RAM_ENABLE_START..=BANKING_MODE_END if matches!(self.mapper, Mapper::Mbc6(_)) => {
+                self.mbc6_write(addr, value);
             }
             // Wisdom Tree: a single '377 latch loaded from the ADDRESS lines on
             // any $0000-$3FFF write; the data byte is ignored (bank = addr & 0x3F).
@@ -3355,6 +3391,7 @@ impl memory::Addressable for Cartridge {
                     Camera(bool, bool),
                     HuC3(u8),
                     Tama5,
+                    Mbc6,
                     Unbanked,
                     Nt(bool),
                     None,
@@ -3378,6 +3415,7 @@ impl memory::Addressable for Cartridge {
                     }
                     Mapper::HuC3(m) => Ext::HuC3(m.state.mode),
                     Mapper::Tama5(_) => Ext::Tama5,
+                    Mapper::Mbc6(_) => Ext::Mbc6,
                     Mapper::NoMbc(_) | Mapper::Rocket(_) | Mapper::Sachen(_) => Ext::Unbanked,
                     Mapper::NtOld(m) => Ext::Nt(m.ram_enabled),
                     _ => Ext::None,
@@ -3476,6 +3514,7 @@ impl memory::Addressable for Cartridge {
                     // TAMA5's register-file protocol (the board's only write
                     // port; it has none in $0000-$7FFF).
                     Ext::Tama5 => self.tama5_write(addr, value),
+                    Ext::Mbc6 => self.mbc6_ram_write(addr, value),
                     // NoMBC / Rocket / Sachen: straight-through, ungated.
                     Ext::Unbanked => {
                         if let Some(offset) = self.unbanked_ram_offset(addr) {
@@ -4617,20 +4656,23 @@ mod tests {
         assert!(matches!(cart.get_cartridge_type(), CartridgeType::NoMBC { .. }));
 
         // Documented-but-unimplemented types are NOT inferred, however large:
-        // the byte names a real board (MMM01/MBC6), so it is evidence about the
-        // cart rather than evidence the header is garbage.
-        for ty in [0x0B, 0x20] {
-            let mut rom = make_sized_rom(ty, 0x00, 0x10000);
-            rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
-            let cart = Cartridge::from_bytes(&rom).unwrap();
-            assert!(
-                matches!(cart.get_cartridge_type(), CartridgeType::NoMBC { .. }),
-                "type {ty:#04x} must not be inferred"
-            );
-        }
+        // $0B names a real board (MMM01), so it is evidence about the cart
+        // rather than evidence the header is garbage.
+        let mut rom = make_sized_rom(0x0B, 0x00, 0x10000);
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(
+            matches!(cart.get_cartridge_type(), CartridgeType::NoMBC { .. }),
+            "MMM01 ($0B) must not be inferred"
+        );
 
-        // TAMA5 ($FD) is documented AND implemented, so it decodes to its own
-        // board -- the inference must not divert it to MBC1 either.
+        // MBC6 ($20) and TAMA5 ($FD) are documented AND implemented, so they
+        // decode to their own boards -- the inference must not divert them to
+        // MBC1 either.
+        let mut rom = make_sized_rom(MBC6, 0x00, 0x10000);
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(cart.get_cartridge_type(), CartridgeType::MBC6));
         let mut rom = make_sized_rom(TAMA5, 0x00, 0x10000);
         rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
         let cart = Cartridge::from_bytes(&rom).unwrap();

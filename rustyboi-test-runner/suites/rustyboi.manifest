@@ -30,6 +30,7 @@ cartridge-ggb81_banking-cgb|cgb|mooneye|test-roms/build/cartridge/ggb81_banking.
 cartridge-gowin_banking-dmg|dmg|mooneye|test-roms/build/cartridge/gowin_banking.dmg.mooneye.gb
 cartridge-hitek_banking-cgb|cgb|mooneye|test-roms/build/cartridge/hitek_banking.cgb.mooneye.gbc
 cartridge-licheng_banking-cgb|cgb|mooneye|test-roms/build/cartridge/licheng_banking.cgb.mooneye.gbc
+cartridge-mbc6_split_windows-cgb|cgb|mooneye|test-roms/build/cartridge/mbc6_split_windows.cgb.mooneye.gbc
 cartridge-newgbhk_protection-cgb|cgb|mooneye|test-roms/build/cartridge/newgbhk_protection.cgb.mooneye.gbc
 cartridge-pocketmon_mbc5_banking-dmg|dmg|mooneye|test-roms/build/cartridge/pocketmon_mbc5_banking.dmg.mooneye.gb
 cartridge-pokejadedia_protection-dmg|dmg|mooneye|test-roms/build/cartridge/pokejadedia_protection.dmg.mooneye.gb

@@ -1673,6 +1673,7 @@ impl Mmio {
         let mut pages = [PassivePage::Fallback; 16];
         if let Some(cart) = &self.cartridge
             && !cart.is_unlicensed()
+            && !cart.has_split_rom_window()
             && !self.bios_mapped()
         {
             let (b0, bn) = cart.rom_bases();
