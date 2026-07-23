@@ -5,6 +5,7 @@ mod fifo;
 mod frame_out;
 mod hdma;
 mod lcdc;
+mod modes;
 mod reads;
 mod reg_writes;
 mod stat_engine;
