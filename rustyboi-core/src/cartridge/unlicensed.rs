@@ -302,6 +302,28 @@ impl Cartridge {
             return UnlMapper::Vf001Gen(Box::default());
         }
 
+        // Same board, "VF001A" wiring (Sanguozhi - Aoshi Tianxia): the config
+        // accumulator restarts from $10 instead of $00. This image carries no
+        // "V.fame" logo -- its $0184 is the `jp $0200` entry trampoline -- so
+        // the arm above cannot see it; detection keys on the CRC32 of the
+        // 46-byte config driver at $0257, which is protection-specific code no
+        // other cart in the library carries, plus the MBC5-family header the
+        // board truthfully declares. Without the $10 seed the cart's config
+        // stream decodes to a zero-length injection and a disabled bank-0
+        // replacement, and the boot dead-ends at $0121 with the LCD off.
+        if data.len() > super::VF001A_STUB_OFFSET + super::VF001A_STUB_LEN
+            && crate::checksum::crc32(
+                &data[super::VF001A_STUB_OFFSET
+                    ..super::VF001A_STUB_OFFSET + super::VF001A_STUB_LEN],
+            ) == super::VF001A_STUB_CRC32
+            && matches!(data[CARTRIDGE_TYPE_OFFSET], 0x19..=0x1E)
+        {
+            return UnlMapper::Vf001Gen(Box::new(Vf001gState {
+                config_seed: super::VF001A_CONFIG_SEED,
+                ..Default::default()
+            }));
+        }
+
         // Vast Fame VF001 challenge-response dialect (Zook Z). Same "V.fame"
         // $0184 logo as the Vf001Gen arm above, but the cart drives the board
         // through the two protection thunks at $3ED9/$3EF5 -- `ld hl,$7081`,
@@ -585,7 +607,7 @@ impl Cartridge {
         let eff = addr & 0xF00F;
         if eff == 0x7000 && data == 0x96 {
             st.config_mode = true;
-            st.running_value = 0; // config seed 0 (0x10 is the VF001A variant)
+            st.running_value = st.config_seed;
             return;
         }
         if eff == 0x700F && data == 0x96 {

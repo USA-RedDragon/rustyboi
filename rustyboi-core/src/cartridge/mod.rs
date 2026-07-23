@@ -238,6 +238,31 @@ const BBD_BANK_REORDERING: [[u8; 8]; 8] = [
     [0, 1, 2, 3, 4, 5, 6, 7], // 07 - unknown
 ];
 
+/// Window and CRC32 (reflected IEEE) of the VF001A config stub in Sanguozhi -
+/// Aoshi Tianxia (Taiwan). Unlike every other VF001 cart this image has no
+/// "V.fame" secondary logo at $0184 -- those bytes are the entry trampoline
+/// (`jp $0200`) -- so there is nothing for the `VF001G_LOGO_CRC32` arm to
+/// match on. These 46 bytes at $0257 are the board's config driver and nothing
+/// else: they synthesise $7000 from `$7A and $F0`, open config mode with
+/// `ld (hl),$96`, walk $700A..$7000 downwards writing the config stream with
+/// `dec l / ld (hl),n`, dip to $6000 via `sub $10` on H, then activate at
+/// $7008 and close at $700F. No other cart in the library carries them.
+/// Keyed on the hash rather than the bytes so a first-party regression ROM can
+/// carry a clean-room block, the same basis as `NEWGBHK_STUB_CRC32`.
+const VF001A_STUB_OFFSET: usize = 0x0257;
+const VF001A_STUB_LEN: usize = 46;
+const VF001A_STUB_CRC32: u32 = 0xCEC2_1544;
+
+/// The VF001A board's config-accumulator seed (hhugboy `mbcConfig[0]` for
+/// `UNL_VF001A`, which it only offers as a manual menu choice). Derived
+/// independently here: of all 256 possible seeds, $10 is the ONLY one under
+/// which the cart's own config stream both activates its two effects AND is
+/// self-consistent -- the 3 bytes it programs for injection decode to
+/// `ld de,$358C`, and $358C is exactly the bank-0 replacement start address the
+/// same stream computes. Every other seed that enables both effects programs an
+/// injection pointing somewhere else.
+const VF001A_CONFIG_SEED: u8 = 0x10;
+
 /// Window and CRC32 (reflected IEEE) of the Dragon Ball - Final Bout protection
 /// thunk (`UnlMapper::VfAdder`). Those 40 bytes at $3F50 are the entire
 /// protocol — park the ROM-bank register out of range at $C0/$80, push the two
@@ -922,9 +947,15 @@ pub struct Vf001gState {
     /// Config mode gate: opened by writing $96 to $7000, closed by $96 to $700F.
     config_mode: bool,
     /// Rotate-right-then-XOR running accumulator applied to every known config
-    /// write while `config_mode`. Seeded from the per-cart config byte (0 for
-    /// the auto-detected VF001 carts) on each enable.
+    /// write while `config_mode`. Seeded from `config_seed` on each enable.
     running_value: u8,
+    /// The board's per-cart config byte, the seed the accumulator restarts from
+    /// (hhugboy `mbcConfig[0]`). $00 for the plain VF001 boards; $10 selects
+    /// taizou's `UNL_VF001A` variant, which hhugboy only exposes as a manual
+    /// menu choice. Part of the cart's identity rather than volatile state, so
+    /// it survives `power_on` -- it is a wiring option on the board, not a
+    /// register.
+    config_seed: u8,
     /// Latched accumulator for the $6000 port (bank-0 replacement source bank).
     cur6000: u8,
     /// Latched accumulator per $700x port ($7000-$700E).
@@ -1483,8 +1514,12 @@ impl Cartridge {
             // The 8 KiB window registers are volatile; power up on bank 1.
             UnlMapper::Vf8k(_) => UnlMapper::Vf8k(Vf8kState::default()),
             // General VF001's config register file + latched protection
-            // effects are volatile; power up with the config gate closed.
-            UnlMapper::Vf001Gen(_) => UnlMapper::Vf001Gen(Box::default()),
+            // effects are volatile; power up with the config gate closed. The
+            // config seed is board wiring, not state, so it is carried over.
+            UnlMapper::Vf001Gen(st) => UnlMapper::Vf001Gen(Box::new(Vf001gState {
+                config_seed: st.config_seed,
+                ..Default::default()
+            })),
             // Zook Z's protection port is a shift register; power up empty.
             UnlMapper::Vf001Zook(_) => UnlMapper::Vf001Zook(Box::default()),
             // PKJD's three protection registers are volatile; power up at 0.
@@ -3763,6 +3798,48 @@ mod tests {
         rom
     }
 
+    /// Clean-room 46-byte stand-in for the VF001A config stub at $0257: an
+    /// ASCII banner (42 bytes) plus a 4-byte suffix computed so the block's
+    /// CRC32 equals `VF001A_STUB_CRC32`. No cartridge code is embedded.
+    const VF001A_STUB_STANDIN: [u8; 46] = [
+        0x52, 0x55, 0x53, 0x54, 0x59, 0x42, 0x4F, 0x49, 0x20, 0x56, 0x46, 0x30, 0x30, 0x31, 0x41,
+        0x20, 0x43, 0x4F, 0x4E, 0x46, 0x49, 0x47, 0x20, 0x53, 0x54, 0x55, 0x42, 0x20, 0x43, 0x4C,
+        0x45, 0x41, 0x4E, 0x52, 0x4F, 0x4F, 0x4D, 0x20, 0x53, 0x49, 0x47, 0x21, 0x03, 0x12, 0xC5,
+        0x48,
+    ];
+
+    #[test]
+    fn vf001a_stub_selects_the_config_seed() {
+        // Sanguozhi - Aoshi Tianxia has no "V.fame" logo at $0184 (those bytes
+        // are its `jp $0200` entry trampoline), so the VF001 arm cannot see it;
+        // the $0257 config-driver CRC32 is the gate, and it selects the $10
+        // accumulator seed rather than the plain board's $00.
+        let mut rom = vec![0u8; 0x8000];
+        rom[CARTRIDGE_TYPE_OFFSET] = MBC5_RAM_BATTERY;
+        rom[VF001A_STUB_OFFSET..VF001A_STUB_OFFSET + VF001A_STUB_LEN]
+            .copy_from_slice(&VF001A_STUB_STANDIN);
+        assert_eq!(
+            crate::checksum::crc32(&rom[VF001A_STUB_OFFSET..VF001A_STUB_OFFSET + VF001A_STUB_LEN]),
+            VF001A_STUB_CRC32
+        );
+        let want = UnlMapper::Vf001Gen(Box::new(Vf001gState {
+            config_seed: VF001A_CONFIG_SEED,
+            ..Default::default()
+        }));
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), want);
+
+        // A one-byte perturbation of the stub moves its CRC32 -> no match, and
+        // (with no VF001 logo either) the image is left as a plain MBC5.
+        rom[VF001A_STUB_OFFSET] ^= 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+
+        // A plain VF001 cart (matched by its $0184 logo) keeps the $00 seed.
+        let mut plain = vec![0u8; 0x8000];
+        plain[CARTRIDGE_TYPE_OFFSET] = MBC5_RAM_BATTERY;
+        plain[0x184..0x1B4].copy_from_slice(&VF001G_LOGO);
+        assert_eq!(Cartridge::detect_unl_mapper(&plain), UnlMapper::Vf001Gen(Box::default()));
+    }
+
     #[test]
     fn vf001_behind_ggb81_logo_routes_to_vf001gen() {
         // The two dumps that wear a GGB81 $0184 logo but drive the VF001 $7000
@@ -4385,8 +4462,8 @@ mod tests {
         let vf = bincode::serialize(&UnlMapper::Vf001Gen(Box::default())).unwrap().len();
         assert_eq!(
             vf - none,
-            30,
-            "the 30-byte register file must be paid for by VF001 carts alone"
+            31,
+            "the 31-byte register file must be paid for by VF001 carts alone"
         );
     }
 
