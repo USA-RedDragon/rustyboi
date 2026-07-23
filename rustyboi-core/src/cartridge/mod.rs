@@ -884,6 +884,31 @@ const NTNEW_MAKON_UNLOCK: [u8; 20] = [
     0x0A, 0xEA, 0x00, 0x00,
 ];
 
+/// Whole-ROM CRC32 (reflected IEEE) of the Makon Soft NT "new" carts that arm
+/// the split window with the bare `$1400 <- $55` write and no unlock preamble
+/// at all — the eight 512 KiB Pokemon bootlegs whose boot never sends the
+/// `NTNEW_MAKON_UNLOCK` strobe above and never contains the arming write as
+/// literal bytes (the $55 is computed at run time), so neither the unlock scan
+/// nor a bare-arm byte scan can see them. They run correctly on the same board
+/// as their unlock-carrying siblings (verified: each reaches its Pokedex /
+/// intro screens under `UnlMapper::NtNew`).
+///
+/// Keyed on the exact whole-ROM CRC32 rather than the shared 48-byte $0184
+/// Makon logo because that logo is NOT a safe discriminator here: three of the
+/// four logos are shared with sibling dumps that must NOT take this board —
+/// notably Pokemon Adventure (whole CRC 8EDB9EB7, the same $0184 logo 7C4DCC97
+/// as Gold Version 2), which sends a `$7000` strobe plus `$4000` mode writes
+/// and hangs in WRAM ($C0EC) under the split window. The exact-CRC list is the
+/// false-positive-proof gate for signatures like these.
+/// Order in the list: Pokemon Diamond (En), Pokemon Diamond (Zh), Pokemon Gold
+/// Version 2, Pokemon Jade (Zh), Pokemon - Mewtwo Strikes Back (En), Pokemon -
+/// Mewtwo Strikes Back (Zh), Pokemon - La Version Esmeralda, Pokemon Jade
+/// Version - Special Pikachu Edition (USA).
+const NTNEW_MAKON_ROM_CRC32: [u32; 8] = [
+    0x1B5B_EF4B, 0x7309_551A, 0x5EAB_2B1E, 0xB9FF_D78C, 0x6E44_7A33, 0x2930_FA45, 0x0D00_9399,
+    0xE948_8E13,
+];
+
 /// Bank registers of `UnlMapper::XploderGb`, carried inside the enum variant
 /// (not as `Cartridge` fields) so every other cart's bincode savestate layout
 /// stays byte-identical. Power-on bank 1 / RAM bank 0 matches a stock cart;
@@ -4523,6 +4548,37 @@ mod tests {
         both[CARTRIDGE_TYPE_OFFSET] = MBC1;
         both[0x184..0x1B4].copy_from_slice(&LICHENG_LOGO);
         assert_eq!(Cartridge::detect_unl_mapper(&both), UnlMapper::LiCheng);
+    }
+
+    #[test]
+    fn ntnew_claims_the_unlockless_makon_pokemon_by_whole_rom_crc() {
+        // The eight Makon Pokemon dumps that arm the split window with the bare
+        // $1400<-$55 write and no unlock strobe are routed by exact whole-ROM
+        // CRC32. Build 32 KiB images whose CRC32 equals each real dump via a
+        // 4-byte forged tail; the rule keys purely on that whole-ROM CRC.
+        for (crc, tail) in [
+            (0x1B5B_EF4Bu32, [0x76, 0x6B, 0xA7, 0xD1]),
+            (0x7309_551A, [0xD8, 0xD0, 0x18, 0x07]),
+            (0x5EAB_2B1E, [0x91, 0x24, 0xB1, 0x42]),
+            (0xB9FF_D78C, [0xFA, 0x4D, 0xE0, 0x01]),
+            (0x6E44_7A33, [0x60, 0x81, 0xD4, 0x31]),
+            (0x2930_FA45, [0x16, 0xE0, 0x50, 0xE2]),
+            (0x0D00_9399, [0x0D, 0x8F, 0x10, 0x78]),
+            (0xE948_8E13, [0x64, 0xC6, 0x65, 0xA4]),
+        ] {
+            let mut rom = vec![0u8; 0x8000];
+            rom[0x7FFC..0x8000].copy_from_slice(&tail);
+            assert_eq!(crate::checksum::crc32(&rom), crc);
+            assert_eq!(
+                Cartridge::detect_unl_mapper(&rom),
+                UnlMapper::NtNew(NtNewState::default()),
+                "crc {crc:#010X}"
+            );
+            // Any other ROM (a one-byte change moves the CRC) is untouched.
+            rom[0x100] ^= 0x01;
+            assert_ne!(crate::checksum::crc32(&rom), crc);
+            assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+        }
     }
 
     #[test]

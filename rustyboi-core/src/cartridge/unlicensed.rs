@@ -239,6 +239,17 @@ impl Cartridge {
             return UnlMapper::NtNew(NtNewState::default());
         }
 
+        // The unlock-less Makon NT "new" carts: same split-window board, but the
+        // boot arms it with the bare $1400 <- $55 write (no $7000/$B200/$B600
+        // strobe) and computes the $55 at run time, so neither the unlock scan
+        // above nor a bare-arm byte scan can see them. Their shared $0184 Makon
+        // logos are NOT a safe gate (a sibling that hangs under the board carries
+        // one of the same four logos), so this keys on the exact whole-ROM CRC32
+        // of the eight verified dumps. See `NTNEW_MAKON_ROM_CRC32`.
+        if super::NTNEW_MAKON_ROM_CRC32.contains(&rom_crc32) {
+            return UnlMapper::NtNew(NtNewState::default());
+        }
+
         // BBD (Vast Fame family): keyed on the CRC32 of the 48-byte $0184
         // secondary logo (mGBA `_detectUnlMBC`), gated on $7FFF != $01. A
         // matching $7FFF marks a cracked/decrypted dump that already runs as a
