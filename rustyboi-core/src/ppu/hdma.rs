@@ -12,7 +12,7 @@ impl Ppu {
         if self.disabled {
             return None;
         }
-        let m0 = self.scheduled_mode0_dot? as i128;
+        let m0 = self.m0.scheduled_mode0_dot? as i128;
         let ly = self.internal_ly_val;
         if ly >= 144 {
             return Some(false);
@@ -62,7 +62,7 @@ impl Ppu {
     /// (the live `hdma_block_done_this_period` flag is reset too early by the per-dot
     /// period falling edge — see `Mmio::on_cpu_halt_with_period_done`).
     pub(crate) fn m0_time_master_cc(&self) -> Option<u64> {
-        self.m0_time_master
+        self.m0.m0_time_master
     }
 
     /// As `hdma_period_unhalt`, with the line-END (drop) bracket widened by
@@ -88,7 +88,7 @@ impl Ppu {
         if self.internal_ly_val >= 144 {
             return Some(false);
         }
-        let m0t = self.m0_time_master? as i64;
+        let m0t = self.m0.m0_time_master? as i64;
         let cc = access_cc as i64;
         if cc < m0t {
             return Some(false);
@@ -115,7 +115,7 @@ impl Ppu {
         if self.internal_ly_val >= 144 {
             return Some(false);
         }
-        let m0t = self.m0_time_master? as i64;
+        let m0t = self.m0.m0_time_master? as i64;
         let cc = access_cc as i64;
         if cc < m0t {
             return Some(false);
@@ -150,7 +150,7 @@ impl Ppu {
         if self.internal_ly_val >= 144 {
             return Some(false);
         }
-        let m0t = self.m0_time_master? as i64;
+        let m0t = self.m0.m0_time_master? as i64;
         let cc = access_cc as i64;
         // REFLAG (fire-at-unhalt / before pushes) iff the unhalt access cc has
         // reached mode-0 start AND is not past the line-end. The START anchor is
@@ -171,7 +171,7 @@ impl Ppu {
         if self.internal_ly_val >= 144 {
             return Some(false);
         }
-        let m0t = self.m0_time_master? as i64;
+        let m0t = self.m0.m0_time_master? as i64;
         let cc = access_cc as i64;
         // Line-identity staleness guard (same as `hdma_disable_fires`):
         // `m0_time_master` is rebased at the mode-3 arm, so during the NEXT
@@ -279,7 +279,7 @@ impl Ppu {
         if self.internal_ly_val >= 144 {
             return Some(false);
         }
-        let m0t = self.m0_time_master? as i64;
+        let m0t = self.m0.m0_time_master? as i64;
         let gap: i64 = if double_speed { 4 } else { 6 };
         let edge = m0t - gap;
         let cc = access_cc as i64;
@@ -314,7 +314,7 @@ impl Ppu {
     /// stop the block's edge was crossed (deciding the halted-vs-completing FF55
     /// readback for `hdma_late_m3speedchange_hdma5_scx*_2` vs `_3`).
     pub(crate) fn hdma_m0_edge(&self, double_speed: bool) -> Option<i64> {
-        let m0t = self.m0_time_master? as i64;
+        let m0t = self.m0.m0_time_master? as i64;
         let gap: i64 = if double_speed { 4 } else { 6 };
         Some(m0t - gap)
     }
@@ -328,7 +328,7 @@ impl Ppu {
     /// suite measures. Env-overridable, gated per SCX&7 phase and per speed so
     /// it cannot touch co-calibrated clusters at other phases.
     fn dma_scx_m0_nudge(&self, _double_speed: bool, vram: bool) -> i64 {
-        let scx = self.m3_arm_scx & 0x07;
+        let scx = self.m3.m3_arm_scx & 0x07;
         // Two surgical, phase-scoped boundary nudges, each a clean -1 on the dma
         // cluster with zero regressions across the co-calibrated clusters
         // (window / scx_during_m3 / cgbpal_m3 / enable_display / scy / oamdma):

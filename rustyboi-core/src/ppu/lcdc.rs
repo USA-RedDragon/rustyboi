@@ -579,9 +579,9 @@ impl Ppu {
             && (old_lcdc & obj_bit) != (value & obj_bit);
         if self.state == State::PixelTransfer
             && only_obj_toggle
-            && self.scheduled_mode0_dot.is_some()
+            && self.m0.scheduled_mode0_dot.is_some()
         {
-            let scx = (self.m3_arm_scx & 0x07) as i32;
+            let scx = (self.m3.m3_arm_scx & 0x07) as i32;
             let old_obj = (old_lcdc & obj_bit) != 0 || cgb_features_enabled;
             let new_obj = (value & obj_bit) != 0 || cgb_features_enabled;
             // DISABLE (old OBJ on): committed sprites are those whose cost the live
@@ -604,12 +604,12 @@ impl Ppu {
             // spx1B_2). The graduated `remaining_sprite_cost` makes the refund (and so
             // the resulting mode-0 time) depend 1:1 on the disable cc, which is what the
             // sprite_late[_late]_disable bracket pairs require.
-            if let Some(dot) = self.scheduled_mode0_dot {
-                self.scheduled_mode0_dot = Some((dot as i64 + delta as i64).max(0) as u128);
+            if let Some(dot) = self.m0.scheduled_mode0_dot {
+                self.m0.scheduled_mode0_dot = Some((dot as i64 + delta as i64).max(0) as u128);
             }
-            if let Some(m0t) = self.m0_time_master {
+            if let Some(m0t) = self.m0.m0_time_master {
                 let dsf = ds as i64;
-                self.m0_time_master =
+                self.m0.m0_time_master =
                     Some((m0t as i64 + ((delta as i64) << dsf)).max(0) as u64);
             }
             self.lcdc.reg = value;
@@ -619,7 +619,7 @@ impl Ppu {
             && ((old_lcdc & win_bit) != (value & win_bit)
                 || (old_lcdc & spr_bits) != (value & spr_bits))
         {
-            self.scheduled_mode0_dot = None;
+            self.m0.scheduled_mode0_dot = None;
             // A mid-mode-3 window-ENABLE toggle (not sprite) is the symmetric
             // counterpart to the disable refund below: the closed-form m0_time_master
             // was captured at M3 arm WITHOUT the window (it was off), so it lacks the
@@ -644,7 +644,7 @@ impl Ppu {
                 // when LY==WY). set_lcdc_visible has no mmio handle, so use the
                 // cached arm-time geometry: m3_scheduled_wx (WX latched at M3 arm)
                 // and the window-Y trigger latch.
-                let wx = self.m3_scheduled_wx as i32;
+                let wx = self.m0.m3_scheduled_wx as i32;
                 // Window-Y gate, mirroring `window_y_active`: the window-enable master trigger
                 // latch (`window_y_triggered`, set at the line-450/454 checkpoints)
                 // OR the immediate `wy2 == LY` fallback. The latter is required on
@@ -674,19 +674,19 @@ impl Ppu {
                 // commit dot is therefore one dot later; without it a window-enable on
                 // the boundary dot wrongly drops the penalty (late_reenable_scx5_2),
                 // while scx3 stays on the linear boundary (late_reenable_scx3_2).
-                let win_fine = if wx <= 7 && (self.m3_arm_scx & 7) == 5 { 1 } else { 0 };
-                let commit_dot = self.m3_arm_dot as i64
+                let win_fine = if wx <= 7 && (self.m3.m3_arm_scx & 7) == 5 { 1 } else { 0 };
+                let commit_dot = self.m3.m3_arm_dot as i64
                     + warmup
                     + 8
-                    + self.m3_arm_scx as i64
+                    + self.m3.m3_arm_scx as i64
                     + x_at_start as i64
                     + win_fine
                     - 1;
                 let will_start = wy_ok && wx_in_range && (self.ticks as i64) < commit_dot;
                 if will_start
-                    && let Some(m0t) = self.m0_time_master {
+                    && let Some(m0t) = self.m0.m0_time_master {
                         let pen = (WIN_M3_PENALTY as i64) << ds as i64;
-                        self.m0_time_master = Some((m0t as i64 + pen).max(0) as u64);
+                        self.m0.m0_time_master = Some((m0t as i64 + pen).max(0) as u64);
                     }
                 // else: keep the no-window m0_time_master as captured at arm.
             }
@@ -749,13 +749,13 @@ impl Ppu {
             let cgb_spr_commit = if cgb_features_enabled
                 && !ds
                 && !self.sprites_on_line.is_empty()
-                && self.m3_scheduled_win
+                && self.m0.m3_scheduled_win
             {
-                let x_at_start = (self.m3_scheduled_wx as i64 - 7).max(0);
-                Some(self.m3_arm_dot as i64
+                let x_at_start = (self.m0.m3_scheduled_wx as i64 - 7).max(0);
+                Some(self.m3.m3_arm_dot as i64
                     + CGB_PIXEL_TRANSFER_WARMUP as i64
                     + 8
-                    + (self.m3_arm_scx & 7) as i64
+                    + (self.m3.m3_arm_scx & 7) as i64
                     + x_at_start
                     - 1)
             } else {
@@ -775,7 +775,7 @@ impl Ppu {
                 // disable-refund / null path (which would otherwise null it because
                 // `only_win_toggle` is false for an enable).
             } else if !only_win_toggle || !win_started_for_refund {
-                self.m0_time_master = None;
+                self.m0.m0_time_master = None;
             } else if !ds
                 && !cgb_features_enabled
                 && !self.sprites_on_line.is_empty()
@@ -815,7 +815,7 @@ impl Ppu {
                 // over-shortens the at/after cases at SCX>0 / higher WX. Keep the
                 // window-inclusive m0_time_master as captured at M3 arm (no-op).
             } else if clean_ss {
-                if let (Some(m0t), Some(ws)) = (self.m0_time_master, refund_start_dot) {
+                if let (Some(m0t), Some(ws)) = (self.m0.m0_time_master, refund_start_dot) {
                     // The StartWindowDraw penalty does not begin accruing until the
                     // fetcher reaches the window tile, which the SCX fine-scroll
                     // discard delays by `scx&7` dots past `win_start_dot`. Without
@@ -837,20 +837,20 @@ impl Ppu {
                     // For WX>7 the window starts AFTER the discard, so `win_start_dot`
                     // already reflects post-discard time (no shift — the scx03_wx1x
                     // reps keep their out3 boundary).
-                    let win_fine = if self.m3_scheduled_wx <= 7 {
-                        (self.m3_arm_scx & 7) as i64
+                    let win_fine = if self.m0.m3_scheduled_wx <= 7 {
+                        (self.m3.m3_arm_scx & 7) as i64
                     } else {
                         0
                     };
                     let drawn = (self.ticks as i64) - ws as i64 - win_fine;
                     let accrued = drawn.clamp(0, WIN_M3_PENALTY as i64);
                     let refund = WIN_M3_PENALTY as i64 - accrued;
-                    self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
+                    self.m0.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
                 } else {
-                    self.m0_time_master = None;
+                    self.m0.m0_time_master = None;
                 }
             } else if clean_ds {
-                if let (Some(m0t), Some(ws)) = (self.m0_time_master, self.win_start_dot) {
+                if let (Some(m0t), Some(ws)) = (self.m0.m0_time_master, self.win_start_dot) {
                     // GRADUATED refund (as in the single-speed branch): the window
                     // penalty accrues one dot per drawn window dot, capped at
                     // WIN_M3_PENALTY; the unaccrued remainder is refunded. At double
@@ -862,20 +862,20 @@ impl Ppu {
                     // discard completes, so the accrual reference is scx&7 dots early.
                     // Generalising the former `m3_arm_scx&7==0` gate to all phases
                     // covers the late_disable_scx5_ds_1 CGB rep.
-                    let win_fine = if self.m3_scheduled_wx <= 7 {
-                        (self.m3_arm_scx & 7) as i64
+                    let win_fine = if self.m0.m3_scheduled_wx <= 7 {
+                        (self.m3.m3_arm_scx & 7) as i64
                     } else {
                         0
                     };
                     let drawn = (self.ticks as i64) - ws as i64 - win_fine;
                     let accrued = drawn.clamp(0, WIN_M3_PENALTY as i64);
                     let refund = (WIN_M3_PENALTY as i64 - accrued) << 1;
-                    self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
+                    self.m0.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
                 } else {
-                    self.m0_time_master = None;
+                    self.m0.m0_time_master = None;
                 }
             } else {
-                self.m0_time_master = None;
+                self.m0.m0_time_master = None;
             }
         }
         // On an LCDC write: a WE (window-enable) toggle with

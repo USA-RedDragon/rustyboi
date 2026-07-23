@@ -126,7 +126,7 @@ impl Ppu {
         // resolved at the access cc against master-cc anchors (begin =
         // cgbp_block_start_cc, end = exact m0_time_master).
         if kind == 2 {
-            if let Some(start) = self.cgbp_block_start_cc {
+            if let Some(start) = self.m0.cgbp_block_start_cc {
                 // `cgbp_block_start_cc` is the byte-exact hardware cgbp-block BEGIN
                 // cc (the LY time-anchored at line-cycle `80 - ds`); blocked once the
                 // access cc reaches it. The LY time anchor folds the `lytime_no_plus1`
@@ -145,7 +145,7 @@ impl Ppu {
                 // landing in late mode 2 (after `cgbp_block_start_cc` but before
                 // mode 3 even begins). Mode 3 cannot have ended before it starts:
                 // gate the end test on mode 3 having begun for the current line.
-                let ended = match self.m0_time_master {
+                let ended = match self.m0.m0_time_master {
                     Some(m0t) => self.state != State::OAMSearch && cc_end >= m0t as i64 + 2,
                     None => false,
                 };
@@ -153,7 +153,7 @@ impl Ppu {
             }
             // No begin anchor (first line after enable / window fallback): use the
             // renderer-tick boundary below.
-            let m0t = self.m0_time_master;
+            let m0t = self.m0.m0_time_master;
             let begun = self.ticks as i64 + ds - (4 - is_cgb as i64) >= 80;
             let ended = match m0t {
                 Some(m0t) => cc_end >= m0t as i64 + 2,
@@ -181,7 +181,7 @@ impl Ppu {
         // The access cc shares the LY time phase via `plus1` (the DS->SS speed-change
         // bridge drops the `+1` the LY counter correction); see the cgbp begin above.
         let vram_started = if kind == 0 {
-            self.cgbp_block_start_cc.map(|start| {
+            self.m0.cgbp_block_start_cc.map(|start| {
                 let offset = if is_read { 4 - 3 * is_cgb as i64 } else { 1 };
                 let vram_begin = start as i64 - (offset << ds);
                 let plus1 = self.ly_plus1();
@@ -228,7 +228,7 @@ impl Ppu {
                     !double_speed && self.ticks > 80 && !self.first_line_after_enable;
                 return Some(if lcdoffset_extended { false } else { started });
             }
-        let m0t = self.m0_time_master? as i64;
+        let m0t = self.m0.m0_time_master? as i64;
         // END unblocks at the hardware `cc + 2 >= mode-0 time` (exact), resolved at the
         // raw access cc. The post-tick FF41 mode register (`mode3_locked`) crosses
         // this boundary one access-tick (2/4 cc) EARLY because `ppu_locks_access`
@@ -308,7 +308,7 @@ impl Ppu {
             (1, _) if self.first_line_after_enable => true,
             // OAM (kind 1, blocked from mode 2): the register `mode3_locked`
             // already covers the mode-2 prefix; the cgbp anchor refines the dot.
-            _ => match self.cgbp_block_start_cc {
+            _ => match self.m0.cgbp_block_start_cc {
                 Some(start) => cc >= start as i64 || mode3_locked,
                 None => mode3_locked,
             },
@@ -337,7 +337,7 @@ impl Ppu {
         if self.disabled || self.internal_ly_val >= 144 {
             return Some(true);
         }
-        let m0t = self.m0_time_master? as i64;
+        let m0t = self.m0.m0_time_master? as i64;
         let cc = cc as i64;
         let dsi = ds as i64;
         // The hardware `line cycles(cc) = 456 - ((the LY time - cc) >> ds)` (the same LY time
@@ -473,7 +473,7 @@ impl Ppu {
         if self.state != State::PixelTransfer {
             return None;
         }
-        let m0t = self.m0_time_master? as i64;
+        let m0t = self.m0.m0_time_master? as i64;
         // The hardware STAT resolve: mode 3 iff `cc + 2 < mode-0 time`. The shared mode-0 time carries
         // the LY time `+1` correction the VRAM/OAM/cgbp access gate needs; at single
         // speed (and only when not in a post-DS->SS-switch line, where `lytime_no_plus1`
@@ -652,7 +652,7 @@ impl Ppu {
         }
         // Line tail before the mode-2 anticipation window (cpl-7 .. cpl-3): mode 3
         // iff cc+2 < mode-0 time, else mode 0.
-        if let Some(m0t) = self.m0_time_master {
+        if let Some(m0t) = self.m0.m0_time_master {
             if (access_cc + 1) < self.display_enable_inactive_until {
                 return Some(0);
             }
@@ -754,7 +754,7 @@ impl Ppu {
             }
             // mode 3 iff still before mode-0 time, else mode 0 (the line body).
             if self.state != State::OAMSearch
-                && let Some(m0t) = self.m0_time_master
+                && let Some(m0t) = self.m0.m0_time_master
             {
                 let read_off: i64 = self.stat_read_off(ds, Self::late_rev(mmio), false);
                 if (access_cc as i64) + read_off < m0t as i64 {
@@ -783,7 +783,7 @@ impl Ppu {
         // late_wy / window / first-line-after-enable `out3` cases all rely on it) —
         // so defer to it (return None) instead of falsely reporting mode 0.
         if self.state != State::OAMSearch {
-            match self.m0_time_master {
+            match self.m0.m0_time_master {
                 Some(m0t) => {
                     if (access_cc + 1) < self.display_enable_inactive_until {
                         return Some(0);
@@ -829,7 +829,7 @@ impl Ppu {
                 // correction the read boundary is co-tuned with, and the first-line
                 // mode-3-start line cycle+2 offset).
                 {
-                    let m0t = self.m0_time_master?;
+                    let m0t = self.m0.m0_time_master?;
                     m0t as i64
                 }
             } else {

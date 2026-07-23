@@ -158,7 +158,7 @@ impl Ppu {
         // (see sprite0_scx_extra); the m0 STAT IRQ fires at the PREDICTOR time,
         // so peel it back out here.
         let spr0 = self.sprite0_scx_extra(mmio, is_cgb) << ds;
-        self.m0_time_master
+        self.m0.m0_time_master
             .map(|m0t| (m0t as i64 - spr0 - ((1 + adv) << ds)).max(0) as u64)
     }
     /// Re-anchor the event-scheduled STAT/mode/LYC clocks to the new CPU speed.
@@ -527,7 +527,7 @@ impl Ppu {
                     && (mmio.hdma_is_enabled() || mmio.hdma_req_pending())
                     && (mmio.hdma_req_pending()
                         || !mmio.hdma_block_fired_this_hblank()
-                        || self.m0_time_master.is_none())
+                        || self.m0.m0_time_master.is_none())
                 {
                     return 0;
                 }

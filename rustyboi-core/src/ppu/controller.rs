@@ -1444,6 +1444,188 @@ pub(in crate::ppu) struct BusGlitch {
     pub(in crate::ppu) win_tile_buf: Vec<CapturedWinTile>,
 }
 
+/// The mode-3 fine-scroll discard prologue plus the sub-cc SCX column re-key
+/// levers: what was latched at the mode-3 arm, how far the discard has run, and
+/// the per-line straddle flags that re-key a tile whose column was committed
+/// under the OLD SCX.
+#[derive(Serialize, Deserialize, Clone)]
+pub(in crate::ppu) struct Mode3State {
+    // Number of BG pixels discarded so far for SCX fine-scroll alignment at
+    // the start of Mode 3 (while x == 0). Faithful to the hardware mode-3-start fine-scroll
+    // per-dot loop: each dot, the LIVE `scx % 8` is re-read; if we have not
+    // yet discarded that many pixels we pop one and consume the dot, else we
+    // begin output. A mid-M3 SCX write therefore changes both the discard
+    // count and (because the BG tile column re-reads SCX live) the fetched
+    // tile-map column. Reset to 0 at every M3 arm.
+    #[serde(default)]
+    pub(in crate::ppu) m3_pixels_discarded: u8,
+    // Fine-scroll discard target latched at M3 start (the mode-3-start fine-scroll phase
+    // samples `scx % 8` when the loop first runs, at M3 start, before the
+    // mode-2 STAT handler's mid-M3 SCX write lands). Reading SCX live in the
+    // pop loop samples it too late (after FIFO latency), capturing the
+    // already-written value and over-discarding. -1 = not yet latched.
+    #[serde(default)]
+    pub(in crate::ppu) m3_discard_target: i8,
+    // Dot at which the current line's M3 (PixelTransfer) was armed. xpos in
+    // The mode-3-start fine-scroll loop xpos == ticks - this. Used to re-read SCX at the
+    // same early M3 dots hardware samples, so a mid-discard SCX write moves the
+    // break target without the FIFO-warmup latency over-reading later writes.
+    #[serde(default)]
+    pub(in crate::ppu) m3_arm_dot: u128,
+    // scx%8 sampled at M3 arm, used by the closed-form mode-0 schedule's
+    // discard prefix. If the live f1 break resolves to a different count, the
+    // schedule is nudged by the difference so M3 ends at the right dot.
+    #[serde(default)]
+    pub(in crate::ppu) m3_arm_scx: u8,
+    // Full SCX (all 8 bits) sampled at M3 arm. The first BG tile in the FIFO is
+    // fetched from column (arm_scx / 8). If a mid-M3 SCX write moves the f1 break
+    // to a different tile column (the mode-3-start fine-scroll phase re-reads SCX live at
+    // its case-0 tile fetch), the already-queued first tile is stale and the
+    // FIFO must be refetched from the new column. -1 = not yet armed this line.
+    #[serde(default)]
+    pub(in crate::ppu) m3_arm_scx_full: i16,
+    // First line after enable: the SCX value the fine-scroll discard prefix
+    // actually samples (the mode-3-start fine-scroll phase reads SCX once at the M3-start
+    // dot). A mid-discard SCX write (write_cc + 2*cgb visible) only counts if
+    // it lands at/before that sample dot, which sits `prev_scx % 8` dots past
+    // M3-arm. `compute_m3_length_win` uses this override (when set) instead of
+    // the live register so the late-enable + SCX mode-0 time matches hardware.
+    #[serde(default)]
+    pub(in crate::ppu) first_line_scx_override: Option<u8>,
+    // Latched once `render_full_line` has produced the current visible line's
+    // framebuffer, so the closed-form line render runs at most once per line.
+    // Reset at the start of each line (mode-2 entry).
+    #[serde(default)]
+    pub(in crate::ppu) line_rendered_this_line: bool,
+    // sub-cc column lever. A mid-mode-3 SCX write applies to the BG
+    // column fetcher at `write_cc + 2*cgb` (on hardware the SCX change becomes visible at
+    // `cc + 2*cgb`, before the SCX write resolves), evaluated against the cc at which a fetched tile's pixels are
+    // PLOTTED (the fetcher leads the display by the FIFO depth). A tile whose
+    // first plotted pixel is at/before the apply cc keeps the OLD scx; after it
+    // uses NEW. These persist for the whole line (unlike scx_apply_cc which
+    // resets on apply) so the fetcher can choose per-tile. `subcc_scx_apply_cc`
+    // == disabled when no write is pending this line.
+    #[serde(default = "wy2_disabled")]
+    pub(in crate::ppu) subcc_scx_apply_cc: u64,
+    #[serde(default)]
+    pub(in crate::ppu) subcc_scx_old: u8,
+    #[serde(default)]
+    pub(in crate::ppu) subcc_scx_new: u8,
+    // Armed by a mid-mode-3 SCX write while a BG tile is in flight (column
+    // already committed under the OLD scx, not yet pushed). The next PushToFifo
+    // re-keys that single tile to the NEW scx column iff it plots after the
+    // apply cc, then disarms. Exactly one tile per write can straddle.
+    #[serde(default)]
+    pub(in crate::ppu) subcc_rekey_armed: bool,
+    // First-tile (f1) prologue straddle: a mid-mode-3 SCX write that lands while
+    // x==0 (the discard prologue, before any pixel has plotted) but AFTER the
+    // first displayed tile has already been queued into the FIFO. The tile still
+    // in flight (the 2nd displayed tile) latched its column under the OLD scx one
+    // dot before the write; on hardware it plots well after the write so
+    // its column comes from the NEW scx. The first queued tile (already pushed)
+    // keeps the OLD scx. Re-keys exactly that one in-flight tile on its next
+    // PushToFifo. DMG single-speed only (the CGB/DS prologue uses the
+    // m3_arm_scx_full re-fetch path above).
+    #[serde(default)]
+    pub(in crate::ppu) prologue_rekey_armed: bool,
+    // First-line (LY=0) sprite-shifted straddle (CGB SS, gap==1): on the line
+    // after LCD-enable the fetcher runs a different warmup/dispatch phase, so a
+    // left-edge sprite-fetch dot shifts the OLD->NEW scx boundary one tile later
+    // than on LY>=1. The per-dot fetcher already read the NEW scx for that tile
+    // (one tile too early), so when set the next PushToFifo reverts the 8
+    // just-pushed entries back to the OLD-scx column.
+    #[serde(default)]
+    pub(in crate::ppu) subcc_revert_next_old: bool,
+    // Two-tile DS straddle (CGB double-speed, low-X sprite): at DS a mid-mode-3
+    // SCX write straddles TWO display tiles because the sprite-fetch dot shifts
+    // the BG fetch phase one tile while the DS FIFO carries an extra tile. Both
+    // straddle tiles must render under the OLD scx at their plot column shifted
+    // back one tile (xpos-8). The first (in-flight) tile is rekeyed at the DS
+    // flip; this flag rekeys the SECOND tile (fetched NEXT under the NEW scx) on
+    // its push back to the OLD-scx column at its own xpos-8.
+    #[serde(default)]
+    pub(in crate::ppu) ds_straddle_next_old: bool,
+    // abs_cc at which the most recent BG TileNumber latch happened (the fetch
+    // cc of the tile currently in flight). The armed straddle tile's column was
+    // committed at this cc; the rekey compares it to the write's apply cc.
+    #[serde(default)]
+    pub(in crate::ppu) subcc_last_tn_cc: u64,
+}
+
+// `m3_discard_target` / `m3_arm_scx_full` power on at -1 ("not yet latched")
+// and `subcc_scx_apply_cc` at the `wy2_disabled()` sentinel, so this cannot be
+// derived.
+impl Default for Mode3State {
+    fn default() -> Self {
+        Mode3State {
+            m3_pixels_discarded: 0,
+            m3_discard_target: -1,
+            m3_arm_dot: 0,
+            m3_arm_scx: 0,
+            m3_arm_scx_full: -1,
+            first_line_scx_override: None,
+            line_rendered_this_line: false,
+            subcc_scx_apply_cc: wy2_disabled(),
+            subcc_scx_old: 0,
+            subcc_scx_new: 0,
+            subcc_rekey_armed: false,
+            prologue_rekey_armed: false,
+            subcc_revert_next_old: false,
+            ds_straddle_next_old: false,
+            subcc_last_tn_cc: 0,
+        }
+    }
+}
+
+/// The closed-form mode-3-length prediction and the CPU-visibility anchors it
+/// drives (the FF41 mode bits and the mode-0 STAT IRQ), plus the WX/window
+/// snapshots a mid-mode-3 write compares against to invalidate the schedule.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub(in crate::ppu) struct Mode0Schedule {
+    // Absolute `ticks` dot at which Mode 3 -> Mode 0 (HBlank) fires. Computed
+    // at M3 arm from a cycle-exact mode-3 length formula (matching hardware) and
+    // drives the FF41 mode bits + mode-0 STAT IRQ, replacing the x==160 trigger.
+    #[serde(default)]
+    pub(in crate::ppu) scheduled_mode0_dot: Option<u128>,
+    // The hardware `mode-0 (HBlank) time` for the current line, in MASTER-cc units: the absolute clock at
+    // which the predicted mode-3 -> mode-0 transition occurs, equal to
+    // the xpos-167 advance time `now_at_arm + (m3_len << ds)`. Captured at M3
+    // arm (master_cc + m3_len<<ds). The CPU's FF41 read resolves mode 3 iff
+    // `access_cc + 2 < m0_time_master` (the hardware STAT resolve); the mode-0 STAT IRQ
+    // fires one xpos earlier (the xpos-166 advance time `mode-0 time - (1<<ds)`).
+    // None when no closed-form dot is available (window / first line).
+    #[serde(default)]
+    pub(in crate::ppu) m0_time_master: Option<u64>,
+    // Master-cc anchor at which CGB palette RAM (FF69/FF6B) becomes INACCESSIBLE
+    // for the current line (the hardware CGB-palette-accessible window: blocked once
+    // `line cycles(cc) + ds >= 80`). Captured at M3 arm from the same master_cc /
+    // m3_arm_dot the m0_time_master uses, so the cgbp begin boundary resolves at
+    // the CPU's access cc rather than the renderer dot (whose pre/post-tick phase
+    // differs between the read and write paths). None when no closed-form M3 arm
+    // exists (first line after enable). Paired with `m0_time_master` for the end.
+    #[serde(default)]
+    pub(in crate::ppu) cgbp_block_start_cc: Option<u64>,
+    // The CPU-visible mode-0 (HBlank) start dot is computed on demand by
+    // `reported_mode0_dot_value` from the closed-form `scheduled_mode0_dot` plus
+    // a per-phase early-report nudge. It is decoupled from the live pixel
+    // pipeline's actual M3 termination, driving ONLY the FF41 mode bits read back
+    // by the CPU and the mode-0 STAT IRQ arm, so it can report mode 0 a few dots
+    // EARLIER than the renderer drains its FIFO (hardware computes the reported
+    // mode from the closed-form mode-3 length, not from the pixel-pump
+    // termination) without ever hanging M3. This flag latches once that report
+    // has fired for the current line, so the later live termination does not
+    // re-drive the mode bits or re-fire the STAT check.
+    #[serde(default)]
+    pub(in crate::ppu) mode0_reported_this_line: bool,
+    // WX snapshot taken when the closed-form mode-0 schedule was computed; a
+    // mid-mode-3 WX change before the window starts invalidates the schedule.
+    pub(in crate::ppu) m3_scheduled_wx: u8,
+    // window_will_start() result at schedule time; a mid-mode-3 WY write that
+    // flips it (late WY==ly) invalidates the schedule.
+    #[serde(default)]
+    pub(in crate::ppu) m3_scheduled_win: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Ppu {
     pub(in crate::ppu) fetcher: fetcher::Fetcher,
@@ -1588,28 +1770,8 @@ pub struct Ppu {
     // LY=0 Mode 2 pretrigger (both of which originally checked LY==153).
     #[serde(default)]
     pub(in crate::ppu) line_153_ly_zeroed: bool,
-    // Number of BG pixels discarded so far for SCX fine-scroll alignment at
-    // the start of Mode 3 (while x == 0). Faithful to the hardware mode-3-start fine-scroll
-    // per-dot loop: each dot, the LIVE `scx % 8` is re-read; if we have not
-    // yet discarded that many pixels we pop one and consume the dot, else we
-    // begin output. A mid-M3 SCX write therefore changes both the discard
-    // count and (because the BG tile column re-reads SCX live) the fetched
-    // tile-map column. Reset to 0 at every M3 arm.
-    #[serde(default)]
-    pub(in crate::ppu) m3_pixels_discarded: u8,
-    // Fine-scroll discard target latched at M3 start (the mode-3-start fine-scroll phase
-    // samples `scx % 8` when the loop first runs, at M3 start, before the
-    // mode-2 STAT handler's mid-M3 SCX write lands). Reading SCX live in the
-    // pop loop samples it too late (after FIFO latency), capturing the
-    // already-written value and over-discarding. -1 = not yet latched.
-    #[serde(default)]
-    pub(in crate::ppu) m3_discard_target: i8,
-    // Dot at which the current line's M3 (PixelTransfer) was armed. xpos in
-    // The mode-3-start fine-scroll loop xpos == ticks - this. Used to re-read SCX at the
-    // same early M3 dots hardware samples, so a mid-discard SCX write moves the
-    // break target without the FIFO-warmup latency over-reading later writes.
-    #[serde(default)]
-    pub(in crate::ppu) m3_arm_dot: u128,
+    pub(in crate::ppu) m3: Mode3State,
+    pub(in crate::ppu) m0: Mode0Schedule,
     // DMG window-startup fetch phase anchor: the trigger dot of a mid-line
     // window start. Hardware restarts the fetcher ON the trigger dot
     // (TileNumber dots t..t+1, data-low t+2..t+3, data-high t+4..t+5, push at
@@ -1710,25 +1872,6 @@ pub struct Ppu {
     // to the immediate start for a stable WX. Cleared at M3 arm.
     #[serde(default)]
     pub(in crate::ppu) dmg_wx_trigger_pending: Option<(u128, u8)>,
-    // scx%8 sampled at M3 arm, used by the closed-form mode-0 schedule's
-    // discard prefix. If the live f1 break resolves to a different count, the
-    // schedule is nudged by the difference so M3 ends at the right dot.
-    #[serde(default)]
-    pub(in crate::ppu) m3_arm_scx: u8,
-    // Full SCX (all 8 bits) sampled at M3 arm. The first BG tile in the FIFO is
-    // fetched from column (arm_scx / 8). If a mid-M3 SCX write moves the f1 break
-    // to a different tile column (the mode-3-start fine-scroll phase re-reads SCX live at
-    // its case-0 tile fetch), the already-queued first tile is stale and the
-    // FIFO must be refetched from the new column. -1 = not yet armed this line.
-    #[serde(default)]
-    pub(in crate::ppu) m3_arm_scx_full: i16,
-    // WX snapshot taken when the closed-form mode-0 schedule was computed; a
-    // mid-mode-3 WX change before the window starts invalidates the schedule.
-    pub(in crate::ppu) m3_scheduled_wx: u8,
-    // window_will_start() result at schedule time; a mid-mode-3 WY write that
-    // flips it (late WY==ly) invalidates the schedule.
-    #[serde(default)]
-    pub(in crate::ppu) m3_scheduled_win: bool,
     // OBJ-size (LCDC bit2) value used by the mode-2 OAM scan, latched one scan
     // slot behind the live LCDC. The hardware OAM scanner latches the per-OAM
     // entry size (`lsbuf_[pos/2]`) when that entry's OAM slot is read; a mid-mode-2
@@ -1755,47 +1898,6 @@ pub struct Ppu {
     pub(in crate::ppu) objsize_prev_large: bool,
     #[serde(default)]
     pub(in crate::ppu) objsize_new_large: bool,
-    // Absolute `ticks` dot at which Mode 3 -> Mode 0 (HBlank) fires. Computed
-    // at M3 arm from a cycle-exact mode-3 length formula (matching hardware) and
-    // drives the FF41 mode bits + mode-0 STAT IRQ, replacing the x==160 trigger.
-    #[serde(default)]
-    pub(in crate::ppu) scheduled_mode0_dot: Option<u128>,
-    // The hardware `mode-0 (HBlank) time` for the current line, in MASTER-cc units: the absolute clock at
-    // which the predicted mode-3 -> mode-0 transition occurs, equal to
-    // the xpos-167 advance time `now_at_arm + (m3_len << ds)`. Captured at M3
-    // arm (master_cc + m3_len<<ds). The CPU's FF41 read resolves mode 3 iff
-    // `access_cc + 2 < m0_time_master` (the hardware STAT resolve); the mode-0 STAT IRQ
-    // fires one xpos earlier (the xpos-166 advance time `mode-0 time - (1<<ds)`).
-    // None when no closed-form dot is available (window / first line).
-    #[serde(default)]
-    pub(in crate::ppu) m0_time_master: Option<u64>,
-    // Master-cc anchor at which CGB palette RAM (FF69/FF6B) becomes INACCESSIBLE
-    // for the current line (the hardware CGB-palette-accessible window: blocked once
-    // `line cycles(cc) + ds >= 80`). Captured at M3 arm from the same master_cc /
-    // m3_arm_dot the m0_time_master uses, so the cgbp begin boundary resolves at
-    // the CPU's access cc rather than the renderer dot (whose pre/post-tick phase
-    // differs between the read and write paths). None when no closed-form M3 arm
-    // exists (first line after enable). Paired with `m0_time_master` for the end.
-    #[serde(default)]
-    pub(in crate::ppu) cgbp_block_start_cc: Option<u64>,
-    // The CPU-visible mode-0 (HBlank) start dot is computed on demand by
-    // `reported_mode0_dot_value` from the closed-form `scheduled_mode0_dot` plus
-    // a per-phase early-report nudge. It is decoupled from the live pixel
-    // pipeline's actual M3 termination, driving ONLY the FF41 mode bits read back
-    // by the CPU and the mode-0 STAT IRQ arm, so it can report mode 0 a few dots
-    // EARLIER than the renderer drains its FIFO (hardware computes the reported
-    // mode from the closed-form mode-3 length, not from the pixel-pump
-    // termination) without ever hanging M3. This flag latches once that report
-    // has fired for the current line, so the later live termination does not
-    // re-drive the mode bits or re-fire the STAT check.
-    #[serde(default)]
-    pub(in crate::ppu) mode0_reported_this_line: bool,
-
-    // Latched once `render_full_line` has produced the current visible line's
-    // framebuffer, so the closed-form line render runs at most once per line.
-    // Reset at the start of each line (mode-2 entry).
-    #[serde(default)]
-    pub(in crate::ppu) line_rendered_this_line: bool,
 
     // DMG wx==166 pixel output-at-xpos166 runs once at the mode-3 -> HBlank
     // transition; this guards against the two transition call sites both firing
@@ -1876,67 +1978,6 @@ pub struct Ppu {
     pub(in crate::ppu) scx_f1_apply_cc: u64, // abs_cc at which scx_pending becomes visible to f1
     #[serde(default)]
     pub(in crate::ppu) scx_f1_new: u8,
-    // sub-cc column lever. A mid-mode-3 SCX write applies to the BG
-    // column fetcher at `write_cc + 2*cgb` (on hardware the SCX change becomes visible at
-    // `cc + 2*cgb`, before the SCX write resolves), evaluated against the cc at which a fetched tile's pixels are
-    // PLOTTED (the fetcher leads the display by the FIFO depth). A tile whose
-    // first plotted pixel is at/before the apply cc keeps the OLD scx; after it
-    // uses NEW. These persist for the whole line (unlike scx_apply_cc which
-    // resets on apply) so the fetcher can choose per-tile. `subcc_scx_apply_cc`
-    // == disabled when no write is pending this line.
-    #[serde(default = "wy2_disabled")]
-    pub(in crate::ppu) subcc_scx_apply_cc: u64,
-    #[serde(default)]
-    pub(in crate::ppu) subcc_scx_old: u8,
-    #[serde(default)]
-    pub(in crate::ppu) subcc_scx_new: u8,
-    // Armed by a mid-mode-3 SCX write while a BG tile is in flight (column
-    // already committed under the OLD scx, not yet pushed). The next PushToFifo
-    // re-keys that single tile to the NEW scx column iff it plots after the
-    // apply cc, then disarms. Exactly one tile per write can straddle.
-    #[serde(default)]
-    pub(in crate::ppu) subcc_rekey_armed: bool,
-    // First-tile (f1) prologue straddle: a mid-mode-3 SCX write that lands while
-    // x==0 (the discard prologue, before any pixel has plotted) but AFTER the
-    // first displayed tile has already been queued into the FIFO. The tile still
-    // in flight (the 2nd displayed tile) latched its column under the OLD scx one
-    // dot before the write; on hardware it plots well after the write so
-    // its column comes from the NEW scx. The first queued tile (already pushed)
-    // keeps the OLD scx. Re-keys exactly that one in-flight tile on its next
-    // PushToFifo. DMG single-speed only (the CGB/DS prologue uses the
-    // m3_arm_scx_full re-fetch path above).
-    #[serde(default)]
-    pub(in crate::ppu) prologue_rekey_armed: bool,
-    // First-line (LY=0) sprite-shifted straddle (CGB SS, gap==1): on the line
-    // after LCD-enable the fetcher runs a different warmup/dispatch phase, so a
-    // left-edge sprite-fetch dot shifts the OLD->NEW scx boundary one tile later
-    // than on LY>=1. The per-dot fetcher already read the NEW scx for that tile
-    // (one tile too early), so when set the next PushToFifo reverts the 8
-    // just-pushed entries back to the OLD-scx column.
-    #[serde(default)]
-    pub(in crate::ppu) subcc_revert_next_old: bool,
-    // Two-tile DS straddle (CGB double-speed, low-X sprite): at DS a mid-mode-3
-    // SCX write straddles TWO display tiles because the sprite-fetch dot shifts
-    // the BG fetch phase one tile while the DS FIFO carries an extra tile. Both
-    // straddle tiles must render under the OLD scx at their plot column shifted
-    // back one tile (xpos-8). The first (in-flight) tile is rekeyed at the DS
-    // flip; this flag rekeys the SECOND tile (fetched NEXT under the NEW scx) on
-    // its push back to the OLD-scx column at its own xpos-8.
-    #[serde(default)]
-    pub(in crate::ppu) ds_straddle_next_old: bool,
-    // abs_cc at which the most recent BG TileNumber latch happened (the fetch
-    // cc of the tile currently in flight). The armed straddle tile's column was
-    // committed at this cc; the rekey compares it to the write's apply cc.
-    #[serde(default)]
-    pub(in crate::ppu) subcc_last_tn_cc: u64,
-    // First line after enable: the SCX value the fine-scroll discard prefix
-    // actually samples (the mode-3-start fine-scroll phase reads SCX once at the M3-start
-    // dot). A mid-discard SCX write (write_cc + 2*cgb visible) only counts if
-    // it lands at/before that sample dot, which sits `prev_scx % 8` dots past
-    // M3-arm. `compute_m3_length_win` uses this override (when set) instead of
-    // the live register so the late-enable + SCX mode-0 time matches hardware.
-    #[serde(default)]
-    pub(in crate::ppu) first_line_scx_override: Option<u8>,
     #[serde(default)]
     pub(in crate::ppu) line_cycle: u32,
     #[serde(default)]
@@ -2178,10 +2219,8 @@ impl Ppu {
             first_line_after_enable: false,
             display_enable_inactive_until: 0,
             line_153_ly_zeroed: false,
-            m3_pixels_discarded: 0,
-            m3_discard_target: -1,
-            m3_arm_scx_full: -1,
-            m3_arm_dot: 0,
+            m3: Mode3State::default(),
+            m0: Mode0Schedule::default(),
             win_fetch_anchor: None,
             win_first_tile_chop: 0,
             win_being_fetched: false,
@@ -2193,19 +2232,11 @@ impl Ppu {
             win_kill_tap_late: false,
             win_wx0_delayed: false,
             dmg_wx_trigger_pending: None,
-            m3_arm_scx: 0,
-            m3_scheduled_wx: 0,
-            m3_scheduled_win: false,
             scan_obj_size_large: false,
             objsize_apply_cc: wy2_disabled(),
             objsize_prev_large: false,
             objsize_new_large: false,
-            scheduled_mode0_dot: None,
-            m0_time_master: None,
             speed: SpeedPhase::default(),
-            cgbp_block_start_cc: None,
-            mode0_reported_this_line: false,
-            line_rendered_this_line: false,
             wxa6_lineend_applied: false,
             bgen_history: Vec::new(),
             objen_history: Vec::new(),
@@ -2238,15 +2269,6 @@ impl Ppu {
             scx_prev_f1: 0,
             scx_f1_apply_cc: wy2_disabled(),
             scx_f1_new: 0,
-            subcc_scx_apply_cc: wy2_disabled(),
-            subcc_scx_old: 0,
-            subcc_scx_new: 0,
-            subcc_rekey_armed: false,
-            prologue_rekey_armed: false,
-            subcc_revert_next_old: false,
-            ds_straddle_next_old: false,
-            subcc_last_tn_cc: 0,
-            first_line_scx_override: None,
             line_cycle: 0,
             internal_ly_val: 0,
             sched_lycirq: stat_irq::DISABLED_TIME,

@@ -58,10 +58,10 @@ impl Ppu {
         self.win_weoff_deferred_tail = false;
         self.first_line_after_enable = false;
         self.line_153_ly_zeroed = false;
-        self.m3_pixels_discarded = 0;
-        self.scheduled_mode0_dot = None;
-        self.m0_time_master = None;
-        self.cgbp_block_start_cc = None;
+        self.m3.m3_pixels_discarded = 0;
+        self.m0.scheduled_mode0_dot = None;
+        self.m0.m0_time_master = None;
+        self.m0.cgbp_block_start_cc = None;
     }
 
     fn enter_scheduled_mode2(&mut self, mmio: &mut mmio::Mmio) {
@@ -92,7 +92,7 @@ impl Ppu {
         // This is byte-exact at both speeds; the old tick-block heuristic landed
         // ~2 cc late at double speed because its `(4 − cgb)` ticks->line cycles
         // term was not shifted by `ds`.
-        self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
+        self.m0.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
     }
 
     /// Byte-exact hardware cgbp-block BEGIN cc for the current line, anchored on
@@ -320,8 +320,8 @@ impl Ppu {
             // fell back to the first-line FF41 mode register, which reports
             // mode 0 and wrongly unblocked OAM in this window).
             let m3_len = self.compute_m3_length(mmio, is_cgb);
-            self.m0_time_master = Some(self.m0_time_exact(mmio, m3_len, is_cgb, true));
-            self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
+            self.m0.m0_time_master = Some(self.m0_time_exact(mmio, m3_len, is_cgb, true));
+            self.m0.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
         }
 
         // Perform sprite search distributed across 80 ticks
@@ -396,8 +396,8 @@ impl Ppu {
             self.fetcher.reset();
             // Clear any pending sub-cc scx column lever from the previous
             // line; a new write this line re-arms it.
-            self.subcc_scx_apply_cc = wy2_disabled();
-            self.prologue_rekey_armed = false;
+            self.m3.subcc_scx_apply_cc = wy2_disabled();
+            self.m3.prologue_rekey_armed = false;
             self.next_sprite_fetch_index = 0;
             self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
             self.m3_last_sprite_commit_tick = 0;
@@ -482,15 +482,15 @@ impl Ppu {
             // lines use normal Mode 2 timing.
             let was_first_line = self.first_line_after_enable;
             self.first_line_after_enable = false;
-            self.mode0_reported_this_line = false;
-            self.line_rendered_this_line = false;
+            self.m0.mode0_reported_this_line = false;
+            self.m3.line_rendered_this_line = false;
             self.wxa6_lineend_applied = false;
             // SCX fine-scroll discard target (the mode-3-start fine-scroll phase): the
             // break xpos is resolved over the first M3 dots by re-reading
             // SCX live (see the early-window loop in PixelTransfer). Seed
             // it unlatched (-1) and record the arm dot for xpos tracking.
-            self.m3_pixels_discarded = 0;
-            self.m3_arm_dot = self.ticks;
+            self.m3.m3_pixels_discarded = 0;
+            self.m3.m3_arm_dot = self.ticks;
             // Per-pixel BG-enable history: anchor the
             // plot-cc origin at mode-3 entry and seed the line's history
             // with the BG-enable bit in effect now. Mid-mode-3 LCDC.0
@@ -588,8 +588,8 @@ impl Ppu {
             // saves may carry an empty vec) and clear to -1 (no BG pixel yet).
             self.line_bg_idx.clear();
             self.line_bg_idx.resize(160, -1);
-            self.m3_arm_scx = mmio.read(SCX) & 0x07 ;
-            self.m3_arm_scx_full = mmio.read(SCX) as i16;
+            self.m3.m3_arm_scx = mmio.read(SCX) & 0x07 ;
+            self.m3.m3_arm_scx_full = mmio.read(SCX) as i16;
             // First line after enable: resolve the SCX value the fine-scroll
             // discard actually samples. The mode-3-start fine-scroll phase reads SCX once
             // at the M3-start dot; a mid-discard SCX write (visible at
@@ -607,9 +607,9 @@ impl Ppu {
                 // (1 dot = 1<<ds cc) so the sample dot is phase-correct at
                 // double speed (where the f1 latch's apply cc is write_cc+4).
                 let sample_cc = self.abs_cc + (prev_scx << ds);
-                self.first_line_scx_override = Some(self.scx_f1_pending_at_cc(sample_cc));
+                self.m3.first_line_scx_override = Some(self.scx_f1_pending_at_cc(sample_cc));
             } else {
-                self.first_line_scx_override = None;
+                self.m3.first_line_scx_override = None;
             }
             // Seed the exact-cc f1 latch at the SCX value live at M3
             // start; clear any pending write latch left from a prior
@@ -619,7 +619,7 @@ impl Ppu {
             // The first line after display enable has bespoke warmup/arm
             // timing; the live f1 xpos mapping does not align there, so
             // latch the discard immediately (pre-write SCX), as before.
-            self.m3_discard_target = if was_first_line { self.m3_arm_scx as i8 } else { -1 };
+            self.m3.m3_discard_target = if was_first_line { self.m3.m3_arm_scx as i8 } else { -1 };
 
             if was_first_line {
                 // First line after LCD enable: install the SAME closed-form
@@ -640,16 +640,16 @@ impl Ppu {
                 // the hardware OAM-reader lookup-until was seeded at enable.
                 let m3_len = self.compute_m3_length(mmio, is_cgb);
                 let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, true);
-                self.m0_time_master = Some(m0t);
+                self.m0.m0_time_master = Some(m0t);
                 // The override applied only to this first-line mode-0 time anchor;
                 // clear it so the per-tick / next-frame m3_len reads live SCX.
-                self.first_line_scx_override = None;
-                self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
+                self.m3.first_line_scx_override = None;
+                self.m0.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
                 // The within-line reported mode-0 dot / m0 IRQ arm keep the
                 // calibrated FIRST_FRAME timing (the first-line pixel
                 // pipeline arms later than a normal line); only the
                 // closed-form access/STAT-resolve anchors above are installed.
-                self.scheduled_mode0_dot = None;
+                self.m0.scheduled_mode0_dot = None;
             } else {
                 // Closed-form mode-0 schedule, including window-start lines
                 // (compute_m3_length applies the window penalty). Mid-mode-3
@@ -672,7 +672,7 @@ impl Ppu {
                 // it back for the predictor-timed m0 STAT IRQ).
                 let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, false)
                     + ((self.sprite0_scx_extra(mmio, is_cgb) as u64) << ds);
-                self.m0_time_master = Some(m0t);
+                self.m0.m0_time_master = Some(m0t);
                 // Deep mode 3 is HDMA-tracker-quiet until the closed-form
                 // period can lead the mode-0 entry (m0t - 8).
                 if is_cgb {
@@ -684,9 +684,9 @@ impl Ppu {
                 // identical boundary: dot = arm_ticks + (m0t − arm_cc) >> ds.
                 let arm_cc = mmio.master_cc() as i64;
                 let dot = self.ticks as i64 + (((m0t as i64) - arm_cc) >> ds);
-                self.scheduled_mode0_dot = Some(dot.max(0) as u128);
-                self.m3_scheduled_wx = mmio.read(WX);
-                self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
+                self.m0.scheduled_mode0_dot = Some(dot.max(0) as u128);
+                self.m0.m3_scheduled_wx = mmio.read(WX);
+                self.m0.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
                 // Predict the DMG dot at which the window's StartWindowDraw
                 // mode-3 penalty commits, so a disable landing on it (one
                 // PPU step before the PixelTransfer latch sets
@@ -699,14 +699,14 @@ impl Ppu {
                 // a disable on the dot before the visible start still keeps
                 // it (late_disable_*_wx11 vs the same-tile wx10).
                 self.predicted_win_start_dot =
-                    if !is_cgb && self.m3_scheduled_win {
-                        let wx = self.m3_scheduled_wx as i64;
+                    if !is_cgb && self.m0.m3_scheduled_win {
+                        let wx = self.m0.m3_scheduled_wx as i64;
                         let x_at_start = (wx - 7).max(0);
                         Some(
-                            (self.m3_arm_dot as i64
+                            (self.m3.m3_arm_dot as i64
                                 + DMG_PIXEL_TRANSFER_WARMUP as i64
                                 + 8
-                                + (self.m3_arm_scx as i64)
+                                + (self.m3.m3_arm_scx as i64)
                                 + x_at_start
                                 - 1)
                                 .max(0) as u128,
@@ -717,7 +717,7 @@ impl Ppu {
                 // cgbp begin boundary (the hardware CGB-palette-accessible window: blocked once
                 // `line cycles(cc) + ds >= 80`), byte-exact from the LY time
                 // anchor — see `cgbp_begin_exact`.
-                self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
+                self.m0.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
             }
             // Arm the mode-0 (HBlank) STAT IRQ event at the predicted
             // mode-0 start, in absolute clock terms. Hardware schedules

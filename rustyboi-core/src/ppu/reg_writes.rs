@@ -152,14 +152,14 @@ impl Ppu {
         // late_wy_FFto2_ly2_scx{2,3,5} oracles (real silicon): scx2/3 suppress
         // from the same dot as scx0, scx5 one grid step later.
         if cgb_hw && self.state == State::PixelTransfer {
-            let wx = self.m3_scheduled_wx as i64;
+            let wx = self.m0.m3_scheduled_wx as i64;
             let warmup = if cgb_features {
                 CGB_PIXEL_TRANSFER_WARMUP as i64
             } else {
                 DMG_PIXEL_TRANSFER_WARMUP as i64
             };
-            let scx5_step = if wx <= 7 && (self.m3_arm_scx & 7) == 5 { 4 } else { 0 };
-            let commit_dot = self.m3_arm_dot as i64
+            let scx5_step = if wx <= 7 && (self.m3.m3_arm_scx & 7) == 5 { 4 } else { 0 };
+            let commit_dot = self.m3.m3_arm_dot as i64
                 + warmup
                 + if wx >= 7 { 8 + (wx - 7) } else { 0 }
                 + scx5_step
@@ -268,7 +268,7 @@ impl Ppu {
             // m3_discard_target). The write's victim pixel is one of those discarded
             // pixels, so no visible spike lands — record it neighbor-only (a restore
             // firing mid-discard).
-            let discarding = self.x == 0 && self.m3_pixels_discarded < self.m3_discard_target.max(0) as u8;
+            let discarding = self.x == 0 && self.m3.m3_pixels_discarded < self.m3.m3_discard_target.max(0) as u8;
             let col = if stall <= lat && !discarding {
                 (self.x as i32 + lat - stall).clamp(0, 255) as u8
             } else {
@@ -427,9 +427,9 @@ impl Ppu {
         if self.pixel_transfer_warmup > 0 {
             return true;
         }
-        if self.x == 0 && self.m3_discard_target >= 0 && self.win_fetch_anchor.is_some() {
-            let base = self.m3_arm_dot + 12 - (self.m3_arm_dot & 1)
-                + self.m3_discard_target as u128;
+        if self.x == 0 && self.m3.m3_discard_target >= 0 && self.win_fetch_anchor.is_some() {
+            let base = self.m3.m3_arm_dot + 12 - (self.m3.m3_arm_dot & 1)
+                + self.m3.m3_discard_target as u128;
             return self.ticks < base;
         }
         false
@@ -579,19 +579,19 @@ impl Ppu {
         // sub-cc column lever: record the apply boundary on the PLOT clock. The
         // BG fetcher chooses old/new per tile by comparing the tile's plot cc to
         // this. Persists for the line (does not reset on apply).
-        self.subcc_scx_old = self.scx_delayed;
-        self.subcc_scx_new = value;
-        self.subcc_scx_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
+        self.m3.subcc_scx_old = self.scx_delayed;
+        self.m3.subcc_scx_new = value;
+        self.m3.subcc_scx_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
         // Arm the single-tile re-key only when a BG tile is mid-fetch (its
         // column was already committed under the OLD scx and it has not yet
         // pushed). If the fetcher is at TileNumber, the next fetch will read
         // the (about-to-be-NEW) scx itself; no in-flight straddle exists.
-        self.subcc_rekey_armed = !self.disabled
+        self.m3.subcc_rekey_armed = !self.disabled
             && self.state == State::PixelTransfer
             && self.x > 0
             && !self.fetcher.is_fetching_window()
             && !self.fetcher.fetch_state_is_tile_number()
-            && self.fetcher.subcc_last_column_inputs().2 == self.subcc_scx_old;
+            && self.fetcher.subcc_last_column_inputs().2 == self.m3.subcc_scx_old;
 
         // First-tile (f1) prologue straddle (DMG SS): the write lands at x==0
         // (still in the discard prologue) but the first displayed tile is already
@@ -607,7 +607,7 @@ impl Ppu {
         let sprites_enabled = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
         let low_x_sprite = sprites_enabled
             && self.sprites_on_line.iter().any(|s| s.x <= 8);
-        self.prologue_rekey_armed = !self.disabled
+        self.m3.prologue_rekey_armed = !self.disabled
             && !cgb
             && ds == 0
             && self.state == State::PixelTransfer
@@ -616,7 +616,7 @@ impl Ppu {
             && self.fetcher.pixel_fifo.size() >= 8
             && !self.fetcher.is_fetching_window()
             && !self.fetcher.fetch_state_is_tile_number()
-            && self.fetcher.subcc_last_column_inputs().2 == self.subcc_scx_old;
+            && self.fetcher.subcc_last_column_inputs().2 == self.m3.subcc_scx_old;
     }
     /// SCX value visible to the f1 fine-scroll discard at PPU `cc`, honoring the
     /// CGB `update(cc + 2*cgb)`-before-`the SCX-write handling` write delay. Before the pending
@@ -802,7 +802,7 @@ impl Ppu {
         // subtract it back out to land the write-phase boundary exactly.
         let is_cgb = mmio.is_cgb_features_enabled();
         let adv = self.m0irq_xpos166_advance(mmio, is_cgb);
-        self.m0_time_master
+        self.m0.m0_time_master
             .map(|m0t| (m0t as i64 - ((1 + adv) << ds) - self.p_now as i64 - 1).max(0) as u64)
     }
     /// The current-line mode-0 IRQ time for the FF41/FF45 *latch* comparisons
