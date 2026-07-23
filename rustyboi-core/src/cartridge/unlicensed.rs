@@ -222,6 +222,23 @@ impl Cartridge {
             return UnlMapper::LiCheng;
         }
 
+        // The Makon Soft carts run on the same NT "new" split-window board as
+        // Capcom vs SNK: they unlock it with the byte sequence below and then
+        // arm the split window with the same $1400 <- $55 / $2000 / $2400
+        // protocol. Keyed on that unlock sequence wherever it appears (its offset
+        // varies per cart, so a fixed-offset hash cannot see it), plus the
+        // MBC1/MBC5-family header these carts declare. Deliberately ordered AFTER
+        // the LiCheng arm: two carts carry both this unlock and the Niutoude
+        // $0184 logo, and both of those boot correctly as LiCheng and white-screen
+        // on this board, so LiCheng must keep them. See `NTNEW_MAKON_UNLOCK`.
+        if matches!(data[CARTRIDGE_TYPE_OFFSET], 0x00..=0x03 | 0x19..=0x1E)
+            && data
+                .windows(super::NTNEW_MAKON_UNLOCK.len())
+                .any(|w| w == super::NTNEW_MAKON_UNLOCK)
+        {
+            return UnlMapper::NtNew(NtNewState::default());
+        }
+
         // BBD (Vast Fame family): keyed on the CRC32 of the 48-byte $0184
         // secondary logo (mGBA `_detectUnlMBC`), gated on $7FFF != $01. A
         // matching $7FFF marks a cracked/decrypted dump that already runs as a

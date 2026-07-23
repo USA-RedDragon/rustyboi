@@ -866,6 +866,24 @@ const NTNEW_STUB_OFFSET: usize = 0x00B9;
 const NTNEW_STUB_LEN: usize = 37;
 const NTNEW_STUB_CRC32: u32 = 0x24FD_EE7B;
 
+/// The Makon Soft carts' unlock for the same `UnlMapper::NtNew` board:
+///     ld a,$AA / ld ($7000),a       ; board unlock strobe
+///     ld a,$03 / ld ($B600),a
+///     ld a,$80 / ld ($B200),a       ; two more board-only ports
+///     ld a,$0A / ld ($0000),a       ; then the ordinary RAM enable
+/// They follow it with the same `$1400 <- $55` arming write and $2000/$2400 page
+/// programming Capcom vs SNK uses, so they are the same board, not a family
+/// resemblance. Matched wherever it appears rather than at a fixed offset: the
+/// sequence sits at a different address in every cart ($1FA9-$2FEF across the
+/// group), so no fixed-offset hash can see it. Nothing licensed can collide --
+/// $7000 decodes to nothing on a licensed cart, and the run pins three absolute
+/// store targets in a fixed order. A scan of all 3973 GB/GBC library images
+/// finds it in exactly 17, every one of them a Makon Soft title.
+const NTNEW_MAKON_UNLOCK: [u8; 20] = [
+    0x3E, 0xAA, 0xEA, 0x00, 0x70, 0x3E, 0x03, 0xEA, 0x00, 0xB6, 0x3E, 0x80, 0xEA, 0x00, 0xB2, 0x3E,
+    0x0A, 0xEA, 0x00, 0x00,
+];
+
 /// Bank registers of `UnlMapper::XploderGb`, carried inside the enum variant
 /// (not as `Cartridge` fields) so every other cart's bincode savestate layout
 /// stays byte-identical. Power-on bank 1 / RAM bank 0 matches a stock cart;
@@ -4471,6 +4489,40 @@ mod tests {
         cart.write(0x2000, 0x14); // 0x14 % 16 = 4
         assert_eq!(cart.read(0x4000), 0xA4);
         assert_eq!(cart.read(0x0000), 0xA0);
+    }
+
+    #[test]
+    fn ntnew_also_claims_the_makon_unlock_carts() {
+        // The Makon Soft group runs the same board: it unlocks with
+        // NTNEW_MAKON_UNLOCK and then arms the split window with the same
+        // $1400/$2000/$2400 protocol. The sequence sits at a different address
+        // in every cart, so the gate matches it wherever it appears.
+        let build = |at: usize| {
+            let mut rom = vec![0u8; 0x20000];
+            rom[CARTRIDGE_TYPE_OFFSET] = MBC5;
+            rom[ROM_SIZE_OFFSET] = 0x02;
+            rom[at..at + NTNEW_MAKON_UNLOCK.len()].copy_from_slice(&NTNEW_MAKON_UNLOCK);
+            rom
+        };
+        for at in [0x1FA9, 0x27AF, 0x2FEF] {
+            assert_eq!(
+                Cartridge::detect_unl_mapper(&build(at)),
+                UnlMapper::NtNew(NtNewState::default()),
+                "unlock at {at:#06X}"
+            );
+        }
+        // A one-byte perturbation of the unlock is no longer the board's.
+        let mut rom = build(0x27AF);
+        rom[0x27AF + 4] ^= 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+
+        // Ordering guard: two carts carry BOTH this unlock and the Niutoude
+        // $0184 logo, and both boot correctly as LiCheng while white-screening on
+        // this board, so the LiCheng arm must win.
+        let mut both = build(0x27AF);
+        both[CARTRIDGE_TYPE_OFFSET] = MBC1;
+        both[0x184..0x1B4].copy_from_slice(&LICHENG_LOGO);
+        assert_eq!(Cartridge::detect_unl_mapper(&both), UnlMapper::LiCheng);
     }
 
     #[test]
