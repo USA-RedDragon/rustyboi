@@ -5,9 +5,9 @@
 //! CPU reads/writes while a transfer holds the bus. Separate hardware unit
 //! from the CGB VRAM DMA (see `hdma`/`gdma`).
 //!
-//! A child module of `mmio`, so it reaches `Mmio`'s private fields, the engine
-//! structs and the parent's private helpers directly. Behaviour is identical
-//! to the pre-split code — this is a pure relocation.
+//! A module under `memory::dma` holding the `impl Mmio` bus-master methods; it
+//! reaches `Mmio`'s internals through their `pub(in crate::memory)` visibility
+//! rather than as a child of `mmio`.
 use super::DmaSrcKind;
 use crate::memory::mmio::{
     Mmio, CARTRIDGE_BANK_END, CARTRIDGE_BANK_START, CARTRIDGE_END, CARTRIDGE_START, EMPTY_BYTE,
@@ -477,15 +477,6 @@ impl Mmio {
         }
     }
 
-    /// The WRAM "area" (bank slot) selected by the active OAM DMA during a CGB
-    /// conflicting WRAM access. Mirrors hardware, where bit 4 of the DMA
-    /// source-high byte in FF46 (NOT the CPU's SVBK selection) chooses between
-    /// the fixed bank-0
-    /// block (area 0) and the currently SVBK-banked block (area 1).
-    fn dma_conflict_wram_area(&self) -> u8 {
-        ((self.dma.oam.source_base >> 8) >> 4 & 1) as u8
-    }
-
     /// Bank index for an OAM-DMA-conflict WRAM access, or `None` for the base
     /// `wram_bank` buffer.
     ///
@@ -506,7 +497,7 @@ impl Mmio {
     /// ignored: only the 12-bit offset and the DMA-derived area matter.
     fn dma_conflict_wram_read(&self, addr: u16) -> u8 {
         let offset = addr & 0x0FFF;
-        if self.dma_conflict_wram_area() == 0 {
+        if self.dma.dma_conflict_wram_area() == 0 {
             self.wram.read(WRAM_START + offset)
         } else {
             match self.dma_conflict_wram_index() {
@@ -520,7 +511,7 @@ impl Mmio {
     /// DMA-selected-area `[p & 0xFFF]` routing used by `dma_conflict_wram_read`.
     fn dma_conflict_wram_write(&mut self, addr: u16, value: u8) {
         let offset = addr & 0x0FFF;
-        if self.dma_conflict_wram_area() == 0 {
+        if self.dma.dma_conflict_wram_area() == 0 {
             self.wram.write(WRAM_START + offset, value);
         } else {
             match self.dma_conflict_wram_index() {

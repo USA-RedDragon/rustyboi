@@ -7,9 +7,9 @@
 //! byte copy (`copy_dma_byte`) and the GDMA-only VRAM source-conflict fixup
 //! live here.
 //!
-//! A child module of `mmio`, so it reaches `Mmio`'s private fields, the engine
-//! structs and the parent's private helpers directly. Behaviour is identical
-//! to the pre-split code — this is a pure relocation.
+//! A module under `memory::dma` holding the `impl Mmio` bus-master methods; it
+//! reaches `Mmio`'s internals through their `pub(in crate::memory)` visibility
+//! rather than as a child of `mmio`.
 use crate::memory::mmio::{Mmio, VRAM_START};
 use crate::memory::{self, Addressable};
 

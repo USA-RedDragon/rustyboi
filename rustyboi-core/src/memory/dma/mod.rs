@@ -22,6 +22,17 @@ pub(in crate::memory) struct Dma {
     pub(in crate::memory) hdma: HdmaEngine,
 }
 
+impl Dma {
+    /// The WRAM "area" (bank slot) selected by the active OAM DMA during a CGB
+    /// conflicting WRAM access. Mirrors hardware, where bit 4 of the DMA
+    /// source-high byte in FF46 (NOT the CPU's SVBK selection) chooses between
+    /// the fixed bank-0 block (area 0) and the currently SVBK-banked block
+    /// (area 1).
+    fn dma_conflict_wram_area(&self) -> u8 {
+        ((self.oam.source_base >> 8) >> 4 & 1) as u8
+    }
+}
+
 /// Source-region classification of the active OAM DMA, as decoded from the
 /// FF46 source-high byte. Drives the per-region bus-conflict rules.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

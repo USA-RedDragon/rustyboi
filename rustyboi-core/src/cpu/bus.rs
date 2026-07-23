@@ -767,8 +767,9 @@ impl<'a> Bus<'a> {
         let byte = self.read(pc);
         // VRAM-source GDMA first-word latch: this fetch IS the absorbed
         // next-opcode prefetch, whose byte the word bus duplicated into the
-        // transfer's first dest word (see `Mmio::gdma_vram_src_fixup`). Patch it in
-        // now that the byte is known.
+        // transfer's first dest word (see the `take_/apply_gdma_vram_src_fixup`
+        // Mmio methods over the `HdmaEngine::gdma_vram_src_fixup` field). Patch it
+        // in now that the byte is known.
         if let Some((addr, into_bank1)) = self.mmio.take_gdma_vram_src_fixup() {
             self.mmio.apply_gdma_vram_src_fixup(addr, byte, into_bank1);
         }
