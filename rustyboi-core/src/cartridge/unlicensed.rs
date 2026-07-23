@@ -165,6 +165,10 @@ impl Cartridge {
         // (All known LiCheng dumps carry the $01 header, so this passes on
         // type alone; the size clause is the belt-and-suspenders half.)
         let logo_crc32 = crate::checksum::crc32(&data[0x184..0x1B4]);
+        // Whole-image hash, the key for the rules that must not false-positive
+        // on a cart sharing a signature window (Zelda DX betas, the VF001-behind
+        // -GGB81 pair).
+        let rom_crc32 = crate::checksum::crc32(data);
 
         // "Pokemon Jade / Diamond" board (Telefang bootlegs): an
         // MBC3+TIMER+RAM+BATTERY header ($10) plus the D/E/F challenge
@@ -197,7 +201,7 @@ impl Cartridge {
         // MBC1 mask folds those to bank 0/1 and the boot hangs; electrically
         // these dumps are MBC5. Keyed on the exact whole-ROM CRC32 so only these
         // three prototype dumps are re-mapped -- zero false positives.
-        if super::ZELDA_DX_BETA_ROM_CRC32.contains(&crate::checksum::crc32(data)) {
+        if super::ZELDA_DX_BETA_ROM_CRC32.contains(&rom_crc32) {
             return UnlMapper::ForceMbc5;
         }
 
@@ -227,6 +231,15 @@ impl Cartridge {
         // impossible.
         if BBD_LOGO_CRC32.contains(&logo_crc32) && data[0x7FFF] != 0x01 {
             return UnlMapper::Bbd(BbdState::default());
+        }
+
+        // VF001 protection board behind a GGB81 secondary logo: two dumps whose
+        // boot speaks the VF001 $7000 config protocol, keyed on the exact
+        // whole-ROM CRC32 because both the $0184 logo CRC32 and the title are
+        // shared with GGB81 carts that must keep the GGB81 board (see
+        // `VF001G_OVER_GGB81_ROM_CRC32`). Ordered before the GGB81 arm below.
+        if super::VF001G_OVER_GGB81_ROM_CRC32.contains(&rom_crc32) {
+            return UnlMapper::Vf001Gen(Box::default());
         }
 
         // GGB81 (Vast Fame family): keyed on the CRC32 of the 48-byte $0184

@@ -243,6 +243,27 @@ const BBD_BANK_REORDERING: [[u8; 8]; 8] = [
 /// `_detectUnlMBC` keys on exactly these values.
 const GGB81_LOGO_CRC32: [u32; 2] = [0x79F3_4594, 0x7E8C_539B];
 
+/// Whole-ROM CRC32 (reflected IEEE) of the two dumps that wear the GGB81
+/// secondary logo but are electrically VF001 protection boards: "Fellowship of
+/// the Rings (China) (En)" and "Zhihuan Wang 2 (China) (Zh)" (the same engine —
+/// the two images are byte-identical from $12BF to the end). Their boot drives
+/// the VF001 config-register protocol instead of GGB81's data-line reorder: it
+/// opens config mode with $7000=$96, programs $7001-$7006, activates at $7000
+/// and closes with $700F=$96, which arms a 3-byte injection that overlays
+/// `call $12BD` on the `call $07F9` at $01FB in bank 0. On a GGB81 board those
+/// writes are inert, the injection never happens, and the boot dead-ends with
+/// the LCD still off.
+///
+/// The key has to be the whole-ROM CRC32: the $0184 logo CRC32 ($7E8C_539B) is
+/// shared with genuine GGB81 carts, and so is the "MOON ACT V1.0" title — "Emo
+/// Dao (Taiwan)" and "Mojie Chuanshuo (Taiwan)" carry BOTH, never touch $7000,
+/// and boot correctly as GGB81. Anything looser than an exact image hash would
+/// break them.
+const VF001G_OVER_GGB81_ROM_CRC32: [u32; 2] = [
+    0x759F_07BD, // Fellowship of the Rings (China) (En) (Unl)
+    0xE674_8D1F, // Zhihuan Wang 2 (China) (Zh) (Unl)
+];
+
 /// GGB81 data-line bit-reorder tables (mGBA `_ggb81DataReordering[8][8]`). The
 /// board is electrically MBC5; a write with `addr & 0xF0FF == 0x2001` latches a
 /// 3-bit swap mode, and every read from the $4000-$7FFF bank window returns the
@@ -3654,6 +3675,40 @@ mod tests {
         rom[0x2500] = 0x0F; // bank 0 marker (reads here are never reordered)
         rom[0x4000] = 0x0F; // bank 1 offset 0 (reordered on read)
         rom
+    }
+
+    #[test]
+    fn vf001_behind_ggb81_logo_routes_to_vf001gen() {
+        // The two dumps that wear a GGB81 $0184 logo but drive the VF001 $7000
+        // config protocol are keyed on the whole-ROM CRC32, and that rule runs
+        // BEFORE the GGB81 arm. Build 32 KiB images carrying the GGB81 logo (so
+        // the GGB81 arm would otherwise claim them) whose whole-ROM CRC32 equals
+        // each real dump's, via a 4-byte forged tail.
+        let build = |tail: [u8; 4]| {
+            let mut rom = vec![0u8; 0x8000];
+            rom[CARTRIDGE_TYPE_OFFSET] = MBC5_RAM_BATTERY;
+            rom[ROM_SIZE_OFFSET] = 0x00;
+            rom[0x184..0x1B4].copy_from_slice(&GGB81_LOGO);
+            rom[0x7FFC..0x8000].copy_from_slice(&tail);
+            rom
+        };
+        for (tail, crc) in
+            [([0x8D, 0x87, 0xEF, 0x0B], 0x759F_07BD), ([0x41, 0xE9, 0x3B, 0x46], 0xE674_8D1F)]
+        {
+            let rom = build(tail);
+            assert_eq!(crate::checksum::crc32(&rom), crc);
+            assert_eq!(
+                Cartridge::detect_unl_mapper(&rom),
+                UnlMapper::Vf001Gen(Box::default())
+            );
+        }
+        // The near-miss that makes an image hash necessary: a cart with the same
+        // $0184 logo (Emo Dao / Mojie Chuanshuo also share the "MOON ACT V1.0"
+        // title) but a different image keeps the GGB81 board.
+        let mut rom = build([0x8D, 0x87, 0xEF, 0x0B]);
+        rom[0x134..0x141].copy_from_slice(b"MOON ACT V1.0");
+        assert_ne!(crate::checksum::crc32(&rom), 0x759F_07BD);
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::Ggb81(0));
     }
 
     #[test]
