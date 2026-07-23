@@ -88,6 +88,13 @@ const VF8K_BOOT_STUB: [u8; 6] = [0xF5, 0x3E, 0xAA, 0xEA, 0x00, 0x70];
 /// MBC1 to MBC5" bootleg-conversion technique.
 const POCKETMON_MBC5_LOGO_CRC32: u32 = 0x0864_AF13;
 
+/// Whole-ROM CRC32 (reflected IEEE) of the three Zelda no Densetsu - Yume o
+/// Miru Shima DX (Japan) prototype betas that drive banking MBC5-style behind an
+/// MBC1+RAM+BATTERY header: 1998-06-15 and its Alt, and 1998-07-14T181500. The
+/// header type is a beta placeholder; matching the exact dump file means only
+/// these three prototypes are re-mapped, with zero risk to any other cart.
+const ZELDA_DX_BETA_ROM_CRC32: [u32; 3] = [0x9367_653B, 0x3FD6_C8FC, 0x2F88_4286];
+
 /// Window and CRC32 (reflected IEEE) of the "New GB Color" HK-PCB protection
 /// trampoline (`UnlMapper::NewGbHk`). It lives in the dead space between the
 /// interrupt vectors and the header, and is 46 bytes of protection-specific
@@ -3305,6 +3312,23 @@ mod tests {
         );
         // A cracked dump ($7FFF==$01) still runs plain.
         rom[0x7FFF] = 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+    }
+
+    #[test]
+    fn zelda_dx_mbc1_beta_forces_mbc5() {
+        // A dump whose whole-ROM CRC32 matches a Zelda LA DX prototype beta is a
+        // header-liar driving MBC5-style banking -> ForceMbc5. Build a 32 KiB
+        // image whose CRC32 equals the real 1998-06-15 dump (0x9367653B) via a
+        // 4-byte forged tail; the mapper keys purely on that whole-ROM CRC.
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x7FFC..0x8000].copy_from_slice(&[0x1A, 0x6A, 0xF3, 0xE1]);
+        assert_eq!(crate::checksum::crc32(&rom), 0x9367_653B);
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::ForceMbc5);
+
+        // Any other ROM (a one-byte change moves the CRC) is untouched.
+        rom[0x100] ^= 0x01;
+        assert_ne!(crate::checksum::crc32(&rom), 0x9367_653B);
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
     }
 

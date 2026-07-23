@@ -189,6 +189,18 @@ impl Cartridge {
             return UnlMapper::ForceMbc5;
         }
 
+        // Zelda no Densetsu - Yume o Miru Shima DX (Japan) prototype betas (the
+        // 1998-06-15 pair + 1998-07-14T181500): the header declares MBC1+RAM+
+        // BATTERY ($03) but the game already drives MBC5-style banking, writing
+        // full-width bank numbers (>$1F) to $2000-$3FFF (verified: it writes $20
+        // to $2100 and never touches the MBC1 BANK2/mode registers). A 5-bit
+        // MBC1 mask folds those to bank 0/1 and the boot hangs; electrically
+        // these dumps are MBC5. Keyed on the exact whole-ROM CRC32 so only these
+        // three prototype dumps are re-mapped -- zero false positives.
+        if super::ZELDA_DX_BETA_ROM_CRC32.contains(&crate::checksum::crc32(data)) {
+            return UnlMapper::ForceMbc5;
+        }
+
         let claimed_size = 0x8000usize.checked_shl(u32::from(rom_size_code)).unwrap_or(0);
         if LICHENG_LOGO_CRC32.contains(&logo_crc32)
             && (data[CARTRIDGE_TYPE_OFFSET] == 0x01 || data.len() != claimed_size)
