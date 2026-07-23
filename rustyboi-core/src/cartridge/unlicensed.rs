@@ -166,6 +166,18 @@ impl Cartridge {
         // type alone; the size clause is the belt-and-suspenders half.)
         let logo_crc32 = crate::checksum::crc32(&data[0x184..0x1B4]);
 
+        // "Pokemon Jade / Diamond" board (Telefang bootlegs): an
+        // MBC3+TIMER+RAM+BATTERY header ($10) plus the D/E/F challenge
+        // handshake (hhugboy `MbcUnlPokeJadeDia`, mGBA `_GBPKJD`). The $0184
+        // bytes are executable code, so a 48-byte CRC32 (not a byte-sum) is the
+        // safe discriminator; the header-type $10 guard plus the collision-free
+        // CRC32 window means no licensed cart can match. (M161 also spoofs $10
+        // but is gated on the "TETRIS SET" title + 256KB above, so the two
+        // never cross-detect.)
+        if data[CARTRIDGE_TYPE_OFFSET] == 0x10 && logo_crc32 == super::POKEJADE_LOGO_CRC32 {
+            return UnlMapper::PokeJadeDia(PokeJadeState::default());
+        }
+
         // Hong Kong "POCKETMON" Pokemon Red bootleg: an MBC1+RAM+BATTERY header
         // over a game re-linked to MBC5-style full-width banking. Keyed on the
         // 48-byte $0184 CRC32 signature, gated on the MBC1-family header byte so
@@ -711,6 +723,92 @@ impl Cartridge {
                 (!(e ^ o) & 0xF0) | ((e ^ o) & 0x0F)
             }
         })
+    }
+
+    /// PKJD ("Pokemon Jade / Diamond") protection read for $A000-$BFFF, a port
+    /// of taizou's hhugboy `MbcUnlPokeJadeDia::readMemory`. Returns the derived
+    /// value when the active selector addresses a protection register (or an
+    /// unpopulated RTC register), else `None` so the caller falls through to a
+    /// normal MBC3 SRAM read. The board is electrically MBC3, so RAM-enable
+    /// lives on the `Mapper::Mbc3` board and the D/E state in the UnlMapper
+    /// payload.
+    pub(super) fn pokejade_read(&self, _addr: u16) -> Option<u8> {
+        let ram_enabled = matches!(&self.mapper, Mapper::Mbc3(m) if m.ram_enabled);
+        let UnlMapper::PokeJadeDia(st) = &self.unl_mapper else {
+            return None;
+        };
+        if !ram_enabled {
+            // RAM not enabled: the window reads back open bus.
+            return Some(0xFF);
+        }
+        match st.sel {
+            0x0D => Some(st.reg_d),
+            0x0E => Some(st.reg_e),
+            0x0F => Some(0), // F is write-only
+            // The real RTC registers are unpopulated on this cart, so they read
+            // back 0 (hhugboy: `return 0` for selects $08-$0C when !RTC).
+            0x08..=0x0C => Some(0),
+            // Any other selector ($00-$07) is a plain MBC3 SRAM bank.
+            _ => None,
+        }
+    }
+
+    /// PKJD protection write for $A000-$BFFF, a port of taizou's hhugboy
+    /// `MbcUnlPokeJadeDia::writeMemory`. Writes are ignored while RAM is
+    /// disabled; selector $0D/$0E set registers D/E, $0F is the command port
+    /// that mutates D and E, and every other selector is an ordinary MBC3
+    /// SRAM/RTC write.
+    pub(super) fn pokejade_write(&mut self, addr: u16, value: u8) {
+        let (ram_enabled, ram_bank) = match &self.mapper {
+            Mapper::Mbc3(m) => (m.ram_enabled, m.ram_bank),
+            _ => return,
+        };
+        if !ram_enabled {
+            return;
+        }
+        let sel = match &self.unl_mapper {
+            UnlMapper::PokeJadeDia(st) => st.sel,
+            _ => return,
+        };
+        match sel {
+            0x0D => {
+                if let UnlMapper::PokeJadeDia(ref mut st) = self.unl_mapper {
+                    st.reg_d = value;
+                }
+            }
+            0x0E => {
+                if let UnlMapper::PokeJadeDia(ref mut st) = self.unl_mapper {
+                    st.reg_e = value;
+                }
+            }
+            0x0F => {
+                // The weak protection scheme: certain writes to F manipulate D
+                // and E. Copied byte-for-byte from hhugboy (note $52 decrements
+                // E, matching the reference).
+                if let UnlMapper::PokeJadeDia(ref mut st) = self.unl_mapper {
+                    match value {
+                        0x11 => st.reg_d = st.reg_d.wrapping_sub(1),
+                        0x12 => st.reg_e = st.reg_e.wrapping_sub(1),
+                        0x41 => st.reg_d = st.reg_d.wrapping_add(st.reg_e),
+                        0x42 => st.reg_e = st.reg_e.wrapping_add(st.reg_d),
+                        0x51 => st.reg_d = st.reg_d.wrapping_add(1),
+                        0x52 => st.reg_e = st.reg_e.wrapping_sub(1),
+                        _ => {}
+                    }
+                }
+            }
+            // Ordinary MBC3 SRAM / RTC write (selector = the RAM/RTC-bank).
+            _ => {
+                let ram_select_max = if self.is_mbc30() { 0x07 } else { 0x03 };
+                if ram_bank <= ram_select_max {
+                    if let Some(offset) = self.banked_ram_offset(addr) {
+                        let _ = self.write_ram_byte(offset, value);
+                    }
+                } else if (0x08..=0x0C).contains(&ram_bank) {
+                    self.write_rtc_register(ram_bank, value);
+                }
+            }
+        }
     }
 
     /// BBD $2000-$3FFF register write (mGBA `_GBBBD`). Matched on `addr &

@@ -258,6 +258,12 @@ impl Mapper {
             // it gets the real `Mapper::Mbc5` the intercept reads its bank
             // register from.
             UnlMapper::NewGbHk => {}
+            // PKJD is electrically MBC3+TIMER+RAM+BATTERY (its header type $10 is
+            // truthful); the D/E/F protection state lives in the
+            // UnlMapper::PokeJadeDia payload and is applied by the $4000-$5FFF /
+            // $A000-$BFFF intercepts, so the board here is a plain MBC3. Fall
+            // through to the header type.
+            UnlMapper::PokeJadeDia(_) => {}
         }
         let mbc3 = |has_ram, timer| {
             Mapper::Mbc3(Mbc3 { ram_enabled: false, rom_bank_low: 1, ram_bank: 0, has_ram, timer })

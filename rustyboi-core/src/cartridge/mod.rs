@@ -103,6 +103,16 @@ const NEWGBHK_STUB_OFFSET: usize = 0x0091;
 const NEWGBHK_STUB_LEN: usize = 46;
 const NEWGBHK_STUB_CRC32: u32 = 0x53C0_8E9D;
 
+/// CRC32 (reflected IEEE) of the 48 bytes at $0184 on the "Pokemon Jade /
+/// Diamond" board — the Telefang bootlegs (Pokemon Jade, Koudai Guaishou Da
+/// Jihe), which spoof an MBC3+TIMER+RAM+BATTERY header ($10) but embed a
+/// three-register challenge handshake (taizou's hhugboy `MbcUnlPokeJadeDia`,
+/// CC0; mGBA `_GBPKJD`). Those $0184 bytes are executable code, not a logo, so
+/// keying on the 48-byte CRC32 (as mGBA does) rather than a byte-sum gives a
+/// collision-free gate; combined with the header-type $10 guard no licensed
+/// cart can match. See `UnlMapper::PokeJadeDia`.
+const POKEJADE_LOGO_CRC32: u32 = 0x65BB_F1FC;
+
 /// CRC32 (reflected IEEE) of the 48-byte Vast Fame secondary logo at $0184 on
 /// the general VF001 protection board (`UnlMapper::Vf001Gen`, taizou's hhugboy
 /// `MbcUnlVf001`). hhugboy auto-detects the family by the $0184 byte-sum:
@@ -466,6 +476,44 @@ pub enum UnlMapper {
     /// otherwise set the size of an enum that is matched on every bus access,
     /// and no other cart should pay for it in memory or in the savestate.
     Vf001Zook(Box<Vf001zState>),
+    /// "Pokemon Jade / Diamond" board (the Telefang bootlegs: Pokemon Jade and
+    /// Koudai Guaishou Da Jihe). Electrically an MBC3+TIMER+RAM+BATTERY (the
+    /// header type $10 is truthful, RTC left unpopulated), plus a weak
+    /// challenge handshake layered over MBC3's unused RTC-register-select
+    /// register (taizou's hhugboy `MbcUnlPokeJadeDia`, CC0; mGBA `_GBPKJD`):
+    ///
+    ///   * A write to $4000-$5FFF latches a "register selector" (`sel`) from
+    ///     the value — the same write also drives MBC3's own RAM/RTC-bank
+    ///     register, so plain SRAM/RTC banking is unaffected.
+    ///   * In the $A000-$BFFF window (only while RAM is enabled): sel $0D reads
+    ///     back / writes register D, sel $0E register E, and sel $0F is a
+    ///     write-only command port whose value mutates D and E ($11 D--, $12
+    ///     E--, $41 D+=E, $42 E+=D, $51 D++, $52 E--). Reads of the real (but
+    ///     unpopulated) RTC registers $08-$0C return 0; every other selector
+    ///     ($00-$07) is ordinary MBC3 SRAM.
+    ///
+    /// The boot code programs D/E through this port and branches on the derived
+    /// values; a plain MBC3 returns open-bus there and the game white-screens.
+    /// The three-byte protection state ($sel, D, E) rides in the variant
+    /// payload (like `Vf001`/`Bbd`) so no other cart's bincode savestate layout
+    /// shifts. Detected by the header type $10 plus the $0184 CRC32 signature.
+    PokeJadeDia(PokeJadeState),
+}
+
+/// Protection register state for `UnlMapper::PokeJadeDia`. Carried inside the
+/// enum variant (not as `Cartridge` fields) so the bincode savestate layout of
+/// every other cart stays byte-identical. All three registers power up at 0
+/// (hhugboy `resetVars`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PokeJadeState {
+    /// The register selector latched from the last $4000-$5FFF write (hhugboy
+    /// `notRtcRegister`). $0D/$0E/$0F address the protection registers; every
+    /// other value is a plain MBC3 RAM/RTC-bank select.
+    sel: u8,
+    /// Protection register D.
+    reg_d: u8,
+    /// Protection register E.
+    reg_e: u8,
 }
 
 /// The two 8 KiB ROM-window registers of `UnlMapper::Vf8k`, carried inside the
@@ -1089,6 +1137,8 @@ impl Cartridge {
             UnlMapper::Vf001Gen(_) => UnlMapper::Vf001Gen(Box::default()),
             // Zook Z's protection port is a shift register; power up empty.
             UnlMapper::Vf001Zook(_) => UnlMapper::Vf001Zook(Box::default()),
+            // PKJD's three protection registers are volatile; power up at 0.
+            UnlMapper::PokeJadeDia(_) => UnlMapper::PokeJadeDia(PokeJadeState::default()),
             other => other,
         };
         Cartridge {
@@ -1328,6 +1378,10 @@ impl Cartridge {
             // "New GB Color" HK PCB: electrically a stock MBC5 and its header
             // type ($1B) is truthful, so the header decode below is correct.
             UnlMapper::NewGbHk => {}
+            // PKJD is electrically MBC3+TIMER+RAM+BATTERY and its header type
+            // ($10) is truthful, so the header decode below is correct; the
+            // D/E/F protection is applied in the read/write intercepts.
+            UnlMapper::PokeJadeDia(_) => {}
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -2184,6 +2238,15 @@ impl memory::Addressable for Cartridge {
                     return byte;
                 }
             }
+            // PKJD: the D/E/F protection registers answer through the cart-RAM
+            // window; unmatched selectors fall through to normal MBC3 SRAM.
+            UnlMapper::PokeJadeDia(_)
+                if (EXTERNAL_RAM_START..=EXTERNAL_RAM_END).contains(&addr) =>
+            {
+                if let Some(byte) = self.pokejade_read(addr) {
+                    return byte;
+                }
+            }
             _ => {}
         }
         match addr {
@@ -2647,6 +2710,19 @@ impl memory::Addressable for Cartridge {
                 }
                 _ => {}
             },
+            // PKJD: a $4000-$5FFF write latches the protection register selector
+            // AND drives MBC3's own RAM/RTC-bank register (hhugboy sets
+            // notRtcRegister, then falls through to MbcNin3), so do both here.
+            RAM_BANK_ROM_BANK_HIGH_START..=RAM_BANK_ROM_BANK_HIGH_END
+                if matches!(self.unl_mapper, UnlMapper::PokeJadeDia(_)) =>
+            {
+                if let UnlMapper::PokeJadeDia(ref mut st) = self.unl_mapper {
+                    st.sel = value;
+                }
+                if let Mapper::Mbc3(m) = &mut self.mapper {
+                    m.ram_bank = value & 0x0F;
+                }
+            }
             // RAM Bank Number / Upper ROM Bank Number (0x4000-0x5FFF)
             RAM_BANK_ROM_BANK_HIGH_START..=RAM_BANK_ROM_BANK_HIGH_END => {
                 match &mut self.mapper {
@@ -2750,6 +2826,13 @@ impl memory::Addressable for Cartridge {
                 if latch {
                     self.latch_rtc();
                 }
+            }
+            // PKJD: the $A000-$BFFF window is the D/E/F protection port when a
+            // protection selector is active, else plain MBC3 SRAM/RTC.
+            EXTERNAL_RAM_START..=EXTERNAL_RAM_END
+                if matches!(self.unl_mapper, UnlMapper::PokeJadeDia(_)) =>
+            {
+                self.pokejade_write(addr, value);
             }
             // External RAM (0xA000-0xBFFF)
             EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
@@ -3531,6 +3614,97 @@ mod tests {
         let mut mbc1_header = rom.clone();
         mbc1_header[CARTRIDGE_TYPE_OFFSET] = MBC1_RAM_BATTERY;
         assert_eq!(Cartridge::detect_unl_mapper(&mbc1_header), UnlMapper::None);
+    }
+
+    /// Clean-room stand-in for the PKJD $0184 signature: detection keys ONLY on
+    /// the 48-byte CRC32 (0x65BBF1FC), never the bytes, so this is an ASCII
+    /// banner plus a 4-byte suffix computed to hit it -- the same block the
+    /// first-party mooneye ROM carries, and no cartridge code.
+    const PKJD_SIG: [u8; 48] =
+        *b"RUSTYBOI CLEANROOM PKJD TELEFANG DEF REGS !!\x74\xF4\xF7\x90";
+
+    /// 512KB image wearing a truthful MBC3+TIMER+RAM+BATTERY header ($10) with
+    /// the PKJD $0184 signature whose CRC32 keys detection.
+    fn make_pkjd_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x80000]; // 32 banks
+        rom[CARTRIDGE_TYPE_OFFSET] = MBC3_TIMER_RAM_BATTERY;
+        rom[ROM_SIZE_OFFSET] = 0x04; // 512KB
+        rom[RAM_SIZE_OFFSET] = 0x03; // 32KB / 4 banks
+        rom[0x184..0x1B4].copy_from_slice(&PKJD_SIG);
+        rom
+    }
+
+    #[test]
+    fn pkjd_detects_and_serves_def_registers() {
+        let rom = make_pkjd_rom();
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::PokeJadeDia(PokeJadeState::default())
+        );
+
+        // Truthful MBC3+TIMER+RAM+BATTERY header: decode falls through to it.
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(
+            cart.get_cartridge_type(),
+            CartridgeType::MBC3 { ram: true, battery: true, timer: true }
+        ));
+
+        // While RAM is disabled the protection window reads back open bus.
+        cart.write(0x4000, 0x0D);
+        assert_eq!(cart.read(0xA000), 0xFF);
+
+        cart.write(0x0000, 0x0A); // RAMG enable
+
+        // Register D and E round-trip through the $A000 window.
+        cart.write(0x4000, 0x0D);
+        cart.write(0xA000, 0x5A);
+        assert_eq!(cart.read(0xA000), 0x5A);
+        cart.write(0x4000, 0x0E);
+        cart.write(0xA000, 0x2D);
+        assert_eq!(cart.read(0xA000), 0x2D);
+        // D is untouched by the E traffic.
+        cart.write(0x4000, 0x0D);
+        assert_eq!(cart.read(0xA000), 0x5A);
+
+        // The $0F command port folds D and E (write-only: reads return 0).
+        let cmd = |cart: &mut Cartridge, c: u8| {
+            cart.write(0x4000, 0x0F);
+            cart.write(0xA000, c);
+        };
+        let reg = |cart: &mut Cartridge, sel: u8| {
+            cart.write(0x4000, sel);
+            cart.read(0xA000)
+        };
+        cmd(&mut cart, 0x41); // D += E -> $5A + $2D = $87
+        assert_eq!(reg(&mut cart, 0x0D), 0x87);
+        cmd(&mut cart, 0x51); // D++ -> $88
+        assert_eq!(reg(&mut cart, 0x0D), 0x88);
+        cmd(&mut cart, 0x12); // E-- -> $2C
+        assert_eq!(reg(&mut cart, 0x0E), 0x2C);
+        cmd(&mut cart, 0x42); // E += D -> $2C + $88 = $B4
+        assert_eq!(reg(&mut cart, 0x0E), 0xB4);
+        cmd(&mut cart, 0x11); // D-- -> $87
+        assert_eq!(reg(&mut cart, 0x0D), 0x87);
+
+        // $0F is write-only; the unpopulated RTC registers $08-$0C read 0.
+        cart.write(0x4000, 0x0F);
+        assert_eq!(cart.read(0xA000), 0x00);
+        cart.write(0x4000, 0x08);
+        assert_eq!(cart.read(0xA000), 0x00);
+
+        // Selector $00-$07 is ordinary MBC3 SRAM (round-trips through real RAM).
+        cart.write(0x4000, 0x00);
+        cart.write(0xA000, 0x99);
+        assert_eq!(cart.read(0xA000), 0x99);
+
+        // A one-byte perturbation of the $0184 block changes its CRC32, and the
+        // header-type gate keeps a non-$10 cart off this board.
+        let mut perturbed = rom.clone();
+        perturbed[0x184] ^= 0x01;
+        assert_eq!(Cartridge::detect_unl_mapper(&perturbed), UnlMapper::None);
+        let mut wrong_type = rom.clone();
+        wrong_type[CARTRIDGE_TYPE_OFFSET] = MBC3_RAM_BATTERY;
+        assert_eq!(Cartridge::detect_unl_mapper(&wrong_type), UnlMapper::None);
     }
 
     /// Drives the general-VF001 config register file the way the boot code
