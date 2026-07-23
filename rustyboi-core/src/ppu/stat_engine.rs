@@ -475,7 +475,7 @@ impl Ppu {
     pub(crate) fn skip_inert_dots(&mut self, mmio: &mut mmio::Mmio, max_render_dots: u32) -> u32 {
         const INTERIOR_START: u32 = 8;
         const INTERIOR_END: u32 = 448;
-        if self.disabled || self.bgp_defer_countdown > 0 || max_render_dots == 0 {
+        if self.disabled || self.plot.bgp_defer_countdown > 0 || max_render_dots == 0 {
             return 0;
         }
         // A pending delayed LCDC commit must land at its exact dot.
@@ -581,9 +581,9 @@ impl Ppu {
         self.abs_cc = self.abs_cc.wrapping_add((n as u64) << ds);
         // The palette latch would have re-read the (unchanged) registers each
         // dot; leave it equal to the per-dot outcome.
-        self.bgp_delayed = mmio.ppu_io_reg(BGP);
-        self.obp0_delayed = mmio.ppu_io_reg(OBP0);
-        self.obp1_delayed = mmio.ppu_io_reg(OBP1);
+        self.plot.bgp_delayed = mmio.ppu_io_reg(BGP);
+        self.plot.obp0_delayed = mmio.ppu_io_reg(OBP0);
+        self.plot.obp1_delayed = mmio.ppu_io_reg(OBP1);
         n
     }
     /// Conservative count of MASTER-cc dots until the PPU's frame wrap (the
@@ -607,11 +607,11 @@ impl Ppu {
         // Disabled slots hold huge sentinels (u64::MAX / DISABLED_TIME), so the
         // min naturally excludes them.
         let min_sched = self
-            .wy2_apply_cc
-            .min(self.wy1_apply_cc)
-            .min(self.wy_recheck_cc)
-            .min(self.scy_apply_cc)
-            .min(self.scx_apply_cc)
+            .latch.wy2_apply_cc
+            .min(self.latch.wy1_apply_cc)
+            .min(self.latch.wy_recheck_cc)
+            .min(self.latch.scy_apply_cc)
+            .min(self.latch.scx_apply_cc)
             .min(self.sched_oneshot_statirq)
             .min(self.sched_m1irq)
             .min(self.sched_lycirq)
@@ -622,25 +622,25 @@ impl Ppu {
             return;
         }
 
-        if self.wy2_apply_cc != wy2_disabled() && self.wy2_apply_cc <= cc {
-            self.wy2 = self.wy2_pending;
-            self.wy2_apply_cc = wy2_disabled();
+        if self.latch.wy2_apply_cc != wy2_disabled() && self.latch.wy2_apply_cc <= cc {
+            self.latch.wy2 = self.latch.wy2_pending;
+            self.latch.wy2_apply_cc = wy2_disabled();
         }
-        if self.wy1_apply_cc != wy2_disabled() && self.wy1_apply_cc <= cc {
-            self.wy1 = self.wy1_pending;
-            self.wy1_apply_cc = wy2_disabled();
+        if self.latch.wy1_apply_cc != wy2_disabled() && self.latch.wy1_apply_cc <= cc {
+            self.latch.wy1 = self.latch.wy1_pending;
+            self.latch.wy1_apply_cc = wy2_disabled();
         }
-        if self.wy_recheck_cc != wy2_disabled() && self.wy_recheck_cc <= cc {
-            self.wy_recheck_cc = wy2_disabled();
+        if self.latch.wy_recheck_cc != wy2_disabled() && self.latch.wy_recheck_cc <= cc {
+            self.latch.wy_recheck_cc = wy2_disabled();
             self.run_wy_recheck(mmio.is_cgb(), mmio.is_cgb_features_enabled(), ds);
         }
-        if self.scy_apply_cc != wy2_disabled() && self.scy_apply_cc <= cc {
-            self.scy_delayed = self.scy_pending;
-            self.scy_apply_cc = wy2_disabled();
+        if self.latch.scy_apply_cc != wy2_disabled() && self.latch.scy_apply_cc <= cc {
+            self.latch.scy_delayed = self.latch.scy_pending;
+            self.latch.scy_apply_cc = wy2_disabled();
         }
-        if self.scx_apply_cc != wy2_disabled() && self.scx_apply_cc <= cc {
-            self.scx_delayed = self.scx_pending;
-            self.scx_apply_cc = wy2_disabled();
+        if self.latch.scx_apply_cc != wy2_disabled() && self.latch.scx_apply_cc <= cc {
+            self.latch.scx_delayed = self.latch.scx_pending;
+            self.latch.scx_apply_cc = wy2_disabled();
         }
 
         if self.sched_oneshot_statirq <= cc {
@@ -736,11 +736,11 @@ impl Ppu {
 
         // Refresh the cached fast-bail bound from the post-fire schedule.
         self.sched_min = self
-            .wy2_apply_cc
-            .min(self.wy1_apply_cc)
-            .min(self.wy_recheck_cc)
-            .min(self.scy_apply_cc)
-            .min(self.scx_apply_cc)
+            .latch.wy2_apply_cc
+            .min(self.latch.wy1_apply_cc)
+            .min(self.latch.wy_recheck_cc)
+            .min(self.latch.scy_apply_cc)
+            .min(self.latch.scx_apply_cc)
             .min(self.sched_oneshot_statirq)
             .min(self.sched_m1irq)
             .min(self.sched_lycirq)

@@ -36,7 +36,7 @@ impl Ppu {
         // The checkpoints compare against WY as applied `1 + cgb` cc after the
         // write, not the live mmio value; `wy1` is that delayed copy, so a
         // mid-frame WY write reaches these checkpoints with the correct phase.
-        let wy = self.wy1 as i32;
+        let wy = self.latch.wy1 as i32;
 
         // ly0 check (only valid during the active frame's line 0 mode-2), at line
         // cycle 1 + cgb. Also runs on the first line after enable (where ly is
@@ -124,9 +124,9 @@ impl Ppu {
             // (cgb_train_reresolve): a column BG won iff its final color equals
             // the BG-only compat color of its index (a sprite otherwise overrode
             // it, or the index-independent sprite result differs).
-            if (self.x as usize) < self.line_bg_idx.len() {
+            if (self.x as usize) < self.plot.line_bg_idx.len() {
                 let bg_only = self.compat_bg_color(mmio, if bg_enabled_col { bg_pixel_idx } else { 0 });
-                self.line_bg_idx[self.x as usize] =
+                self.plot.line_bg_idx[self.x as usize] =
                     if bg_enabled_col && final_color_rgb == bg_only { bg_pixel_idx as i8 } else { -1 };
             }
             let color_offset = fb_offset as usize * 3;
@@ -141,9 +141,9 @@ impl Ppu {
             // mix is untouched). A per-write glitch here cannot see a SET write's FUTURE
             // RESTORE neighbor (the SET column draws before the RESTORE write lands), so
             // the two-write cadence gate is deferred to the post-pass. See `bgp_writes`.
-            if (self.x as usize) < self.line_bg_idx.len() {
+            if (self.x as usize) < self.plot.line_bg_idx.len() {
                 let bg_won = bg_enabled_col && final_color == self.get_palette_color(mmio, bg_pixel_idx, self.x);
-                self.line_bg_idx[self.x as usize] = if bg_won { bg_pixel_idx as i8 } else { -1 };
+                self.plot.line_bg_idx[self.x as usize] = if bg_won { bg_pixel_idx as i8 } else { -1 };
             }
             let intensity = match final_color {
                 0 => 255,
@@ -221,7 +221,7 @@ impl Ppu {
         if self.window_y_triggered {
             return true;
         }
-        self.wy2 == mmio.read(LY)
+        self.latch.wy2 == mmio.read(LY)
     }
 
     pub(in crate::ppu) fn window_will_start(&self, mmio: &mmio::Mmio, is_cgb: bool) -> bool {
@@ -266,7 +266,7 @@ impl Ppu {
         self.wxa6_lineend_applied = true;
         let win_en_now = self.lcdc_has(LCDCFlags::WindowDisplayEnable);
         let we_gate = self.window_y_triggered
-            || (self.wy2 == mmio.read(LY) && win_en_now);
+            || (self.latch.wy2 == mmio.read(LY) && win_en_now);
         if !we_gate {
             return;
         }
@@ -295,15 +295,15 @@ impl Ppu {
     // single seed (boundary 0) and this always returns the seeded value —
     // byte-identical to a once-per-pixel live `lcdc & 1` read.
     fn bgen_at(&self, _mmio: &mmio::Mmio, _is_cgb: bool, sx: u8) -> bool {
-        if self.bgen_history.len() <= 1 {
+        if self.plot.bgen_history.len() <= 1 {
             return self
-                .bgen_history
+                .plot.bgen_history
                 .last()
                 .map(|&(_, b)| b)
                 .unwrap_or(self.lcdc_has(LCDCFlags::BGDisplay));
         }
-        let mut bgen = self.bgen_history[0].1;
-        for &(boundary_col, b) in self.bgen_history.iter() {
+        let mut bgen = self.plot.bgen_history[0].1;
+        for &(boundary_col, b) in self.plot.bgen_history.iter() {
             if boundary_col <= sx as u64 {
                 bgen = b;
             } else {
@@ -826,8 +826,8 @@ impl Ppu {
                                 window_line: self.win_y_pos,
                                 display_x: self.x,
                                 pending_discard: 0,
-                                scy: self.scy_delayed,
-                                scx: self.scx_delayed,
+                                scy: self.latch.scy_delayed,
+                                scx: self.latch.scx_delayed,
                             },
                         ) {
                             if matches!(
@@ -908,8 +908,8 @@ impl Ppu {
                 window_line: self.win_y_pos,
                 display_x: self.x,
                 pending_discard,
-                scy: self.scy_delayed,
-                scx: self.scx_delayed,
+                scy: self.latch.scy_delayed,
+                scx: self.latch.scx_delayed,
             }) {
                 if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::TileNumber) {
                     self.m3.subcc_last_tn_cc = self.abs_cc;
@@ -1105,7 +1105,7 @@ impl Ppu {
                             // under the NEW scx) must also revert to the OLD scx;
                             // on LY>=1 that next tile keeps the NEW scx.
                             if old_col != new_col {
-                                let bg_y = (self.scy_delayed as u16
+                                let bg_y = (self.latch.scy_delayed as u16
                                     + mmio.read(LY) as u16) & 0xFF;
                                 let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
                                 let off = (xpos as usize).saturating_sub(self.x as usize);
@@ -1133,7 +1133,7 @@ impl Ppu {
                                 armed_this_event = true;
                             }
                         } else if new_col != old_col {
-                            let bg_y = (self.scy_delayed as u16
+                            let bg_y = (self.latch.scy_delayed as u16
                                 + mmio.read(LY) as u16) & 0xFF;
                             let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
                             self.fetcher.pixel_fifo.overwrite_newest(&pixels);
@@ -1176,7 +1176,7 @@ impl Ppu {
                     let new_col = (((self.m3.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
                     let old_col = (((self.m3.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
                     if new_col != old_col {
-                        let bg_y = (self.scy_delayed as u16
+                        let bg_y = (self.latch.scy_delayed as u16
                             + mmio.read(LY) as u16) & 0xFF;
                         let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
                         self.fetcher.pixel_fifo.overwrite_newest(&pixels);
@@ -1198,7 +1198,7 @@ impl Ppu {
                     let new_col2 = (((self.m3.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
                     let old_col2 = (((self.m3.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
                     if new_col2 != old_col2 {
-                        let bg_y = (self.scy_delayed as u16
+                        let bg_y = (self.latch.scy_delayed as u16
                             + mmio.read(LY) as u16) & 0xFF;
                         let pixels = self.bg_pixels_at_col(mmio, old_col2, bg_y);
                         let off = (xpos as usize).saturating_sub(self.x as usize);
@@ -1221,7 +1221,7 @@ impl Ppu {
                     let new_col = (((self.m3.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
                     let old_col = (((self.m3.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
                     if new_col != old_col {
-                        let bg_y = (self.scy_delayed as u16
+                        let bg_y = (self.latch.scy_delayed as u16
                             + mmio.read(LY) as u16) & 0xFF;
                         let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
                         self.fetcher.pixel_fifo.overwrite_newest(&pixels);
@@ -1464,7 +1464,7 @@ impl Ppu {
                     // Subsequent tiles keep their live-SCX columns (the
                     // fetcher re-reads scx_delayed), so a later SCX write
                     // that moves the steady-state column is preserved.
-                    let bg_y = (self.scy_delayed as u16
+                    let bg_y = (self.latch.scy_delayed as u16
                         + mmio.read(LY) as u16) & 0xFF;
                     self.rewrite_first_fifo_tile(mmio, brk_col, bg_y);
                     self.m3.m3_pixels_discarded = 0;
@@ -1579,8 +1579,8 @@ impl Ppu {
                             window_line: self.win_y_pos,
                             display_x: self.x,
                             pending_discard: 0,
-                            scy: self.scy_delayed,
-                            scx: self.scx_delayed,
+                            scy: self.latch.scy_delayed,
+                            scx: self.latch.scx_delayed,
                         },
                     ) {
                         if matches!(
@@ -1701,8 +1701,8 @@ impl Ppu {
                         window_line: self.win_y_pos,
                         display_x: self.x,
                         pending_discard: 0,
-                        scy: self.scy_delayed,
-                        scx: self.scx_delayed,
+                        scy: self.latch.scy_delayed,
+                        scx: self.latch.scx_delayed,
                     },
                 ) {
                     if matches!(

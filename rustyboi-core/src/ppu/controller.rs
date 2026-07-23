@@ -1626,6 +1626,252 @@ pub(in crate::ppu) struct Mode0Schedule {
     pub(in crate::ppu) m3_scheduled_win: bool,
 }
 
+/// The uniform delayed-register latches: for WY1/WY2/SCY/SCX, the value the PPU
+/// currently sees, the absolute cc at which a pending write becomes visible, and
+/// the staged value that lands there. Plus the scheduled WY==LY re-comparison
+/// and the exact-cc f1-discard SCX latch.
+#[derive(Serialize, Deserialize, Clone)]
+pub(in crate::ppu) struct DelayedRegs {
+    // The hardware `wy2`: WY delayed by `6 - double_speed` cc after a write.
+    // Event-scheduled against the write cc; consumed by the window-Y gate so
+    // the M3-length predictor / window-start see the delayed value.
+    #[serde(default)]
+    pub(in crate::ppu) wy2: u8,
+    // Absolute clock at which a pending wy2 update applies; DISABLED when none.
+    #[serde(default = "wy2_disabled")]
+    pub(in crate::ppu) wy2_apply_cc: u64,
+    // The WY value to latch into wy2 when wy2_apply_cc arrives.
+    #[serde(default)]
+    pub(in crate::ppu) wy2_pending: u8,
+    // The delayed WY value the window-enable master checkpoints read: updated at
+    // `cc + 1 + cgb` after a write (`update(cc + 1 + cgb)` in `WY change`).
+    // Distinct from `wy2` (the per-line gate value), which is delayed further.
+    #[serde(default = "win_y_pos_init")]
+    pub(in crate::ppu) wy1: u8,
+    #[serde(default = "wy2_disabled")]
+    pub(in crate::ppu) wy1_apply_cc: u64,
+    // Absolute clock of a pending on-write WY==LY re-comparison (hardware's
+    // scheduled window-Y check). A WY or LCDC store re-runs the comparator a
+    // few cc later instead of waiting for the next per-line checkpoint, so a
+    // WY value that is only briefly equal to the current line still arms the
+    // window. DISABLED when none; never armed once the latch is already set.
+    //
+    #[serde(default = "wy2_disabled")]
+    pub(in crate::ppu) wy_recheck_cc: u64,
+    #[serde(default)]
+    pub(in crate::ppu) wy1_pending: u8,
+    // Delayed SCY/SCX visible to the BG fetcher during mode 3. A mid-M3 write to
+    // FF42/FF43 resolves in mmio immediately (CPU readback is live), but the
+    // fetcher sees the new value only after `scy/scx_apply_cc` (write-side analog
+    // of the wy1/wy2 delayed-apply latches). Steady-state these equal the live
+    // register, so non-write rendering is unaffected.
+    #[serde(default)]
+    pub(in crate::ppu) scy_delayed: u8,
+    #[serde(default = "wy2_disabled")]
+    pub(in crate::ppu) scy_apply_cc: u64,
+    #[serde(default)]
+    pub(in crate::ppu) scy_pending: u8,
+    #[serde(default)]
+    pub(in crate::ppu) scx_delayed: u8,
+    #[serde(default = "wy2_disabled")]
+    pub(in crate::ppu) scx_apply_cc: u64,
+    #[serde(default)]
+    pub(in crate::ppu) scx_pending: u8,
+    // Exact-cc f1-discard SCX latch. On hardware the SCX change becomes visible at
+    // `cc + 2*cgb` (before the SCX write itself resolves), so on CGB the new SCX is only
+    // visible to the f1 fine-scroll discard 2 PPU cc after the write's cc. The
+    // f1 loop reads SCX as-of its dot's exact abs_cc through this latch instead
+    // of the immediate register, so a mid-discard SCX write lands on the
+    // correct f1 iteration without shifting the steady-state discard timing.
+    #[serde(default)]
+    pub(in crate::ppu) scx_prev_f1: u8, // value in effect before the pending write
+    #[serde(default = "wy2_disabled")]
+    pub(in crate::ppu) scx_f1_apply_cc: u64, // abs_cc at which scx_pending becomes visible to f1
+    #[serde(default)]
+    pub(in crate::ppu) scx_f1_new: u8,
+}
+
+// `wy1` powers on at 0xFF (no window-Y match yet) and the six apply-cc slots at
+// the `wy2_disabled()` sentinel, so this cannot be derived.
+impl Default for DelayedRegs {
+    fn default() -> Self {
+        DelayedRegs {
+            wy2: 0,
+            wy2_apply_cc: wy2_disabled(),
+            wy2_pending: 0,
+            wy1: 0xFF,
+            wy1_apply_cc: wy2_disabled(),
+            wy_recheck_cc: wy2_disabled(),
+            wy1_pending: 0,
+            scy_delayed: 0,
+            scy_apply_cc: wy2_disabled(),
+            scy_pending: 0,
+            scx_delayed: 0,
+            scx_apply_cc: wy2_disabled(),
+            scx_pending: 0,
+            scx_prev_f1: 0,
+            scx_f1_apply_cc: wy2_disabled(),
+            scx_f1_new: 0,
+        }
+    }
+}
+
+/// The per-column / per-dot value histories the burst-flushed renderer resolves
+/// each plotted pixel against (BG/OBJ enable, OBJ size, the DMG palettes), plus
+/// the one-dot palette latches that seed them and the DMG BGP-write spike journal.
+#[derive(Serialize, Deserialize, Clone)]
+pub(in crate::ppu) struct PlotHistory {
+    // DMG palette registers delayed by one dot. A BGP/OBP write during mode 3
+    // is resolved by the CPU before the four PPU dots of the write M-cycle are
+    // stepped, but on hardware the new palette only affects the pixel one dot
+    // after the write lands. The renderer resolves palettes at pixel shift-out
+    // from these delayed copies; each are refreshed to the live register at the
+    // end of every dot, yielding the one-dot apply latency.
+    #[serde(default)]
+    pub(in crate::ppu) bgp_delayed: u8,
+    #[serde(default)]
+    pub(in crate::ppu) obp0_delayed: u8,
+    #[serde(default)]
+    pub(in crate::ppu) obp1_delayed: u8,
+    // DMG mid-mode-3 BGP sub-M-cycle phase hold. `on_bgp_write` fires at the write
+    // M-cycle START, but the store's bus-write lands a phase-dependent number of dots
+    // later; for a write whose `master_cc % 4` is non-zero the new value must not reach
+    // `bgp_delayed` until `bgp_defer_countdown` more dot-refreshes have passed. The old
+    // (pre-write) value is held in `bgp_defer_hold` meanwhile. Phase-0 writes set
+    // countdown 0 and are byte-identical to the plain one-dot latch. See `on_bgp_write`.
+    #[serde(default)]
+    pub(in crate::ppu) bgp_defer_hold: u8,
+    #[serde(default)]
+    pub(in crate::ppu) bgp_defer_countdown: u8,
+    // Per-line LCDC.0 (BG-enable) plot history for the per-pixel renderer.
+    // The per-dot draw is flushed in bursts (the
+    // mode-0 time flush draws all remaining FIFO pixels at one cc), so a live
+    // `self.lcdc.reg & 1` read applies the final BG-enable to every flushed column
+    // and a mid-mode-3 LCDC.0 toggle (BG off then on within pixel transfer) is
+    // lost. Hardware instead reads `lcdc & bg_enable` live as the fetcher walks
+    // tiles, so each plotted column sees the BG-enable bit in effect at its own
+    // plot position. We record the BG-enable changes during this line's mode 3
+    // as (boundary_col, bgen) entries — columns >= boundary_col see the new bit.
+    // The first entry (boundary_col == 0) seeds the value at mode-3 start.
+    // Empty/single-entry => no mid-line toggle => identical to the live read.
+    #[serde(default)]
+    pub(in crate::ppu) bgen_history: Vec<(u64, bool)>,
+    // DMG per-dot OBJ-enable (LCDC.1) history. Hardware gates each sprite pixel
+    // on OBJ-enable AT THAT PIXEL'S pop dot (hardware's pixel-render step
+    // reads LCDC.1 live per popped pixel), so a mid-mode-3 disable/enable
+    // covers an exact dot span — which maps to columns THROUGH the stall
+    // schedule (a column popping late because of a sprite stall resolves the
+    // gate at its actual pop dot). Entries are (apply_tick, enabled); pops at
+    // ticks >= apply_tick see the new bit. Seeded at mode-3 entry (tick 0);
+    // single-entry == no toggle == the live-read fast path.
+    #[serde(default)]
+    pub(in crate::ppu) objen_history: Vec<(u128, bool)>,
+    // DMG per-dot OBJ-size (LCDC.2) history: (apply_tick, large). The sprite
+    // fetcher samples LCDC.2 independently at each tile-data byte's own fetch
+    // dot (hardware recomputes the object line address for the low AND high
+    // byte), so a mid-fetch toggle splits the row addressing between bytes.
+    // Seeded at mode-3 entry (apply_tick 0).
+    #[serde(default)]
+    pub(in crate::ppu) objsize_dot_history: Vec<(u128, bool)>,
+    // Per-line BGP / OBP0 / OBP1 plot history for the per-pixel renderer, mirroring
+    // `bgen_history`. A mid-mode-3 write to BGP (FF47) / OBP0 (FF48) / OBP1 (FF49)
+    // takes effect at the exact pixel being drawn `MID_M3_PAL_LATENCY` dots later
+    // (the DMG palette-RAM pipeline latency). The per-dot draw is flushed in
+    // bursts at mode-0 time, so a single
+    // live `mmio.read(BGP)` snapshot would apply the final value to every flushed
+    // column. We record each mid-mode-3 change as a (boundary_col, value) entry —
+    // columns >= boundary_col see the new value — and resolve per displayed column.
+    // The first entry (boundary 0) seeds the value at mode-3 start; with no mid-line
+    // write the history is a single seed and resolves to that value for the whole
+    // line (identical to the previous `bgp_delayed` steady-state read).
+    #[serde(default)]
+    pub(in crate::ppu) bgp_history: Vec<(u64, u8)>,
+    #[serde(default)]
+    pub(in crate::ppu) obp0_history: Vec<(u64, u8)>,
+    #[serde(default)]
+    pub(in crate::ppu) obp1_history: Vec<(u64, u8)>,
+    // DMG dot-keyed OBP histories: (apply_tick, value). The OBP register is
+    // sampled as each sprite pixel pops out of the OAM FIFO, so the correct
+    // key is the pixel's POP DOT — the column mapping breaks whenever a sprite
+    // stall delays the pops (e.g. a pixel at column 8 popping at dot 111 must see
+    // a write that applied at dot 105, even though the write's column boundary was
+    // 9). On stall-free lines this
+    // is exactly equivalent to the column model (columns pop 1/dot). It also
+    // subsumes the old off-left-edge column-0 forcing: left-clipped sprites'
+    // pixels pop early, before any mid-mode-3 write applies.
+    #[serde(default)]
+    pub(in crate::ppu) obp0_dot_history: Vec<(u128, u8)>,
+    #[serde(default)]
+    pub(in crate::ppu) obp1_dot_history: Vec<(u128, u8)>,
+    // Dot-keyed BGP history for the CGB / DMG-compat BG color path. A mid-mode-3
+    // BGP write applies at `ticks + latency` (a DOT), and each BG pixel is colored
+    // at its own pop dot — which is delayed by any sprite-fetch stall between the
+    // write and that column. Sampling by pop-dot (not display column) makes the
+    // stall absorption exact for both the on-stall write and a pre-stall write
+    // whose target column is pushed past the stall. The column-keyed `bgp_history`
+    // remains the DMG-hardware path.
+    #[serde(default)]
+    pub(in crate::ppu) bgp_dot_history: Vec<(u128, u8)>,
+    // DMG mid-mode-3 BGP-write "glitch". On real DMG hardware a
+    // CPU write to BGP (FF47) during mode 3 can collide with the PPU's palette read for
+    // the pixel being pushed at that dot: the register is mid-transition and the pixel is
+    // looked up through the bitwise OR of the old and new BGP bytes (`old | new`) rather
+    // than either settled value. When old and new differ in a color slot the OR sets
+    // extra shade bits, darkening that one pixel — the "black spike" bracketing each
+    // mid-line palette band (e.g. old=$41,new=$42 -> $43, so a color-0 pixel reads shade
+    // 3 / black; when old|new==old the spike is invisible). It is a TWO-WRITE collision
+    // (see `bgp_writes`), so a lone or loosely-spaced write shows no spike. CGB uses
+    // true-color palette RAM and shows no such collapse, so this is DMG-gated. The two
+    // fields below drive it, both reset at mode-3 start:
+    // Per-column BG color index (0-3) of the pixel drawn at each display column this
+    // line, or -1 where a sprite won the mix / the column is undrawn. Recorded by the
+    // per-dot DMG draw and read by `resolve_bgp_spikes` to re-map the glitched columns
+    // through the OR palette at mode-3 end. 160 entries, reset each line.
+    #[serde(default)]
+    pub(in crate::ppu) line_bg_idx: Vec<i8>,
+    // Every mid-mode-3 BGP write on the current line, as (abs_cc, display_col, old|new).
+    // The DMG palette-latch glitch is a TWO-WRITE interaction: a write spikes its own
+    // pixel only when it has a neighboring mid-mode-3 write within the tight SET/RESTORE
+    // cadence (`BGP_SPIKE_CADENCE_CC`, ~12-dot pairs). A single write, or one loosely
+    // spaced (one write per line, or 60-148 dots apart), does NOT collide and shows no
+    // spike. The gate is
+    // resolved at mode-3 end (all writes known) by `resolve_bgp_spikes`, which paints the
+    // glitch straight into the framebuffer. Reset at mode-3 start.
+    #[serde(default)]
+    pub(in crate::ppu) bgp_writes: Vec<(u64, u8, u8)>,
+    // Last mode-2 (OAM scan) BGP write (cc, value), carried across the mode-3-arm
+    // bgp_writes clear and injected as a neighbor-only spike entry at mode-3 entry
+    // (see on_bgp_write / the arm seed). None once consumed or if no mode-2 write.
+    #[serde(default)]
+    pub(in crate::ppu) bgp_mode2_pending: Option<(u64, u8)>,
+}
+
+// `line_bg_idx` powers on as 160 "no BG pixel drawn" (-1) entries rather than an
+// empty Vec, so this cannot be derived.
+impl Default for PlotHistory {
+    fn default() -> Self {
+        PlotHistory {
+            bgp_delayed: 0,
+            obp0_delayed: 0,
+            obp1_delayed: 0,
+            bgp_defer_hold: 0,
+            bgp_defer_countdown: 0,
+            bgen_history: Vec::new(),
+            objen_history: Vec::new(),
+            objsize_dot_history: Vec::new(),
+            bgp_history: Vec::new(),
+            obp0_history: Vec::new(),
+            obp1_history: Vec::new(),
+            obp0_dot_history: Vec::new(),
+            obp1_dot_history: Vec::new(),
+            bgp_dot_history: Vec::new(),
+            line_bg_idx: vec![-1; 160],
+            bgp_writes: Vec::new(),
+            bgp_mode2_pending: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Ppu {
     pub(in crate::ppu) fetcher: fetcher::Fetcher,
@@ -1921,63 +2167,7 @@ pub struct Ppu {
     #[serde(default = "pnow_disabled")]
     pub(in crate::ppu) p_now: u64,
     pub(in crate::ppu) speed: SpeedPhase,
-    // The hardware `wy2`: WY delayed by `6 - double_speed` cc after a write.
-    // Event-scheduled against the write cc; consumed by the window-Y gate so
-    // the M3-length predictor / window-start see the delayed value.
-    #[serde(default)]
-    pub(in crate::ppu) wy2: u8,
-    // Absolute clock at which a pending wy2 update applies; DISABLED when none.
-    #[serde(default = "wy2_disabled")]
-    pub(in crate::ppu) wy2_apply_cc: u64,
-    // The WY value to latch into wy2 when wy2_apply_cc arrives.
-    #[serde(default)]
-    pub(in crate::ppu) wy2_pending: u8,
-    // The delayed WY value the window-enable master checkpoints read: updated at
-    // `cc + 1 + cgb` after a write (`update(cc + 1 + cgb)` in `WY change`).
-    // Distinct from `wy2` (the per-line gate value), which is delayed further.
-    #[serde(default = "win_y_pos_init")]
-    pub(in crate::ppu) wy1: u8,
-    #[serde(default = "wy2_disabled")]
-    pub(in crate::ppu) wy1_apply_cc: u64,
-    // Absolute clock of a pending on-write WY==LY re-comparison (hardware's
-    // scheduled window-Y check). A WY or LCDC store re-runs the comparator a
-    // few cc later instead of waiting for the next per-line checkpoint, so a
-    // WY value that is only briefly equal to the current line still arms the
-    // window. DISABLED when none; never armed once the latch is already set.
-    //
-    #[serde(default = "wy2_disabled")]
-    pub(in crate::ppu) wy_recheck_cc: u64,
-    #[serde(default)]
-    pub(in crate::ppu) wy1_pending: u8,
-    // Delayed SCY/SCX visible to the BG fetcher during mode 3. A mid-M3 write to
-    // FF42/FF43 resolves in mmio immediately (CPU readback is live), but the
-    // fetcher sees the new value only after `scy/scx_apply_cc` (write-side analog
-    // of the wy1/wy2 delayed-apply latches). Steady-state these equal the live
-    // register, so non-write rendering is unaffected.
-    #[serde(default)]
-    pub(in crate::ppu) scy_delayed: u8,
-    #[serde(default = "wy2_disabled")]
-    pub(in crate::ppu) scy_apply_cc: u64,
-    #[serde(default)]
-    pub(in crate::ppu) scy_pending: u8,
-    #[serde(default)]
-    pub(in crate::ppu) scx_delayed: u8,
-    #[serde(default = "wy2_disabled")]
-    pub(in crate::ppu) scx_apply_cc: u64,
-    #[serde(default)]
-    pub(in crate::ppu) scx_pending: u8,
-    // Exact-cc f1-discard SCX latch. On hardware the SCX change becomes visible at
-    // `cc + 2*cgb` (before the SCX write itself resolves), so on CGB the new SCX is only
-    // visible to the f1 fine-scroll discard 2 PPU cc after the write's cc. The
-    // f1 loop reads SCX as-of its dot's exact abs_cc through this latch instead
-    // of the immediate register, so a mid-discard SCX write lands on the
-    // correct f1 iteration without shifting the steady-state discard timing.
-    #[serde(default)]
-    pub(in crate::ppu) scx_prev_f1: u8, // value in effect before the pending write
-    #[serde(default = "wy2_disabled")]
-    pub(in crate::ppu) scx_f1_apply_cc: u64, // abs_cc at which scx_pending becomes visible to f1
-    #[serde(default)]
-    pub(in crate::ppu) scx_f1_new: u8,
+    pub(in crate::ppu) latch: DelayedRegs,
     #[serde(default)]
     pub(in crate::ppu) line_cycle: u32,
     #[serde(default)]
@@ -2044,137 +2234,15 @@ pub struct Ppu {
     #[serde(default)]
     pub(in crate::ppu) stat_reg_committed: u8,
 
-    // DMG palette registers delayed by one dot. A BGP/OBP write during mode 3
-    // is resolved by the CPU before the four PPU dots of the write M-cycle are
-    // stepped, but on hardware the new palette only affects the pixel one dot
-    // after the write lands. The renderer resolves palettes at pixel shift-out
-    // from these delayed copies; each are refreshed to the live register at the
-    // end of every dot, yielding the one-dot apply latency.
-    #[serde(default)]
-    pub(in crate::ppu) bgp_delayed: u8,
-    #[serde(default)]
-    pub(in crate::ppu) obp0_delayed: u8,
-    #[serde(default)]
-    pub(in crate::ppu) obp1_delayed: u8,
-    // DMG mid-mode-3 BGP sub-M-cycle phase hold. `on_bgp_write` fires at the write
-    // M-cycle START, but the store's bus-write lands a phase-dependent number of dots
-    // later; for a write whose `master_cc % 4` is non-zero the new value must not reach
-    // `bgp_delayed` until `bgp_defer_countdown` more dot-refreshes have passed. The old
-    // (pre-write) value is held in `bgp_defer_hold` meanwhile. Phase-0 writes set
-    // countdown 0 and are byte-identical to the plain one-dot latch. See `on_bgp_write`.
-    #[serde(default)]
-    pub(in crate::ppu) bgp_defer_hold: u8,
-    #[serde(default)]
-    pub(in crate::ppu) bgp_defer_countdown: u8,
+    pub(in crate::ppu) plot: PlotHistory,
 
     pub(in crate::ppu) out: FrameOut,
     pub(in crate::ppu) lcdc: LcdcState,
     pub(in crate::ppu) wg: BusGlitch,
-    // Per-line LCDC.0 (BG-enable) plot history for the per-pixel renderer.
-    // The per-dot draw is flushed in bursts (the
-    // mode-0 time flush draws all remaining FIFO pixels at one cc), so a live
-    // `self.lcdc.reg & 1` read applies the final BG-enable to every flushed column
-    // and a mid-mode-3 LCDC.0 toggle (BG off then on within pixel transfer) is
-    // lost. Hardware instead reads `lcdc & bg_enable` live as the fetcher walks
-    // tiles, so each plotted column sees the BG-enable bit in effect at its own
-    // plot position. We record the BG-enable changes during this line's mode 3
-    // as (boundary_col, bgen) entries — columns >= boundary_col see the new bit.
-    // The first entry (boundary_col == 0) seeds the value at mode-3 start.
-    // Empty/single-entry => no mid-line toggle => identical to the live read.
-    #[serde(default)]
-    pub(in crate::ppu) bgen_history: Vec<(u64, bool)>,
-    // DMG per-dot OBJ-enable (LCDC.1) history. Hardware gates each sprite pixel
-    // on OBJ-enable AT THAT PIXEL'S pop dot (hardware's pixel-render step
-    // reads LCDC.1 live per popped pixel), so a mid-mode-3 disable/enable
-    // covers an exact dot span — which maps to columns THROUGH the stall
-    // schedule (a column popping late because of a sprite stall resolves the
-    // gate at its actual pop dot). Entries are (apply_tick, enabled); pops at
-    // ticks >= apply_tick see the new bit. Seeded at mode-3 entry (tick 0);
-    // single-entry == no toggle == the live-read fast path.
-    #[serde(default)]
-    pub(in crate::ppu) objen_history: Vec<(u128, bool)>,
-    // DMG per-dot OBJ-size (LCDC.2) history: (apply_tick, large). The sprite
-    // fetcher samples LCDC.2 independently at each tile-data byte's own fetch
-    // dot (hardware recomputes the object line address for the low AND high
-    // byte), so a mid-fetch toggle splits the row addressing between bytes.
-    // Seeded at mode-3 entry (apply_tick 0).
-    #[serde(default)]
-    pub(in crate::ppu) objsize_dot_history: Vec<(u128, bool)>,
     // Per-sprite live fetch records, parallel to `sprites_on_line` (see
     // `SpriteFetchRec`). Rebuilt (all Pending) at mode-3 entry.
     #[serde(default)]
     pub(in crate::ppu) sprite_fetch_recs: Vec<SpriteFetchRec>,
-    // Per-line BGP / OBP0 / OBP1 plot history for the per-pixel renderer, mirroring
-    // `bgen_history`. A mid-mode-3 write to BGP (FF47) / OBP0 (FF48) / OBP1 (FF49)
-    // takes effect at the exact pixel being drawn `MID_M3_PAL_LATENCY` dots later
-    // (the DMG palette-RAM pipeline latency). The per-dot draw is flushed in
-    // bursts at mode-0 time, so a single
-    // live `mmio.read(BGP)` snapshot would apply the final value to every flushed
-    // column. We record each mid-mode-3 change as a (boundary_col, value) entry —
-    // columns >= boundary_col see the new value — and resolve per displayed column.
-    // The first entry (boundary 0) seeds the value at mode-3 start; with no mid-line
-    // write the history is a single seed and resolves to that value for the whole
-    // line (identical to the previous `bgp_delayed` steady-state read).
-    #[serde(default)]
-    pub(in crate::ppu) bgp_history: Vec<(u64, u8)>,
-    #[serde(default)]
-    pub(in crate::ppu) obp0_history: Vec<(u64, u8)>,
-    #[serde(default)]
-    pub(in crate::ppu) obp1_history: Vec<(u64, u8)>,
-    // DMG dot-keyed OBP histories: (apply_tick, value). The OBP register is
-    // sampled as each sprite pixel pops out of the OAM FIFO, so the correct
-    // key is the pixel's POP DOT — the column mapping breaks whenever a sprite
-    // stall delays the pops (e.g. a pixel at column 8 popping at dot 111 must see
-    // a write that applied at dot 105, even though the write's column boundary was
-    // 9). On stall-free lines this
-    // is exactly equivalent to the column model (columns pop 1/dot). It also
-    // subsumes the old off-left-edge column-0 forcing: left-clipped sprites'
-    // pixels pop early, before any mid-mode-3 write applies.
-    #[serde(default)]
-    pub(in crate::ppu) obp0_dot_history: Vec<(u128, u8)>,
-    #[serde(default)]
-    pub(in crate::ppu) obp1_dot_history: Vec<(u128, u8)>,
-    // Dot-keyed BGP history for the CGB / DMG-compat BG color path. A mid-mode-3
-    // BGP write applies at `ticks + latency` (a DOT), and each BG pixel is colored
-    // at its own pop dot — which is delayed by any sprite-fetch stall between the
-    // write and that column. Sampling by pop-dot (not display column) makes the
-    // stall absorption exact for both the on-stall write and a pre-stall write
-    // whose target column is pushed past the stall. The column-keyed `bgp_history`
-    // remains the DMG-hardware path.
-    #[serde(default)]
-    pub(in crate::ppu) bgp_dot_history: Vec<(u128, u8)>,
-    // DMG mid-mode-3 BGP-write "glitch". On real DMG hardware a
-    // CPU write to BGP (FF47) during mode 3 can collide with the PPU's palette read for
-    // the pixel being pushed at that dot: the register is mid-transition and the pixel is
-    // looked up through the bitwise OR of the old and new BGP bytes (`old | new`) rather
-    // than either settled value. When old and new differ in a color slot the OR sets
-    // extra shade bits, darkening that one pixel — the "black spike" bracketing each
-    // mid-line palette band (e.g. old=$41,new=$42 -> $43, so a color-0 pixel reads shade
-    // 3 / black; when old|new==old the spike is invisible). It is a TWO-WRITE collision
-    // (see `bgp_writes`), so a lone or loosely-spaced write shows no spike. CGB uses
-    // true-color palette RAM and shows no such collapse, so this is DMG-gated. The two
-    // fields below drive it, both reset at mode-3 start:
-    // Per-column BG color index (0-3) of the pixel drawn at each display column this
-    // line, or -1 where a sprite won the mix / the column is undrawn. Recorded by the
-    // per-dot DMG draw and read by `resolve_bgp_spikes` to re-map the glitched columns
-    // through the OR palette at mode-3 end. 160 entries, reset each line.
-    #[serde(default)]
-    pub(in crate::ppu) line_bg_idx: Vec<i8>,
-    // Every mid-mode-3 BGP write on the current line, as (abs_cc, display_col, old|new).
-    // The DMG palette-latch glitch is a TWO-WRITE interaction: a write spikes its own
-    // pixel only when it has a neighboring mid-mode-3 write within the tight SET/RESTORE
-    // cadence (`BGP_SPIKE_CADENCE_CC`, ~12-dot pairs). A single write, or one loosely
-    // spaced (one write per line, or 60-148 dots apart), does NOT collide and shows no
-    // spike. The gate is
-    // resolved at mode-3 end (all writes known) by `resolve_bgp_spikes`, which paints the
-    // glitch straight into the framebuffer. Reset at mode-3 start.
-    #[serde(default)]
-    pub(in crate::ppu) bgp_writes: Vec<(u64, u8, u8)>,
-    // Last mode-2 (OAM scan) BGP write (cc, value), carried across the mode-3-arm
-    // bgp_writes clear and injected as a neighbor-only spike entry at mode-3 entry
-    // (see on_bgp_write / the arm seed). None once consumed or if no mode-2 write.
-    #[serde(default)]
-    pub(in crate::ppu) bgp_mode2_pending: Option<(u64, u8)>,
     #[serde(default)]
     pub(in crate::ppu) cgb_color_conversion: ColorCorrection,
 }
@@ -2238,37 +2306,10 @@ impl Ppu {
             objsize_new_large: false,
             speed: SpeedPhase::default(),
             wxa6_lineend_applied: false,
-            bgen_history: Vec::new(),
-            objen_history: Vec::new(),
-            objsize_dot_history: Vec::new(),
             sprite_fetch_recs: Vec::new(),
-            obp0_dot_history: Vec::new(),
-            obp1_dot_history: Vec::new(),
-            bgp_dot_history: Vec::new(),
-            bgp_history: Vec::new(),
-            obp0_history: Vec::new(),
-            obp1_history: Vec::new(),
-            line_bg_idx: vec![-1; 160],
-            bgp_writes: Vec::new(),
-            bgp_mode2_pending: None,
             abs_cc: 0,
             p_now: pnow_disabled(),
-            wy2: 0,
-            wy2_apply_cc: wy2_disabled(),
-            wy2_pending: 0,
-            wy1: 0xFF,
-            wy1_apply_cc: wy2_disabled(),
-            wy_recheck_cc: wy2_disabled(),
-            wy1_pending: 0,
-            scy_delayed: 0,
-            scy_apply_cc: wy2_disabled(),
-            scy_pending: 0,
-            scx_delayed: 0,
-            scx_apply_cc: wy2_disabled(),
-            scx_pending: 0,
-            scx_prev_f1: 0,
-            scx_f1_apply_cc: wy2_disabled(),
-            scx_f1_new: 0,
+            latch: DelayedRegs::default(),
             line_cycle: 0,
             internal_ly_val: 0,
             sched_lycirq: stat_irq::DISABLED_TIME,
@@ -2284,11 +2325,7 @@ impl Ppu {
             lyc_irq: stat_irq::LycIrq::default(),
             mstat_irq: stat_irq::MStatIrq::default(),
             stat_reg_committed: 0,
-            bgp_delayed: 0,
-            obp0_delayed: 0,
-            obp1_delayed: 0,
-            bgp_defer_hold: 0,
-            bgp_defer_countdown: 0,
+            plot: PlotHistory::default(),
             out: FrameOut::default(),
             lcdc: LcdcState::default(),
             wg: BusGlitch::default(),
@@ -2391,14 +2428,14 @@ impl Ppu {
         }
 
         // Seed the event-scheduled STAT/LYC IRQ clocks for the running frame.
-        self.scy_delayed = mmio.read(SCY);
-        self.scy_apply_cc = wy2_disabled();
-        self.scx_delayed = mmio.read(SCX);
-        self.scx_apply_cc = wy2_disabled();
-        self.wy2 = mmio.read(WY);
-        self.wy2_apply_cc = wy2_disabled();
-        self.wy1 = mmio.read(WY);
-        self.wy1_apply_cc = wy2_disabled();
+        self.latch.scy_delayed = mmio.read(SCY);
+        self.latch.scy_apply_cc = wy2_disabled();
+        self.latch.scx_delayed = mmio.read(SCX);
+        self.latch.scx_apply_cc = wy2_disabled();
+        self.latch.wy2 = mmio.read(WY);
+        self.latch.wy2_apply_cc = wy2_disabled();
+        self.latch.wy1 = mmio.read(WY);
+        self.latch.wy1_apply_cc = wy2_disabled();
         self.stat_reg_committed = mmio.read(LCD_STATUS);
         // The LYC/STAT interrupt machinery follows the LCD-controller silicon,
         // which is CGB whenever the hardware is CGB-like — even for a DMG cart in
@@ -2621,14 +2658,14 @@ impl Ppu {
         // last dot's snapshot gives the one-dot apply latency hardware shows.
         // A late-sub-M-cycle-phase write (`on_bgp_write`) holds the old value for
         // `bgp_defer_countdown` more dots before the live register is picked up.
-        if self.bgp_defer_countdown > 0 {
-            self.bgp_defer_countdown -= 1;
-            self.bgp_delayed = self.bgp_defer_hold;
+        if self.plot.bgp_defer_countdown > 0 {
+            self.plot.bgp_defer_countdown -= 1;
+            self.plot.bgp_delayed = self.plot.bgp_defer_hold;
         } else {
-            self.bgp_delayed = mmio.ppu_io_reg(BGP);
+            self.plot.bgp_delayed = mmio.ppu_io_reg(BGP);
         }
-        self.obp0_delayed = mmio.ppu_io_reg(OBP0);
-        self.obp1_delayed = mmio.ppu_io_reg(OBP1);
+        self.plot.obp0_delayed = mmio.ppu_io_reg(OBP0);
+        self.plot.obp1_delayed = mmio.ppu_io_reg(OBP1);
         self.ticks += 1;
     }
 

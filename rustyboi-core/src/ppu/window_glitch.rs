@@ -824,14 +824,14 @@ impl Ppu {
                 let bit = 7 - i;
                 let idx = (((high_byte >> bit) & 1) << 1) | ((low_byte >> bit) & 1);
                 let ci = col as usize;
-                let old = self.line_bg_idx[ci];
+                let old = self.plot.line_bg_idx[ci];
                 if old < 0 || old as u8 == idx { continue; }
                 let rgb = self.compat_bg_color(mmio, idx);
                 let off = (ly as usize * 160 + ci) * 3;
                 self.out.color_fb_a[off] = rgb.0;
                 self.out.color_fb_a[off + 1] = rgb.1;
                 self.out.color_fb_a[off + 2] = rgb.2;
-                self.line_bg_idx[ci] = idx as i8;
+                self.plot.line_bg_idx[ci] = idx as i8;
             }
         }
     }
@@ -1043,14 +1043,14 @@ impl Ppu {
                 let bit = 7 - i;
                 let idx = (((high_byte >> bit) & 1) << 1) | ((low_byte >> bit) & 1);
                 let ci = col as usize;
-                let old = self.line_bg_idx[ci];
+                let old = self.plot.line_bg_idx[ci];
                 if old < 0 || old as u8 == idx { continue; }
                 let rgb = self.compat_bg_color(mmio, idx);
                 let off = (ly as usize * 160 + ci) * 3;
                 self.out.color_fb_a[off] = rgb.0;
                 self.out.color_fb_a[off + 1] = rgb.1;
                 self.out.color_fb_a[off + 2] = rgb.2;
-                self.line_bg_idx[ci] = idx as i8;
+                self.plot.line_bg_idx[ci] = idx as i8;
             }
         }
     }
@@ -1148,7 +1148,7 @@ impl Ppu {
         }
         let n = self.fetcher.get_tile_index() as u64;
         let ly = mmio.read(LY);
-        let live_scy = self.scy_delayed;
+        let live_scy = self.latch.scy_delayed;
         let map_bit = LCDCFlags::BGTileMapDisplaySelect as u8;
         let col = self.fetcher.last_bg_tn_col() as u16;
 

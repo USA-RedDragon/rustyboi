@@ -61,9 +61,9 @@ impl Ppu {
     // identical either way.
     pub(crate) fn get_palette_color(&self, mmio: &mmio::Mmio, idx: u8, sx: u8) -> u8 {
         let bgp = if mmio.is_cgb() {
-            Self::pal_at(&self.bgp_history, sx, self.bgp_delayed)
+            Self::pal_at(&self.plot.bgp_history, sx, self.plot.bgp_delayed)
         } else {
-            self.bgp_delayed
+            self.plot.bgp_delayed
         };
         Self::bgp_shade(bgp, idx)
     }
@@ -74,7 +74,7 @@ impl Ppu {
     // dot-space model (write applies at `ticks+latency`; pixel pops later) is exact
     // where the column model over/under-shoots.
     pub(crate) fn get_palette_color_at_tick(&self, idx: u8, pop_tick: u128) -> u8 {
-        let bgp = Self::pal_at_tick(&self.bgp_dot_history, pop_tick, self.bgp_delayed);
+        let bgp = Self::pal_at_tick(&self.plot.bgp_dot_history, pop_tick, self.plot.bgp_delayed);
         Self::bgp_shade(bgp, idx)
     }
 
@@ -97,9 +97,9 @@ impl Ppu {
             return 0; // Transparent for sprites
         }
         let obp = if palette {
-            Self::pal_at(&self.obp1_history, sx, self.obp1_delayed)
+            Self::pal_at(&self.plot.obp1_history, sx, self.plot.obp1_delayed)
         } else {
-            Self::pal_at(&self.obp0_history, sx, self.obp0_delayed)
+            Self::pal_at(&self.plot.obp0_history, sx, self.plot.obp0_delayed)
         };
         Self::obp_shade(obp, idx)
     }
@@ -113,8 +113,8 @@ impl Ppu {
         if idx == 0 {
             return 0; // Transparent for sprites
         }
-        let hist = if palette { &self.obp1_dot_history } else { &self.obp0_dot_history };
-        let fallback = if palette { self.obp1_delayed } else { self.obp0_delayed };
+        let hist = if palette { &self.plot.obp1_dot_history } else { &self.plot.obp0_dot_history };
+        let fallback = if palette { self.plot.obp1_delayed } else { self.plot.obp0_delayed };
         let obp = Self::pal_at_tick(hist, pop_tick, fallback);
         Self::obp_shade(obp, idx)
     }
@@ -748,7 +748,7 @@ impl Ppu {
         // gates each sprite pixel on the bit AT THAT PIXEL'S pop dot — resolve
         // per column from the history. Otherwise keep the live-LCDC fast path
         // (identical to the single seeded entry).
-        let objen_toggled = self.objen_history.len() > 1;
+        let objen_toggled = self.plot.objen_history.len() > 1;
         if !objen_toggled && !self.lcdc_has(LCDCFlags::SpriteDisplayEnable) {
             return None;
         }
@@ -791,7 +791,7 @@ impl Ppu {
                 // (per-byte row addressing, see obj_pixel_sized); list
                 // membership already implies the sprite was scanned y-visible,
                 // so the bound is the scan range (0..16), not the live size.
-                let objsize_toggled = self.objsize_dot_history.len() > 1;
+                let objsize_toggled = self.plot.objsize_dot_history.len() > 1;
                 let sprite_height = if self.lcdc_has(LCDCFlags::SpriteSize) { 16 } else { 8 };
                 let y_in_range = if objsize_toggled {
                     (0..16).contains(&relative_y)
@@ -888,11 +888,11 @@ impl Ppu {
     // (see `objen_history`).
     fn objen_at_tick(&self, tick: u128) -> bool {
         let mut on = self
-            .objen_history
+            .plot.objen_history
             .first()
             .map(|&(_, b)| b)
             .unwrap_or(self.lcdc_has(LCDCFlags::SpriteDisplayEnable));
-        for &(apply_tick, b) in self.objen_history.iter() {
+        for &(apply_tick, b) in self.plot.objen_history.iter() {
             if apply_tick <= tick {
                 on = b;
             } else {
@@ -905,11 +905,11 @@ impl Ppu {
     // OBJ-size (LCDC.2) as-of dot `tick`, resolved from the per-dot history.
     fn objsize_large_at_tick(&self, tick: u128) -> bool {
         let mut large = self
-            .objsize_dot_history
+            .plot.objsize_dot_history
             .first()
             .map(|&(_, l)| l)
             .unwrap_or(self.lcdc_has(LCDCFlags::SpriteSize));
-        for &(apply_tick, l) in self.objsize_dot_history.iter() {
+        for &(apply_tick, l) in self.plot.objsize_dot_history.iter() {
             if apply_tick <= tick {
                 large = l;
             } else {

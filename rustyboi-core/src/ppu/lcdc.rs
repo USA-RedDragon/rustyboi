@@ -118,7 +118,7 @@ impl Ppu {
             let boundary_col = (self.x as i32 + stall_adj + cgb_compat_adj
                 + if win { 2 } else { 0 })
             .clamp(0, 160) as u8;
-            self.bgen_history.push((boundary_col as u64, new_on));
+            self.plot.bgen_history.push((boundary_col as u64, new_on));
         }
 
         // DMG mid-mode-3 OBJ-enable (LCDC.1) toggle: per-column pop gate +
@@ -146,7 +146,7 @@ impl Ppu {
             } else {
                 OBJEN_APPLY_DOTS
             };
-            self.objen_history
+            self.plot.objen_history
                 .push((self.ticks + apply, new_on));
             // Abort window = the sprite's own fetch bus activity
             // [match_dot, match_dot + penalty): a left-clipped sprite (spx < 8)
@@ -189,7 +189,7 @@ impl Ppu {
             && (old_lcdc & objsz_bit) != (value & objsz_bit)
         {
             let apply_tick = self.ticks + OBJSIZE_APPLY_DOTS;
-            self.objsize_dot_history
+            self.plot.objsize_dot_history
                 .push((apply_tick, (value & objsz_bit) != 0));
         }
 
@@ -651,7 +651,7 @@ impl Ppu {
                 // the first line after enable (LY=0), where the previous line's
                 // checkpoints never ran so `window_y_triggered` is still false even
                 // when WY==0 — exactly the late_enable_ly0 case.
-                let wy_ok = self.window_y_triggered || self.wy2 == self.internal_ly_val;
+                let wy_ok = self.window_y_triggered || self.latch.wy2 == self.internal_ly_val;
                 let wx_in_range = (0..=166).contains(&wx) && (cgb_features_enabled || wx != 166);
                 // The window penalty applies iff the enable lands BEFORE the
                 // fetcher reaches the window-tile commit dot. The window draws from

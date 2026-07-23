@@ -47,8 +47,8 @@ impl Ppu {
         self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
         self.m3_last_sprite_commit_tick = 0;
         self.sprite_fetch_stall = 0;
-        self.objen_history.clear();
-        self.objsize_dot_history.clear();
+        self.plot.objen_history.clear();
+        self.plot.objsize_dot_history.clear();
         self.sprite_fetch_recs.clear();
         self.pixel_transfer_warmup = 0;
         self.win_y_pos = 0xFF;
@@ -182,14 +182,14 @@ impl Ppu {
             self.p_now = mmio.master_cc().wrapping_sub(self.abs_cc + ds_inc);
             self.speed.lytime_no_plus1 = false;
             self.speed.sc_mode3_pullback_pending = false;
-            self.wy2 = mmio.read(WY);
-            self.wy2_apply_cc = wy2_disabled();
-            self.wy1 = mmio.read(WY);
-            self.wy1_apply_cc = wy2_disabled();
-            self.scy_delayed = mmio.read(SCY);
-            self.scy_apply_cc = wy2_disabled();
-            self.scx_delayed = mmio.read(SCX);
-            self.scx_apply_cc = wy2_disabled();
+            self.latch.wy2 = mmio.read(WY);
+            self.latch.wy2_apply_cc = wy2_disabled();
+            self.latch.wy1 = mmio.read(WY);
+            self.latch.wy1_apply_cc = wy2_disabled();
+            self.latch.scy_delayed = mmio.read(SCY);
+            self.latch.scy_apply_cc = wy2_disabled();
+            self.latch.scx_delayed = mmio.read(SCX);
+            self.latch.scx_apply_cc = wy2_disabled();
             self.stat_reg_committed = mmio.read(LCD_STATUS);
             // See note in `enable_display`: LYC/STAT timing follows the CGB
             // LCD controller on CGB hardware regardless of DMG-compat mode.
@@ -495,10 +495,10 @@ impl Ppu {
             // plot-cc origin at mode-3 entry and seed the line's history
             // with the BG-enable bit in effect now. Mid-mode-3 LCDC.0
             // writes append (commit_cc, bgen) entries (handle_lcdc_write).
-            self.bgen_history.clear();
+            self.plot.bgen_history.clear();
             // Seed at boundary column 0 (applies to all columns until the
             // first mid-mode-3 toggle).
-            self.bgen_history.push((
+            self.plot.bgen_history.push((
                 0,
                 self.lcdc_has(LCDCFlags::BGDisplay),
             ));
@@ -530,64 +530,64 @@ impl Ppu {
             // leaves column 0 white). Mid-mode-3 writes after entry append
             // (boundary_col, value) entries via on_{bgp,obp0,obp1}_write, which
             // land at column >= 1 so column 0 keeps this seed.
-            self.bgp_history.clear();
-            self.bgp_history.push((0, self.bgp_delayed));
-            self.bgp_dot_history.clear();
+            self.plot.bgp_history.clear();
+            self.plot.bgp_history.push((0, self.plot.bgp_delayed));
+            self.plot.bgp_dot_history.clear();
             // CGB-compat (wg_cgb) resolves BGP per dot from this history; unlike
             // the DMG per-dot `bgp_delayed` latch, real CGB silicon colors the
             // mode-3 column-0 pixel with the LIVE BGP register (age m3-bg-bgp-ncm:
             // the pre-frame BGP is already latched at mode-3 arm). DMG keeps the
             // 1-dot-delayed seed (dmgpalette_during_m3, via bgp_history).
-            let bgp_dot_seed = if self.wg.wg_cgb { mmio.read(BGP) } else { self.bgp_delayed };
-            self.bgp_dot_history.push((0, bgp_dot_seed));
+            let bgp_dot_seed = if self.wg.wg_cgb { mmio.read(BGP) } else { self.plot.bgp_delayed };
+            self.plot.bgp_dot_history.push((0, bgp_dot_seed));
             // Clear any leftover DMG BGP phase-hold from the previous line.
-            self.bgp_defer_countdown = 0;
-            self.obp0_history.clear();
-            self.obp0_history.push((0, self.obp0_delayed));
-            self.obp1_history.clear();
-            self.obp1_history.push((0, self.obp1_delayed));
-            self.obp0_dot_history.clear();
-            self.obp0_dot_history.push((0, self.obp0_delayed));
-            self.obp1_dot_history.clear();
-            self.obp1_dot_history.push((0, self.obp1_delayed));
+            self.plot.bgp_defer_countdown = 0;
+            self.plot.obp0_history.clear();
+            self.plot.obp0_history.push((0, self.plot.obp0_delayed));
+            self.plot.obp1_history.clear();
+            self.plot.obp1_history.push((0, self.plot.obp1_delayed));
+            self.plot.obp0_dot_history.clear();
+            self.plot.obp0_dot_history.push((0, self.plot.obp0_delayed));
+            self.plot.obp1_dot_history.clear();
+            self.plot.obp1_dot_history.push((0, self.plot.obp1_delayed));
             // DMG mid-mode-3 OBJ-enable/OBJ-size toggle model: seed the
             // per-column OBJ-enable history and the per-dot OBJ-size
             // history with the bits in effect at mode-3 entry, and reset
             // the per-sprite live fetch records (all Pending).
-            self.objen_history.clear();
-            self.objen_history.push((
+            self.plot.objen_history.clear();
+            self.plot.objen_history.push((
                 0,
                 self.lcdc_has(LCDCFlags::SpriteDisplayEnable),
             ));
-            self.objsize_dot_history.clear();
-            self.objsize_dot_history.push((
+            self.plot.objsize_dot_history.clear();
+            self.plot.objsize_dot_history.push((
                 0,
                 self.lcdc_has(LCDCFlags::SpriteSize),
             ));
             self.sprite_fetch_recs.clear();
             self.sprite_fetch_recs
                 .resize(self.sprites_on_line.len(), SpriteFetchRec::default());
-            self.bgp_writes.clear();
+            self.plot.bgp_writes.clear();
             // Carry a mode-2 BGP write into this line's spike cadence as a
             // neighbor-only entry (see on_bgp_write); a mode-3 partner within
             // BGP_SPIKE_CADENCE_CC then paints its spike (age m3-bg-bgp).
-            if let Some((cc, v)) = self.bgp_mode2_pending.take()
+            if let Some((cc, v)) = self.plot.bgp_mode2_pending.take()
                 && !mmio.is_cgb()
             {
-                self.bgp_writes.push((cc, 0xFF, v));
+                self.plot.bgp_writes.push((cc, 0xFF, v));
                 // The mode-2 write is the true settled BGP entering mode 3
                 // (bgp_delayed lags a dot and can miss a late-mode-2 write),
                 // so re-seed column 0's palette + the spike's `old` baseline
                 // with it — the restore's glitch then ORs against FF, painting
                 // its victim column with the pre-restore (glitch) shade.
-                self.bgp_history.clear();
-                self.bgp_history.push((0, v));
-                self.bgp_delayed = v;
+                self.plot.bgp_history.clear();
+                self.plot.bgp_history.push((0, v));
+                self.plot.bgp_delayed = v;
             }
             // 160-entry per-column BG-index scratch; ensure sized (deserialized
             // saves may carry an empty vec) and clear to -1 (no BG pixel yet).
-            self.line_bg_idx.clear();
-            self.line_bg_idx.resize(160, -1);
+            self.plot.line_bg_idx.clear();
+            self.plot.line_bg_idx.resize(160, -1);
             self.m3.m3_arm_scx = mmio.read(SCX) & 0x07 ;
             self.m3.m3_arm_scx_full = mmio.read(SCX) as i16;
             // First line after enable: resolve the SCX value the fine-scroll
@@ -602,7 +602,7 @@ impl Ppu {
             // dot, flipping whether the SCX=7 write enters the mode-0 time).
             if was_first_line {
                 let ds = mmio.is_double_speed_mode() as u32;
-                let prev_scx = (self.scx_prev_f1 & 0x07) as u64;
+                let prev_scx = (self.latch.scx_prev_f1 & 0x07) as u64;
                 // `prev_scx` is a count of PPU dots; convert to master cc
                 // (1 dot = 1<<ds cc) so the sample dot is phase-correct at
                 // double speed (where the f1 latch's apply cc is write_cc+4).
@@ -614,8 +614,8 @@ impl Ppu {
             // Seed the exact-cc f1 latch at the SCX value live at M3
             // start; clear any pending write latch left from a prior
             // line so it cannot leak into this line's discard.
-            self.scx_prev_f1 = mmio.read(SCX);
-            self.scx_f1_apply_cc = wy2_disabled();
+            self.latch.scx_prev_f1 = mmio.read(SCX);
+            self.latch.scx_f1_apply_cc = wy2_disabled();
             // The first line after display enable has bespoke warmup/arm
             // timing; the live f1 xpos mapping does not align there, so
             // latch the discard immediately (pre-write SCX), as before.

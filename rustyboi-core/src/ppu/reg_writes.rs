@@ -62,10 +62,10 @@ impl Ppu {
     /// Schedule that delayed apply against the resolving write's absolute clock.
     pub(crate) fn on_wy_write(&mut self, value: u8, mmio: &mmio::Mmio) {
         if self.disabled {
-            self.wy2 = value;
-            self.wy2_apply_cc = wy2_disabled();
-            self.wy1 = value;
-            self.wy1_apply_cc = wy2_disabled();
+            self.latch.wy2 = value;
+            self.latch.wy2_apply_cc = wy2_disabled();
+            self.latch.wy1 = value;
+            self.latch.wy1_apply_cc = wy2_disabled();
             return;
         }
         let ds = mmio.is_double_speed_mode();
@@ -76,8 +76,8 @@ impl Ppu {
         // phase hardware uses, rather than the live (immediate) mmio value.
         let cgb = mmio.is_cgb_features_enabled() as i64;
         let wy1_delay = WY1_DELAY + cgb;
-        self.wy1_pending = value;
-        self.wy1_apply_cc = cc + wy1_delay.max(0) as u64;
+        self.latch.wy1_pending = value;
+        self.latch.wy1_apply_cc = cc + wy1_delay.max(0) as u64;
         // wy2 apply delay (cc) past the write, swept against the late_wy suite:
         // CGB 7, DMG 4 (-ds at double speed). The split reflects the differing
         // M3-start / fine-scroll phase between the two cores.
@@ -87,8 +87,8 @@ impl Ppu {
             WY2_DELAY_DMG
         };
         let delay = (base - ds as i64).max(0) as u64;
-        self.wy2_pending = value;
-        self.wy2_apply_cc = cc + delay;
+        self.latch.wy2_pending = value;
+        self.latch.wy2_apply_cc = cc + delay;
         self.arm_wy_recheck(cc, ds);
         self.stat_sched_touched();
     }
@@ -106,7 +106,7 @@ impl Ppu {
         // 4 dots (8 cc at double speed) after the store, quantized onto the
         // grid the comparator runs on.
         let step = 4u64 << (ds as u32);
-        self.wy_recheck_cc = cc + step - (cc % step);
+        self.latch.wy_recheck_cc = cc + step - (cc % step);
     }
     /// Run a scheduled window-Y comparison (see `arm_wy_recheck`).
     pub(in crate::ppu) fn run_wy_recheck(&mut self, cgb_hw: bool, cgb_features: bool, ds: bool) {
@@ -173,7 +173,7 @@ impl Ppu {
         // directly. `wy1`'s couple-of-cc apply delay governs only the periodic
         // checkpoints, and a store landing late on the 4-dot grid gets its
         // re-check before that delay has elapsed.
-        let wy = if self.wy1_apply_cc != wy2_disabled() { self.wy1_pending } else { self.wy1 };
+        let wy = if self.latch.wy1_apply_cc != wy2_disabled() { self.latch.wy1_pending } else { self.latch.wy1 };
         if wy == self.wy_comparator_ly(cgb_hw, ds) {
             self.window_y_triggered = true;
         }
@@ -219,7 +219,7 @@ impl Ppu {
         // discarded by the cadence gate if no mode-3 partner lands within
         // BGP_SPIKE_CADENCE_CC.
         if self.state == State::OAMSearch && !_mmio.is_cgb() && !self.disabled {
-            self.bgp_mode2_pending = Some((self.abs_cc, value));
+            self.plot.bgp_mode2_pending = Some((self.abs_cc, value));
         }
         if self.state != State::PixelTransfer || self.disabled {
             return;
@@ -234,8 +234,8 @@ impl Ppu {
         if !_mmio.is_cgb() {
             let extra = (lat - bgp_latency(false)).max(0) as u8;
             if extra > 0 {
-                self.bgp_defer_hold = self.bgp_delayed;
-                self.bgp_defer_countdown = extra;
+                self.plot.bgp_defer_hold = self.plot.bgp_delayed;
+                self.plot.bgp_defer_countdown = extra;
             }
         }
         // DMG mid-mode-3 palette-write glitch (see `bgp_writes`): record this write's
@@ -251,7 +251,7 @@ impl Ppu {
         // Record it with a never-painted victim column (>=160) so it is a cadence
         // neighbor only.
         if !_mmio.is_cgb() && self.in_previsible_prologue() {
-            self.bgp_writes.push((self.abs_cc, 0xFF, value));
+            self.plot.bgp_writes.push((self.abs_cc, 0xFF, value));
         }
         if !_mmio.is_cgb() && !self.in_previsible_prologue() {
             // The spike's victim is the pixel POPPING at the write's apply dot.
@@ -274,15 +274,15 @@ impl Ppu {
             } else {
                 0xFF
             };
-            let old = self.bgp_history.last().map(|&(_, v)| v).unwrap_or(self.bgp_delayed);
-            self.bgp_writes.push((self.abs_cc, col, old | value));
+            let old = self.plot.bgp_history.last().map(|&(_, v)| v).unwrap_or(self.plot.bgp_delayed);
+            self.plot.bgp_writes.push((self.abs_cc, col, old | value));
         }
         let boundary = self.pal_write_boundary(lat);
-        Self::push_pal_history(&mut self.bgp_history, boundary, value);
+        Self::push_pal_history(&mut self.plot.bgp_history, boundary, value);
         // Dot-keyed history for the CGB / DMG-compat BG path: the write applies at
         // its own dot; each pixel samples it at its (stall-delayed) pop dot.
         let apply = self.pal_write_apply_tick(lat);
-        Self::push_pal_dot_history(&mut self.bgp_dot_history, apply, value);
+        Self::push_pal_dot_history(&mut self.plot.bgp_dot_history, apply, value);
     }
     // Display-column latency (dots) for a mid-mode-3 BGP write. This hook fires at the
     // write M-cycle's START, but the DMG store's bus-write lands at a later sub-M-cycle
@@ -362,14 +362,14 @@ impl Ppu {
     // write spike on the strength of its FUTURE RESTORE neighbor, which a per-write gate
     // could not see. DMG-only; the CGB path uses true-color palette RAM (no collapse).
     pub(in crate::ppu) fn resolve_bgp_spikes(&mut self, mmio: &mmio::Mmio) {
-        if mmio.is_cgb() || self.bgp_writes.len() < 2 {
+        if mmio.is_cgb() || self.plot.bgp_writes.len() < 2 {
             return;
         }
         let ly = mmio.read(LY);
         if ly >= 144 {
             return;
         }
-        let writes = std::mem::take(&mut self.bgp_writes);
+        let writes = std::mem::take(&mut self.plot.bgp_writes);
         for i in 0..writes.len() {
             let (cc, col, glitch) = writes[i];
             // Neighboring write within the tight cadence, in either direction.
@@ -382,7 +382,7 @@ impl Ppu {
             // Re-map the BG pixel drawn at `col` through the OR-glitched palette. The
             // per-dot draw stored its BG color index in `line_bg_idx` (-1 = a sprite won
             // this column, or it was BG-disabled; leave those untouched).
-            let bg_idx = self.line_bg_idx[col as usize];
+            let bg_idx = self.plot.line_bg_idx[col as usize];
             if bg_idx < 0 {
                 continue;
             }
@@ -398,9 +398,9 @@ impl Ppu {
         let lat = obp_latency(_mmio.is_cgb())
             + if _mmio.is_cgb() { Self::cgb_halt_wake_write_bias(_mmio) } else { 0 };
         let boundary = self.pal_write_boundary(lat);
-        Self::push_pal_history(&mut self.obp0_history, boundary, value);
+        Self::push_pal_history(&mut self.plot.obp0_history, boundary, value);
         let apply = self.pal_write_apply_tick(lat);
-        Self::push_pal_dot_history(&mut self.obp0_dot_history, apply, value);
+        Self::push_pal_dot_history(&mut self.plot.obp0_dot_history, apply, value);
     }
     /// FF49 (OBP1) write hook. See `on_bgp_write`; affects sprite palette 1.
     pub(crate) fn on_obp1_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
@@ -410,9 +410,9 @@ impl Ppu {
         let lat = obp_latency(_mmio.is_cgb())
             + if _mmio.is_cgb() { Self::cgb_halt_wake_write_bias(_mmio) } else { 0 };
         let boundary = self.pal_write_boundary(lat);
-        Self::push_pal_history(&mut self.obp1_history, boundary, value);
+        Self::push_pal_history(&mut self.plot.obp1_history, boundary, value);
         let apply = self.pal_write_apply_tick(lat);
-        Self::push_pal_dot_history(&mut self.obp1_dot_history, apply, value);
+        Self::push_pal_dot_history(&mut self.plot.obp1_dot_history, apply, value);
     }
     // Display column at which a mid-mode-3 palette write becomes visible: the next
     // column to be popped (`self.x`) plus the register's pipeline latency in dots.
@@ -480,8 +480,8 @@ impl Ppu {
     /// too early vs hardware. Schedule the delayed apply against the write cc.
     pub(crate) fn on_scy_write(&mut self, value: u8, mmio: &mmio::Mmio) {
         if self.disabled {
-            self.scy_delayed = value;
-            self.scy_apply_cc = wy2_disabled();
+            self.latch.scy_delayed = value;
+            self.latch.scy_apply_cc = wy2_disabled();
             return;
         }
         let ds = mmio.is_double_speed_mode();
@@ -497,8 +497,8 @@ impl Ppu {
         } else {
             0
         };
-        self.scy_pending = value;
-        self.scy_apply_cc = cc + delay;
+        self.latch.scy_pending = value;
+        self.latch.scy_apply_cc = cc + delay;
         self.stat_sched_touched();
 
         // DMG BG bus-glitch SCY journal (see bg_wg_apply): record the exact
@@ -512,7 +512,7 @@ impl Ppu {
                 .bg_scy_hist
                 .last()
                 .map(|&(_, _, new)| new)
-                .unwrap_or(self.scy_delayed);
+                .unwrap_or(self.latch.scy_delayed);
             if old != value {
                 // Transition placement: the new row/line address bits are
                 // effective for reads strictly PAST the write's commit cc —
@@ -531,8 +531,8 @@ impl Ppu {
     /// FF43 (SCX) write hook. See `on_scy_write`.
     pub(crate) fn on_scx_write(&mut self, value: u8, mmio: &mmio::Mmio) {
         if self.disabled {
-            self.scx_delayed = value;
-            self.scx_apply_cc = wy2_disabled();
+            self.latch.scx_delayed = value;
+            self.latch.scx_apply_cc = wy2_disabled();
             return;
         }
         let ds = mmio.is_double_speed_mode();
@@ -540,8 +540,8 @@ impl Ppu {
         // SCX has no positive lever in the sweep (delay 1/2 == net-zero vs the
         // live read); the SCX-write straddles need the read-cc convergent root,
         // out of scope. Applied live (delay 0).
-        self.scx_pending = value;
-        self.scx_apply_cc = cc;
+        self.latch.scx_pending = value;
+        self.latch.scx_apply_cc = cc;
         self.stat_sched_touched();
 
         // DMG BG grid SCX journal (see bg_wg_apply): record the mid-mode-3 SCX
@@ -553,7 +553,7 @@ impl Ppu {
                 .bg_scx_hist
                 .last()
                 .map(|&(_, _, new)| new)
-                .unwrap_or(self.scx_delayed);
+                .unwrap_or(self.latch.scx_delayed);
             if old != value {
                 self.wg.bg_scx_hist.push((cc, old, value));
             }
@@ -566,20 +566,20 @@ impl Ppu {
         // store ran before this hook), so `scx_f1_at_cc` must derive the old
         // value from the latch state, never from mmio.read(SCX).
         let cgb = mmio.is_cgb_features_enabled();
-        self.scx_prev_f1 = self.scx_f1_pending_at_cc(cc);
-        self.scx_f1_new = value;
+        self.latch.scx_prev_f1 = self.scx_f1_pending_at_cc(cc);
+        self.latch.scx_f1_new = value;
         // The hardware SCX change (visible at cc + 2*cgb) runs in PPU dot units: the new
         // SCX becomes visible to the f1 fine-scroll loop one PPU dot after the
         // write (CGB). `abs_cc` is the master clock (1 dot = 1<<ds cc), so the
         // dot delay scales with double speed -- otherwise a mid-f1 SCX write
         // lands one f1 iteration too early at DS (scx_0367c0/scx_0761c0 _ds).
         let ds = mmio.is_double_speed_mode() as u32;
-        self.scx_f1_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
+        self.latch.scx_f1_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
 
         // sub-cc column lever: record the apply boundary on the PLOT clock. The
         // BG fetcher chooses old/new per tile by comparing the tile's plot cc to
         // this. Persists for the line (does not reset on apply).
-        self.m3.subcc_scx_old = self.scx_delayed;
+        self.m3.subcc_scx_old = self.latch.scx_delayed;
         self.m3.subcc_scx_new = value;
         self.m3.subcc_scx_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
         // Arm the single-tile re-key only when a BG tile is mid-fetch (its
@@ -624,10 +624,10 @@ impl Ppu {
     /// new. Derived purely from the latch state (mmio already holds the latest
     /// write), seeded with the M3-start SCX in `scx_prev_f1`.
     pub(in crate::ppu) fn scx_f1_pending_at_cc(&self, cc: u64) -> u8 {
-        if self.scx_f1_apply_cc != wy2_disabled() && cc >= self.scx_f1_apply_cc {
-            self.scx_f1_new
+        if self.latch.scx_f1_apply_cc != wy2_disabled() && cc >= self.latch.scx_f1_apply_cc {
+            self.latch.scx_f1_new
         } else {
-            self.scx_prev_f1
+            self.latch.scx_prev_f1
         }
     }
     /// OBJ-size (large = 8x16) visible to the OAM scan at PPU `cc`, honoring the
