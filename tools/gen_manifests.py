@@ -900,7 +900,7 @@ def gen_cgb_acid_hell(roms: Path, out: Path) -> None:
     lines = []
     if (cah / "cgb-acid-hell.gbc").is_file() and (cah / "cgb-acid-hell.png").is_file():
         lines.append(f"cgb-acid-hell|cgb|png|{cah}/cgb-acid-hell.gbc|{cah}/cgb-acid-hell.png")
-    write_manifest(out, "cgb_acid_hell", ["cgb-acid-hell (CGB PPU reference screen; docboy FAILS this). --frames 60"], lines)
+    write_manifest(out, "cgb_acid_hell", ["cgb-acid-hell (CGB PPU reference screen). --frames 60"], lines)
 
 
 def gen_scribbltests(roms: Path, out: Path) -> None:

@@ -4701,7 +4701,7 @@ impl Ppu {
                         // correction.
                         //
                         // Not in Pan Docs, TCAGBD or GBCTR: fitted to
-                        // SameBoy CGB-C/CGB-E on docboy's window_bg_reprise
+                        // SameBoy CGB-C/CGB-E over the window_bg_reprise probe
                         // family swept over both the window column (WX 8..25)
                         // and the write dot (the WE-off store moved through the
                         // line in 4-dot steps), 38/38 exact.
@@ -8363,8 +8363,8 @@ impl Ppu {
             // the previous row's TILE at the current row's LINE -- a colour
             // present in neither that scanline's background nor its window. The
             // background cannot supply it. SameBoy CGB-C and CGB-E agree
-            // pixel-for-pixel over the whole probe set; docboy's
-            // window_wx0_scx1_fancy_tile0 reference is wrong there.
+            // pixel-for-pixel over the whole probe set (the window_wx0_scx1
+            // fine-SCX WX=0 case).
             // scx&7 == 0 does not glitch (the window activates at
             // position_in_line == -7, past the glitch window) and keeps the
             // plain 7-WX chop.
@@ -8378,7 +8378,7 @@ impl Ppu {
             // Not modelled: the scx&7 == 7 one-pixel case. SameBoy shortens the
             // prologue by a dot there, which would move mealybug's BGP edge;
             // rustyboi keeps the plain column advance and stays one pixel off
-            // on docboy window_wx0_scx7 (DMG only).
+            // on the WX=0 / scx&7==7 case (DMG only).
             let dmg_wx0_fine = is_dmg && wx == 0 && scx_fine != 0;
             // DMG one-dot-late activation (the position+6 check):
             // when the exact x+7==WX dot did not activate (the comparator
@@ -8506,7 +8506,7 @@ impl Ppu {
                     // CGB window left-clip chop (window_wx0..6):
                     // a WX<7 window activates at LX==0 with chop = 7-WX
                     // pixels of its first tile off the left edge. SameBoy
-                    // (CGB-C/E) and docboy DRAW the window's own chopped
+                    // (CGB-C/E) DRAWS the window's own chopped
                     // leading pixels; rustyboi currently drew the full
                     // first window tile and shifted the content one tile
                     // right (window_wx1..6 / window_wx0_scx0 leftmost

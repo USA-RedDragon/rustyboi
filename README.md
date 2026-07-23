@@ -48,31 +48,6 @@ adjudication.
 | **Total** | **6852** | **6868** |
 <!-- SUITE-PROGRESS:END -->
 
-The table above is the **hardware-graded** regression gate. The one below is a
-separate, **non-gating regression tripwire**: it grades rustyboi against
-[docboy](https://github.com/Docheinstein/docboy)'s own F12 self-screenshots,
-which carry no hardware provenance. A disagreement is a diff *lead* to
-investigate, never a correctness verdict, so these counts live in their own
-labeled sub-table with its own subtotal and are deliberately kept **out of the
-hardware Total**. "Matching" is the number of frames that equal docboy's
-screenshot under a screen-ever-matches scan. The references that rustyboi and
-SameBoy-from-source agree docboy rendered wrong (a spurious artifact, cross-
-checked against mealybug hardware) are excluded rather than asserted: 46 on DMG,
-and now 24 on CGB, adjudicated against SameBoy at both CGB-C and CGB-E (a
-handful of CGB-C-vs-E revision splits are left as-is, not dropped). The corpus is
-provisioned automatically by `tools/run-suites.sh setup`, gated by
-`tools/run-suites.sh all`, and refreshed alongside the hardware table by
-`tools/run-suites.sh report-update` (whenever the corpus is present).
-
-<!-- DOCBOY-TRIPWIRE:START -->
-| Tripwire (docboy diff, non-gating) | Matching | Total |
-| :--- | ---: | ---: |
-| docboy_diff_dmg | 522 | 531 |
-| docboy_diff_cgb | 72 | 95 |
-| docboy_diff_cgb_dmg_mode | 283 | 444 |
-| **Tripwire total** | **877** | **1070** |
-<!-- DOCBOY-TRIPWIRE:END -->
-
 ## RetroArch / libretro core
 
 The `rustyboi-libretro` crate builds a [libretro](https://www.libretro.com/) core

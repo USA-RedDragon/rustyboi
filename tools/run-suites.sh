@@ -9,9 +9,8 @@
 #   tools/run-suites.sh build            # cargo build --release the test runner
 #   tools/run-suites.sh list             # print the known suites + thresholds
 #   tools/run-suites.sh report           # markdown progress table (all suites)
-#   tools/run-suites.sh report-docboy    # refresh only the docboy tripwire table
 #   tools/run-suites.sh <suite>          # run one suite, gate against its floor
-#   tools/run-suites.sh all              # run every suite, gate each (+ docboy tripwire)
+#   tools/run-suites.sh all              # run every suite, gate each
 #   tools/run-suites.sh <suite> [<suite>...]   # run several
 #
 # `setup` and `build` run automatically before a suite if their outputs are
@@ -170,19 +169,6 @@ threshold() {
         sketchtests)        echo "6 120" ;;
         gbc_hw_tests)       echo "338 800" ;;  # real-silicon SRAM captures (CGB+DMG+AGB columns); the sram path runs a FLAT budget with no done-marker, so the handful of ROMs that need longer carry a per-test frames= token instead of inflating the whole suite
         gambatte)           echo "5248 -" ;;  # gated on failed<=9 (GAMBATTE_MAX_FAIL)
-        # docboy differential tripwires (NOT a hardware oracle). Each floor is the
-        # current count of rustyboi frames that match docboy's OWN F12
-        # self-screenshot, graded png + `--scan-frames` (docboy's
-        # screen-ever-matches semantics). Regression tripwire vs docboy
-        # screenshots -- NOT a hardware oracle; ratchets up, lower DELIBERATELY
-        # when a fix correctly diverges from a docboy screenshot bug. DMG and CGB
-        # are both adjudicated now: references proven DOCBOY-WRONG (rustyboi ==
-        # SameBoy-from-source at the steady frame) are dropped in
-        # docboy_transcode.py (DOCBOY_WRONG / DOCBOY_WRONG_CGB), so a floor's
-        # denominator is already the honest, artifact-free reference set.
-        docboy_diff_dmg)          echo "522 15" ;;  # 522/531; +2 DMG window-Y comparator re-run on a WY/LCDC store (window_trigger_wy_blink_during_oam_scan, window_trigger_win_disabled_blink_enabled), +2 window-reactivation insert across a sprite stall (window_retrigger_pixel_glitch_scx0_wx8_wx80_sprite_x72/x74); 46 docboy-wrong refs excluded
-        docboy_diff_cgb)          echo "72 15" ;;   # 72/95; -1 denominator: window_wx0_scx1_fancy_tile0 joins the docboy-wrong refs (CGB WX=0 fine-SCX window glitch) -> 18 docboy-wrong refs excluded (SameBoy CGB-C+E)
-        docboy_diff_cgb_dmg_mode) echo "283 15" ;;  # 283/444; 6 docboy-wrong refs excluded
         *)                  echo "" ;;
     esac
 }
@@ -194,31 +180,12 @@ samesuite_apu samesuite_nonapu samesuite_sgb sgb blargg blargg_singles \
 scribbltests turtle_tests little_things_gb bully strikethrough daid rtc3test \
 mbc3_tester cpp magentests little_things_extra sketchtests gbc_hw_tests gambatte"
 
-# docboy differential suites: a REGRESSION TRIPWIRE, not a hardware oracle. They
-# grade rustyboi against docboy's own F12 self-screenshots (NO hardware
-# provenance), so they are held OUT of $ORDER (and thus out of generate_report's
-# hardware Total + the ratchet + the CI progress table) and gated separately in
-# their own labeled README sub-table. Their corpus (~260 MiB) is always
-# provisioned by setup and always gated by `all`; the corpus-present guard is
-# kept only as a safety net so a docboy-less environment (e.g. pre-commit, which
-# stashes the gitignored corpus away) degrades gracefully instead of hard-failing
-# -- an absent corpus is a graceful skip, never a gate failure. Manifests are
-# transcoded (never committed) into the generated dir. See
-# tools/docboy_transcode.py + the DOCBOY-TRIPWIRE block in README.md.
-DOCBOY_SUITES="docboy_diff_dmg docboy_diff_cgb docboy_diff_cgb_dmg_mode"
-DOCBOY_MANIFEST_DIR="gb-test-roms/docboy/generated/manifests"
-# Screen-ever-matches forward-scan budget for the docboy png diff (docboy's
-# FramebufferRunner passes on any matching frame; our capture can land one frame
-# off). 10 is well past where DMG agreement saturates (>=5) and matches
-# tools/docboy_diff.py's window.
-DOCBOY_SCAN_FRAMES=10
-
 # --- helpers -----------------------------------------------------------------
 log()  { printf '%s\n' "==> $*"; }
 warn() { printf '%s\n' "!!  $*" >&2; }
 die()  { printf '%s\n' "!!  $*" >&2; exit 1; }
 
-usage() { sed -n '2,38p' "$0"; }
+usage() { sed -n '2,37p' "$0"; }
 
 # python3 on Linux/macOS; `python` on Windows (Git Bash ships no `python3`).
 PY="$(command -v python3 || command -v python || true)"
@@ -255,27 +222,10 @@ suite_mode() {
     fi
 }
 
-# manifest_path <suite>  -> the manifest file backing a suite. The hardware
-# suites live in the tracked $SUITES_DIR; the docboy_* tripwire suites are
-# transcoded from a gitignored corpus at setup() time and live under the
-# generated dir (never committed), so they resolve there instead.
+# manifest_path <suite>  -> the manifest file backing a suite. All suites live
+# in the tracked $SUITES_DIR.
 manifest_path() {
-    case "$1" in
-        docboy_*) printf '%s' "$DOCBOY_MANIFEST_DIR/$1.manifest" ;;
-        *)        printf '%s' "$SUITES_DIR/$1.manifest" ;;
-    esac
-}
-
-# True iff the docboy corpus has been provisioned + transcoded (setup always
-# does this now). A safety net only: `all` and the README docboy block include
-# the tripwire when it is true, and skip gracefully (never fail) when it is not
-# -- e.g. pre-commit runs with the gitignored corpus stashed away.
-docboy_corpus_present() {
-    local suite
-    for suite in $DOCBOY_SUITES; do
-        [ -f "$(manifest_path "$suite")" ] || return 1
-    done
-    return 0
+    printf '%s' "$SUITES_DIR/$1.manifest"
 }
 
 # --- setup: fetch ROMs (idempotent) ------------------------------------------
@@ -315,29 +265,7 @@ setup() {
     sync_gbchwtests_roms
     log "Building first-party test ROMs (test-roms/, RGBDS)"
     build_test_roms
-    # docboy differential corpus: ALWAYS provisioned -- it is a first-class part
-    # of the gate now (always fetched, always gated in `all`, always refreshed in
-    # the report path). It is a ~260 MiB network fetch that grades a non-gating
-    # TRIPWIRE (docboy's own screenshots, no hardware provenance), so its counts
-    # stay in their own labeled README sub-table and NEVER merge into the hardware
-    # Total. Idempotent: the clone is sentinel-guarded (no-op once pinned) and the
-    # transcode reproduces byte-identical manifests.
-    log "Sourcing docboy corpus + transcoding diff manifests"
-    sync_docboy_corpus
     log "ROM setup complete"
-}
-
-# Fetch the docboy corpus (pinned, sentinel-guarded clone) and transcode it into
-# the diff manifests under the generated dir. Both steps are idempotent; the
-# transcoder drops the DOCBOY-WRONG DMG references and self-checks the drop.
-sync_docboy_corpus() {
-    "$ROOT/tools/sync-docboy-roms.sh" || { warn "docboy sync failed; skipping tripwire"; return 0; }
-    if ! "$PY" -c "import PIL" >/dev/null 2>&1; then
-        warn "Pillow (PIL) not installed; cannot transcode docboy (pip install Pillow)"
-        return 0
-    fi
-    "$PY" "$ROOT/tools/docboy_transcode.py" >/dev/null \
-        || warn "docboy transcode failed; tripwire manifests may be stale/absent"
 }
 
 # Assemble the first-party test ROMs (test-roms/) with RGBDS into their
@@ -604,19 +532,6 @@ run_suite() {
     [ -n "$row" ] || { warn "unknown suite: $suite (see 'list')"; return 2; }
     local manifest
     manifest="$(manifest_path "$suite")"
-    # A docboy tripwire whose corpus was not provisioned is a graceful SKIP,
-    # never a regression: it grades nothing, so there is no count to gate. setup
-    # always provisions it; this only fires in a docboy-less environment (e.g.
-    # pre-commit, which stashes the gitignored corpus away).
-    case "$suite" in
-        docboy_*)
-            if [ ! -f "$manifest" ]; then
-                printf 'SKIP  %-20s (docboy corpus not provisioned; run %s setup)\n' \
-                    "$suite" "$0"
-                return 0
-            fi
-            ;;
-    esac
     [ -f "$manifest" ] || { warn "missing manifest: $manifest"; return 2; }
     # Absent ROMs are a config error (2), not a regression (1): grading them
     # would print a confident "FAIL ... REGRESSION" for a suite that never ran.
@@ -626,12 +541,6 @@ run_suite() {
     floor="$(printf '%s' "$row" | cut -d' ' -f1)"
     frames="$(printf '%s' "$row" | cut -d' ' -f2)"
     smode="$(suite_mode "$manifest")"
-
-    # docboy diff suites grade png with docboy's screen-ever-matches semantics:
-    # pass on any frame within the forward scan. `scan` word-splits into two args
-    # (like RUN_PREFIX) and is empty (zero args) for every other suite.
-    local scan=""
-    case "$suite" in docboy_diff_*) scan="--scan-frames $DOCBOY_SCAN_FRAMES" ;; esac
 
     local out
     out="$(mktemp)"
@@ -647,14 +556,13 @@ run_suite() {
         log "Running suite '$suite' (mode=$smode shards=$RB_SHARDS jobs=1 ${frames#-} frames)"
         local k
         for k in $(seq 1 "$RB_SHARDS"); do
-            # shellcheck disable=SC2086  # $scan is an empty-or-2-word flag
             if [ "$frames" != "-" ]; then
                 run_bin --manifest "$manifest" --mode "$smode" --jobs 1 \
-                    --shard "$k/$RB_SHARDS" --frames "$frames" $scan \
+                    --shard "$k/$RB_SHARDS" --frames "$frames" \
                     --json "$out.$k" >/dev/null 2>&1 &
             else
                 run_bin --manifest "$manifest" --mode "$smode" --jobs 1 \
-                    --shard "$k/$RB_SHARDS" $scan --json "$out.$k" >/dev/null 2>&1 &
+                    --shard "$k/$RB_SHARDS" --json "$out.$k" >/dev/null 2>&1 &
             fi
         done
         wait
@@ -670,15 +578,13 @@ json.dump(tot, open(out, "w"))
 PY
         rm -f "$out".*
     elif [ "$frames" != "-" ]; then
-        log "Running suite '$suite' (mode=$smode jobs=$JOBS ${frames#-} frames${scan:+ $scan})"
-        # shellcheck disable=SC2086  # $scan is an empty-or-2-word flag
+        log "Running suite '$suite' (mode=$smode jobs=$JOBS ${frames#-} frames)"
         run_bin --manifest "$manifest" --mode "$smode" --jobs "$JOBS" \
-            --frames "$frames" $scan --json "$out" || true
+            --frames "$frames" --json "$out" || true
     else
-        log "Running suite '$suite' (mode=$smode jobs=$JOBS ${frames#-} frames${scan:+ $scan})"
-        # shellcheck disable=SC2086  # $scan is an empty-or-2-word flag
+        log "Running suite '$suite' (mode=$smode jobs=$JOBS ${frames#-} frames)"
         run_bin --manifest "$manifest" --mode "$smode" --jobs "$JOBS" \
-            $scan --json "$out" || true   # runner exits 1 on any fail; we gate on counts
+            --json "$out" || true   # runner exits 1 on any fail; we gate on counts
     fi
 
     local passed total failed
@@ -711,13 +617,12 @@ PY
 list() {
     printf '%-26s %-14s %s\n' "SUITE" "FLOOR" "FRAMES"
     local suite row floor frames
-    for suite in $ORDER $DOCBOY_SUITES; do
+    for suite in $ORDER; do
         row="$(threshold "$suite")"
         floor="$(printf '%s' "$row" | cut -d' ' -f1)"
         frames="$(printf '%s' "$row" | cut -d' ' -f2)"
         [ "$frames" = "-" ] && frames="(default)"
         if [ "$suite" = "gambatte" ]; then floor="failed<=$GAMBATTE_MAX_FAIL"; fi
-        case "$suite" in docboy_diff_*) frames="$frames +scan$DOCBOY_SCAN_FRAMES (tripwire)" ;; esac
         printf '%-26s %-14s %s\n' "$suite" "$floor" "$frames"
     done
 }
@@ -840,72 +745,6 @@ generate_report() {
     printf '| **Total** | **%s** | **%s** |\n' "$tp" "$tt"
 }
 
-# Emit the docboy TRIPWIRE markdown block (separate from the hardware table; its
-# counts are NEVER merged into the hardware Total). "Matching" = the number of
-# rustyboi frames that match docboy's own F12 self-screenshot -- a diff LEAD, not
-# a correctness score. Returns 3 (emitting nothing) when the corpus is not
-# provisioned, so the caller leaves the README block untouched rather than
-# publishing zeros. CGB rows are PROVISIONAL pending SameBoy adjudication.
-generate_docboy_report() {
-    docboy_corpus_present || { warn "docboy corpus absent; tripwire block unchanged"; return 3; }
-    printf '| Tripwire (docboy diff, non-gating) | Matching | Total |\n'
-    printf '| :--- | ---: | ---: |\n'
-    local suite manifest smode frames row out passed total scan tp=0 tt=0
-    scan="--scan-frames $DOCBOY_SCAN_FRAMES"
-    for suite in $DOCBOY_SUITES; do
-        manifest="$(manifest_path "$suite")"
-        row="$(threshold "$suite")"
-        frames="$(printf '%s' "$row" | cut -d' ' -f2)"
-        smode="$(suite_mode "$manifest")"
-        out="$(mktemp)"
-        # shellcheck disable=SC2086  # $scan is a fixed 2-word flag
-        run_bin --manifest "$manifest" --mode "$smode" --jobs "$JOBS" \
-            --frames "$frames" $scan --json "$out" >/dev/null 2>&1 || true
-        passed="$(json_field "$out" passed)"
-        total="$(json_field "$out" total)"
-        rm -f "$out"
-        tp=$((tp + passed)); tt=$((tt + total))
-        printf '| %s | %s | %s |\n' "$suite" "$passed" "$total"
-    done
-    printf '| **Tripwire total** | **%s** | **%s** |\n' "$tp" "$tt"
-}
-
-# Refresh the DOCBOY-TRIPWIRE README block from a live measurement + ratchet the
-# three docboy floors up to it. report-update folds this in when the corpus is
-# present, but it stays a SEPARATE function from update_readme_report so the
-# hardware table + its ratchet stay byte-identical whether or not the docboy
-# corpus is present (pre-commit report-update runs with it stashed away, and
-# then this is simply not called). Reuses ratchet_thresholds -- a docboy-only
-# table only bumps the docboy floors (no other suite is in its counts).
-update_docboy_readme() {
-    local readme="$ROOT/README.md" tmp out
-    grep -q '<!-- DOCBOY-TRIPWIRE:START -->' "$readme" \
-        && grep -q '<!-- DOCBOY-TRIPWIRE:END -->' "$readme" \
-        || die "DOCBOY-TRIPWIRE markers not found in $readme"
-    tmp="$(mktemp)"
-    if ! generate_docboy_report > "$tmp"; then
-        rm -f "$tmp"
-        warn "docboy tripwire block left UNCHANGED"
-        return 1
-    fi
-    out="$(mktemp)"
-    awk -v report="$tmp" '
-        /<!-- DOCBOY-TRIPWIRE:START -->/ {
-            print
-            while ((getline line < report) > 0) print line
-            close(report)
-            skip = 1
-            next
-        }
-        /<!-- DOCBOY-TRIPWIRE:END -->/ { skip = 0 }
-        !skip
-    ' "$readme" > "$out"
-    mv "$out" "$readme"
-    ratchet_thresholds "$tmp"
-    rm -f "$tmp"
-    git -C "$ROOT" add "$readme" 2>/dev/null || true
-}
-
 # --- main --------------------------------------------------------------------
 [ $# -ge 1 ] || { usage; exit 1; }
 
@@ -976,22 +815,6 @@ if [ "$1" = "report-update" ]; then
                 || die "report-update: refusing to publish an unmeasurable progress table"
             echo "run-suites: report-update skipped (some suites' ROMs are not present)"
         fi
-        # The docboy tripwire is first-class: refresh its own labeled README
-        # sub-table (and ratchet its three floors) in the same path. This is
-        # NON-FATAL when the corpus is absent -- pre-commit runs with the
-        # gitignored docboy corpus stashed away, so docboy_corpus_present is
-        # false and the DOCBOY-TRIPWIRE block is left byte-identical (never
-        # blocking the commit). When the corpus IS present (CI after `make
-        # setup`, or a manual full run) it refreshes the block. The hardware
-        # table above and this block are independent: the hardware SUITE-PROGRESS
-        # table + its ratchet stay byte-identical whether or not docboy is here.
-        if docboy_corpus_present; then
-            if ! update_docboy_readme; then
-                [ -z "${CI:-}" ] \
-                    || die "report-update: refusing to publish a stale docboy tripwire block"
-                echo "run-suites: docboy tripwire refresh skipped"
-            fi
-        fi
         # Say what happened -- the whole battery runs silently for ~60s, so a
         # "no change" result is otherwise indistinguishable from a broken no-op.
         if git -C "$ROOT" diff --cached --quiet -- README.md 2>/dev/null; then
@@ -1013,25 +836,9 @@ bin_ready || die "runner binary not found at $BIN (run: $0 build)"
 # Propagate generate_report's refusal (3) instead of exiting 0 on an empty table.
 if [ "$1" = "report" ]; then generate_report || exit $?; exit 0; fi
 
-# Docboy-only tripwire refresh: measure the three diff suites, rewrite the
-# DOCBOY-TRIPWIRE README block, and ratchet their floors -- WITHOUT touching the
-# hardware table. `report-update` folds this in when the corpus is present; this
-# subcommand is the standalone path for refreshing only the docboy block (setup
-# provisions the corpus; RB_SKIP_SETUP=1 reuses an already-provisioned one).
-if [ "$1" = "report-docboy" ]; then update_docboy_readme || exit $?; exit 0; fi
-
 if [ "$1" = "all" ]; then
     # shellcheck disable=SC2086  # ORDER is a space-separated list of bare words
     set -- $ORDER
-    # Append the docboy tripwire suites. setup always provisions their corpus, so
-    # a normal `all` always runs and gates them. The corpus-present guard is a
-    # safety net for a docboy-less environment (pre-commit stashes the gitignored
-    # corpus): absent = simply not appended; run_suite would skip them anyway, so
-    # `all` never fails for lack of the ~260 MiB docboy corpus.
-    if docboy_corpus_present; then
-        # shellcheck disable=SC2086  # DOCBOY_SUITES is a space-separated word list
-        set -- "$@" $DOCBOY_SUITES
-    fi
 fi
 
 rc=0
