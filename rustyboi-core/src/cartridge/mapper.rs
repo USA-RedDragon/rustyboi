@@ -192,6 +192,17 @@ impl Mapper {
                 return Mapper::NtOld(NtOld { state: NtState::default(), v2: true, ram_enabled: false })
             }
             UnlMapper::ForceMbc1 => return mbc1(false),
+            // Mythri / Tyrannosaurus Tex prototypes: plain MBC3+RAM registers
+            // behind an MBC5 header, no protection intercepts.
+            UnlMapper::ForceMbc3 => {
+                return Mapper::Mbc3(Mbc3 {
+                    ram_enabled: false,
+                    rom_bank_low: 1,
+                    ram_bank: 0,
+                    has_ram: true,
+                    timer: false,
+                })
+            }
             // Header-liar re-linked to MBC5 banking (POCKETMON bootleg): plain
             // MBC5+RAM registers, no protection intercepts.
             UnlMapper::ForceMbc5 => {

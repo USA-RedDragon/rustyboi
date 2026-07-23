@@ -95,6 +95,14 @@ const POCKETMON_MBC5_LOGO_CRC32: u32 = 0x0864_AF13;
 /// these three prototypes are re-mapped, with zero risk to any other cart.
 const ZELDA_DX_BETA_ROM_CRC32: [u32; 3] = [0x9367_653B, 0x3FD6_C8FC, 0x2F88_4286];
 
+/// Whole-ROM CRC32 (reflected IEEE) of the three publisher-demo prototypes that
+/// need MBC3's zero-bank remap behind an MBC5+RAM+BATTERY ($1B) header: Mythri
+/// (USA) (Proto 1) (2000-08-02), Mythri (USA) (Proto 2) (2001-03-31) and
+/// Tyrannosaurus Tex (USA) (Proto). See `UnlMapper::ForceMbc3`. Keyed on the
+/// exact dump so no other cart -- including the 2019 Piko Interactive
+/// Tyrannosaurus Tex release, which is a genuine MBC5 build -- is re-mapped.
+const MBC5_HEADER_MBC3_PROTO_ROM_CRC32: [u32; 3] = [0x6648_82AC, 0xD414_9106, 0x1BD4_E588];
+
 /// Window and CRC32 (reflected IEEE) of the "New GB Color" HK-PCB protection
 /// trampoline (`UnlMapper::NewGbHk`). It lives in the dead space between the
 /// interrupt vectors and the header, and is 46 bytes of protection-specific
@@ -538,6 +546,41 @@ pub enum UnlMapper {
     /// exact boot stub. The tiny outer-bank state rides in the payload so no
     /// other cart's bincode savestate layout shifts.
     Gowin(GowinState),
+    /// Header liars that are electrically MBC3+RAM+BATTERY behind an
+    /// MBC5+RAM+BATTERY ($1B) header: the Mythri (Team XKalibur, 2000/2001) and
+    /// Tyrannosaurus Tex (Slitherine/Eidos) publisher-demo prototypes.
+    ///
+    /// MBC5 is the only mapper that lets ROM bank 0 into the $4000-$7FFF
+    /// window; MBC1/MBC2/MBC3 all remap a zero bank register to bank 1. All
+    /// three dumps write a literal 0 to the bank register and then keep running
+    /// code out of the switchable window, so a truthful MBC5 pulls the code out
+    /// from under the program counter:
+    ///
+    ///   * Mythri: the boot sets its far-call bank tracker ($C9A4) to 1 and
+    ///     then calls bank 1 $7713, which clears $C000-$C9FF -- including the
+    ///     tracker it just set. The first far-call epilogue (bank 0 $3A06)
+    ///     therefore restores bank 0 instead of bank 1 and `ret`s to $77C1,
+    ///     which in bank 0 is the middle of `ld hl,$4EDD` -- the $DD there is an
+    ///     illegal opcode and the CPU hard-locks (white screen). With bank 0
+    ///     read as bank 1, $77C1 is the caller's own `ld a,$06` and the game
+    ///     boots. Team XKalibur's own release notes say the ROM "will only play
+    ///     on the no$gmb emulator ... the cartridge I have still plays on any
+    ///     GBC or GBA", and the community fix for it changes exactly one
+    ///     functional byte: header type $1B -> $13 (MBC3+RAM+BATTERY).
+    ///   * Tyrannosaurus Tex: the loader runs from the switchable window while
+    ///     bank 0 is selected there (a mirror of the fixed bank), and at $42EF
+    ///     does `ld a,$68 / ld [$2100],a`. Under MBC5 the next fetch at $42F2
+    ///     lands in bank $68's tile data, walks it as opcodes into an $FF
+    ///     (`rst $38`), and the reset vector's `jp $0150` restarts the boot --
+    ///     a ~7-frame reboot loop that flashes a screen of half-uploaded font
+    ///     tiles. Under MBC3 the window still holds bank 1 and the loader
+    ///     survives its own bank write.
+    ///
+    /// Nothing else in these dumps needs MBC5: the widest bank they program is
+    /// $68 (7 bits), $3000 is only ever written 0, and $4000 is used as a plain
+    /// RAM-bank select with no MBC1 mode register in sight. Keyed on the exact
+    /// whole-ROM CRC32 of the three prototype dumps, so no other cart moves.
+    ForceMbc3,
 }
 
 /// Protection register state for `UnlMapper::PokeJadeDia`. Carried inside the
@@ -1375,6 +1418,11 @@ impl Cartridge {
             UnlMapper::NtOld2 => return CartridgeType::NtOld { v2: true },
             UnlMapper::ForceMbc1 => {
                 return CartridgeType::MBC1 { ram: false, battery: false }
+            }
+            // Mythri / Tyrannosaurus Tex prototypes: MBC3+RAM+BATTERY behind an
+            // MBC5 header. The declared RAM size is kept for saves.
+            UnlMapper::ForceMbc3 => {
+                return CartridgeType::MBC3 { ram: true, battery: true, timer: false }
             }
             // POCKETMON bootleg: electrically MBC5+RAM+BATTERY behind the MBC1
             // header. The declared RAM (header $03 = 32KB) is kept for saves.
@@ -3330,6 +3378,34 @@ mod tests {
         rom[0x100] ^= 0x01;
         assert_ne!(crate::checksum::crc32(&rom), 0x9367_653B);
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+    }
+
+    #[test]
+    fn mbc5_header_proto_forces_mbc3() {
+        // Mythri Proto 1 / Proto 2 and Tyrannosaurus Tex (Proto) wear an
+        // MBC5+RAM+BATTERY header but need MBC3's zero-bank remap. Build 32 KiB
+        // images whose CRC32 equals each real dump via a 4-byte forged tail; the
+        // rule keys purely on that whole-ROM CRC.
+        for (crc, tail) in [
+            (0x6648_82ACu32, [0xA4, 0xC0, 0x46, 0xCC]),
+            (0xD414_9106, [0xE4, 0x8F, 0x09, 0x7E]),
+            (0x1BD4_E588, [0xF6, 0x9D, 0x19, 0xE1]),
+        ] {
+            let mut rom = vec![0u8; 0x8000];
+            rom[0x7FFC..0x8000].copy_from_slice(&tail);
+            assert_eq!(crate::checksum::crc32(&rom), crc);
+            assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::ForceMbc3);
+
+            // Any other ROM (a one-byte change moves the CRC) is untouched.
+            rom[0x100] ^= 0x01;
+            assert_ne!(crate::checksum::crc32(&rom), crc);
+            assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+        }
+
+        // The override must land on a real MBC3+RAM board, not the header's
+        // MBC5 -- MBC3 is what remaps a zero bank register to bank 1.
+        let mapper = Mapper::from_header(&UnlMapper::ForceMbc3, 0x1B, false, 128, 4);
+        assert!(matches!(mapper, Mapper::Mbc3(_)));
     }
 
     // Clean-room 48-byte stand-in for the GGB81 secondary logo at $0184: a

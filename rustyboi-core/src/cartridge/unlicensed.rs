@@ -201,6 +201,16 @@ impl Cartridge {
             return UnlMapper::ForceMbc5;
         }
 
+        // Mythri (Proto 1 + Proto 2) and Tyrannosaurus Tex (Proto): publisher
+        // demos whose MBC5+RAM+BATTERY ($1B) header is a lie -- they write a
+        // literal 0 to the ROM-bank register and keep executing from the
+        // switchable window, which only survives on a mapper that remaps a zero
+        // bank to 1 (MBC3). See `UnlMapper::ForceMbc3` for the two boot traces.
+        // Keyed on the exact whole-ROM CRC32 of the three prototype dumps.
+        if super::MBC5_HEADER_MBC3_PROTO_ROM_CRC32.contains(&crate::checksum::crc32(data)) {
+            return UnlMapper::ForceMbc3;
+        }
+
         let claimed_size = 0x8000usize.checked_shl(u32::from(rom_size_code)).unwrap_or(0);
         if LICHENG_LOGO_CRC32.contains(&logo_crc32)
             && (data[CARTRIDGE_TYPE_OFFSET] == 0x01 || data.len() != claimed_size)
