@@ -2511,8 +2511,6 @@ impl Ppu {
         self.state == State::PixelTransfer
     }
 
-    // ---- Event-scheduled STAT IRQ model (hardware model) ----
-
     /// Register a NON-mode-3 (OAM/HBlank) DS->SS speed switch for the LY-read
     /// sub-dot phase accumulator. The hardware speed-change handling applies a
     /// half-dot re-anchor on every DS->SS switch; the whole-dot DS->SS bridge folds
