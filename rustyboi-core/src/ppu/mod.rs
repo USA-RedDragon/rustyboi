@@ -1,4 +1,5 @@
 pub mod controller;
+mod color_mix;
 mod fetcher;
 mod fifo;
 mod stat_irq;
