@@ -233,6 +233,22 @@ impl Cartridge {
             return UnlMapper::Bbd(BbdState::default());
         }
 
+        // Vast Fame "operand adder" protection board (Dragon Ball - Final
+        // Bout). The image is a decrypted BBD-family dump, so the BBD arm above
+        // correctly declines it ($7FFF==$01), but its protection chip is still
+        // live: detection keys on the CRC32 of the 40-byte protection thunk at
+        // $3F50, which is protection-specific code no other cart carries, plus
+        // the MBC5-family header the board really is. See `UnlMapper::VfAdder`.
+        if data.len() > super::VFADDER_STUB_OFFSET + super::VFADDER_STUB_LEN
+            && crate::checksum::crc32(
+                &data[super::VFADDER_STUB_OFFSET
+                    ..super::VFADDER_STUB_OFFSET + super::VFADDER_STUB_LEN],
+            ) == super::VFADDER_STUB_CRC32
+            && matches!(data[CARTRIDGE_TYPE_OFFSET], 0x19..=0x1E)
+        {
+            return UnlMapper::VfAdder(VfAdderState::default());
+        }
+
         // VF001 protection board behind a GGB81 secondary logo: two dumps whose
         // boot speaks the VF001 $7000 config protocol, keyed on the exact
         // whole-ROM CRC32 because both the $0184 logo CRC32 and the title are
@@ -881,6 +897,27 @@ impl Cartridge {
                 (!(e ^ o) & 0xF0) | ((e ^ o) & 0x0F)
             }
         })
+    }
+
+    /// Is the adder protection engaged? The board's enable is the MBC5 ROM-bank
+    /// register holding a bank the cart does not physically have — the thunk
+    /// parks it at $C0/$80 on a 64-bank (1 MiB) image. The same "out-of-ROM bank
+    /// number means protection chip, not ROM" convention as the "New GB Color"
+    /// HK PCB, and it is what makes the window unambiguous: every ordinary bank
+    /// the game selects is in range, so normal ROM reads and RAM-bank writes are
+    /// untouched.
+    pub(super) fn vfadder_armed(&self) -> bool {
+        let Mapper::Mbc5(m) = &self.mapper else { return false };
+        let bank = usize::from(m.regs.rom_bank_low) | (usize::from(m.regs.rom_bank_high) << 8);
+        bank >= self.rom_banks.max(1)
+    }
+
+    /// Adder protection readback for $4000-$5FFF. The board presents bits 8..1
+    /// of `X + (Y << 1)`, i.e. `(X >> 1) + Y`. `None` when the protection is not
+    /// engaged, so the caller falls through to a normal ROM read.
+    pub(super) fn vfadder_read(&self, st: VfAdderState, addr: u16) -> Option<u8> {
+        (addr < 0x6000 && self.vfadder_armed())
+            .then(|| (st.x >> 1).wrapping_add(st.y))
     }
 
     /// PKJD ("Pokemon Jade / Diamond") protection read for $A000-$BFFF, a port

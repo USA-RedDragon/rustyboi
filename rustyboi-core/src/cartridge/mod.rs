@@ -238,6 +238,18 @@ const BBD_BANK_REORDERING: [[u8; 8]; 8] = [
     [0, 1, 2, 3, 4, 5, 6, 7], // 07 - unknown
 ];
 
+/// Window and CRC32 (reflected IEEE) of the Dragon Ball - Final Bout protection
+/// thunk (`UnlMapper::VfAdder`). Those 40 bytes at $3F50 are the entire
+/// protocol — park the ROM-bank register out of range at $C0/$80, push the two
+/// operands at $4000/$4002, read the answer back out of $4000, restore the
+/// caller's bank from the $7FFF bank stamp — so no other cart can carry them
+/// (a scan of the whole 1200-ROM library finds them in this one image only).
+/// Keyed on the hash rather than the bytes so a first-party regression ROM can
+/// carry a clean-room block, the same basis as `NEWGBHK_STUB_CRC32`.
+const VFADDER_STUB_OFFSET: usize = 0x3F50;
+const VFADDER_STUB_LEN: usize = 40;
+const VFADDER_STUB_CRC32: u32 = 0x02A3_6288;
+
 /// CRC32 (reflected IEEE) of the 48-byte secondary logo at $0184 on GGB81
 /// boards (Vast Fame family; the "DATA." and "TD-SOFT" runs). mGBA's
 /// `_detectUnlMBC` keys on exactly these values.
@@ -704,6 +716,41 @@ pub enum UnlMapper {
     /// images) plus the garbage header type. The two bank registers ride in
     /// the payload so no other cart's bincode savestate layout shifts.
     XploderGb(XploderState),
+    /// Vast Fame family "operand adder" protection board — Dragon Ball - Final
+    /// Bout (Taiwan). The dump is a *decrypted* BBD-family image (the last byte
+    /// of every bank equals that bank's own number, so $7FFF==$01 / $BFFF==$02
+    /// and both hhugboy and mGBA correctly decline to re-apply the BBD
+    /// scramble), but the cart's protection chip is still live and unpatched,
+    /// so on a plain MBC5 the boot computes a garbage jump target and dies in
+    /// WRAM.
+    ///
+    /// The whole protocol is one thunk at $3F50:
+    ///     ld a,($7FFF) / push af,de,hl / ld de,$4000 / ld hl,$2300
+    ///     ld a,$C0 / ld (hl),a        ; bank register := $C0
+    ///     ld a,b   / ld (de),a        ; $4000 <- operand X
+    ///     ld a,$80 / ld (hl),a        ; bank register := $80
+    ///     ld a,c   / inc de / inc de / ld (de),a   ; $4002 <- operand Y
+    ///     dec de / dec de / ld a,(de) ; read $4000 -> answer
+    ///     ld b,a / xor a / ld (de),a  ; clear
+    ///     pop hl,de,af / ld ($2000),a ; restore the caller's bank
+    /// The cart is 1 MiB (64 banks), so bank $C0/$80 address nothing — the
+    /// out-of-range bank register is the protection enable, exactly as on the
+    /// "New GB Color" HK PCB. While it is set, a write to $4000-$5FFF latches
+    /// an operand (A1 picks which) and a read of that window returns
+    /// `(X >> 1) + Y` (equivalently: the board sums X with Y shifted up one and
+    /// presents bits 8..1 of the result).
+    ///
+    /// That function is derived, not guessed. The boot at $0200 queries
+    /// (X=$00,Y=$02) and (X=$2A,Y=$08), builds `hl` from the two answers and
+    /// does `jp (hl)`; $021D — `(0>>1)+2 = $02`, `($2A>>1)+8 = $1D` — is the
+    /// only instruction boundary there and continues `di / call $1628 / ...`.
+    /// Independently, $3F30 builds a pointer from the answers to (X=$00,Y=$02)
+    /// and (X=$00,Y=$00), folds 29 bytes at it into a checksum and compares
+    /// that against the answer to (X=$08,Y=$82): the formula puts the pointer
+    /// at $0200, the real ROM bytes at $0200-$021C fold to $86, and
+    /// `($08>>1)+$82 = $86`. A wrong formula has a 1-in-256 chance of passing
+    /// that, and the cart boots.
+    VfAdder(VfAdderState),
 }
 
 /// Bank registers of `UnlMapper::XploderGb`, carried inside the enum variant
@@ -739,6 +786,17 @@ impl Default for ArV4State {
     fn default() -> Self {
         Self { rom_page: 2 }
     }
+}
+
+/// The two protection operand latches of `UnlMapper::VfAdder`, carried inside
+/// the enum variant so no other cart's bincode savestate layout shifts. Both
+/// power up at 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct VfAdderState {
+    /// Operand written to the even port ($4000).
+    x: u8,
+    /// Operand written to the odd port ($4002).
+    y: u8,
 }
 
 /// Protection register state for `UnlMapper::PokeJadeDia`. Carried inside the
@@ -1682,6 +1740,9 @@ impl Cartridge {
             // "New GB Color" HK PCB: electrically a stock MBC5 and its header
             // type ($1B) is truthful, so the header decode below is correct.
             UnlMapper::NewGbHk => {}
+            // The adder-protection board is electrically a stock
+            // MBC5+RAM+BATTERY and its header type ($1B) is truthful.
+            UnlMapper::VfAdder(_) => {}
             // PKJD is electrically MBC3+TIMER+RAM+BATTERY and its header type
             // ($10) is truthful, so the header decode below is correct; the
             // D/E/F protection is applied in the read/write intercepts.
@@ -2590,6 +2651,15 @@ impl memory::Addressable for Cartridge {
                     return byte;
                 }
             }
+            // Adder protection: while the bank register is out of ROM range the
+            // switchable window answers with the operand sum instead of ROM.
+            UnlMapper::VfAdder(st)
+                if (mmio::CARTRIDGE_BANK_START..=mmio::CARTRIDGE_BANK_END).contains(&addr) =>
+            {
+                if let Some(byte) = self.vfadder_read(*st, addr) {
+                    return byte;
+                }
+            }
             // PKJD: the D/E/F protection registers answer through the cart-RAM
             // window; unmatched selectors fall through to normal MBC3 SRAM.
             UnlMapper::PokeJadeDia(_)
@@ -3090,6 +3160,22 @@ impl memory::Addressable for Cartridge {
                 }
                 if let Mapper::Mbc3(m) = &mut self.mapper {
                     m.ram_bank = value & 0x0F;
+                }
+            }
+            // Adder protection: while the bank register is out of ROM range a
+            // $4000-$5FFF write latches a protection operand instead of the RAM
+            // bank (A1 selects which). Otherwise it is a plain MBC5 RAM-bank
+            // write, handled by the generic arm below.
+            RAM_BANK_ROM_BANK_HIGH_START..=RAM_BANK_ROM_BANK_HIGH_END
+                if matches!(self.unl_mapper, UnlMapper::VfAdder(_))
+                    && self.vfadder_armed() =>
+            {
+                if let UnlMapper::VfAdder(ref mut st) = self.unl_mapper {
+                    if addr & 0x02 == 0 {
+                        st.x = value;
+                    } else {
+                        st.y = value;
+                    }
                 }
             }
             // RAM Bank Number / Upper ROM Bank Number (0x4000-0x5FFF)

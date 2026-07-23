@@ -40,6 +40,7 @@ cartridge-vf001_protection-cgb|cgb|mooneye|test-roms/build/cartridge/vf001_prote
 cartridge-vf001gen_protection-cgb|cgb|mooneye|test-roms/build/cartridge/vf001gen_protection.cgb.mooneye.gbc
 cartridge-vf001zook_protection-cgb|cgb|mooneye|test-roms/build/cartridge/vf001zook_protection.cgb.mooneye.gbc
 cartridge-vf8k_dual_window-cgb|cgb|mooneye|test-roms/build/cartridge/vf8k_dual_window.cgb.mooneye.gbc
+cartridge-vfadder_protection-dmg|dmg|mooneye|test-roms/build/cartridge/vfadder_protection.dmg.mooneye.gb
 dma-hdma_ff55_cancel_after_block-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_cancel_after_block.cgb.mooneye.gbc
 dma-hdma_ff55_countdown_ds-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_countdown_ds.cgb.mooneye.gbc
 dma-hdma_ff55_countdown_ss-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_countdown_ss.cgb.mooneye.gbc

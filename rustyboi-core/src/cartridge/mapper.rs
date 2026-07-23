@@ -269,6 +269,11 @@ impl Mapper {
             // it gets the real `Mapper::Mbc5` the intercept reads its bank
             // register from.
             UnlMapper::NewGbHk => {}
+            // The adder-protection board is likewise a stock MBC5 whose header
+            // type ($1B) is truthful; the two operand latches live in the
+            // UnlMapper payload and the intercepts read the bank register off
+            // the real `Mapper::Mbc5`, so fall through to the header.
+            UnlMapper::VfAdder(_) => {}
             // PKJD is electrically MBC3+TIMER+RAM+BATTERY (its header type $10 is
             // truthful); the D/E/F protection state lives in the
             // UnlMapper::PokeJadeDia payload and is applied by the $4000-$5FFF /
