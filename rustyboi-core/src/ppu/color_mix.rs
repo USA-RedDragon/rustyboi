@@ -203,7 +203,7 @@ impl Ppu {
     // Check a single sprite during distributed OAM search
     pub(in crate::ppu) fn check_single_sprite_for_scanline(&mut self, mmio: &mut mmio::Mmio, sprite_index: usize) {
         // Skip if we already have the maximum sprites for this line
-        if self.sprites_on_line.len() >= MAX_SPRITES_PER_LINE {
+        if self.objs.sprites_on_line.len() >= MAX_SPRITES_PER_LINE {
             return;
         }
 
@@ -219,7 +219,7 @@ impl Ppu {
         // (lags the live LCDC by one OAM slot) so a mid-mode-2 OBJ-size write
         // affects only entries scanned strictly after it commits, matching
         // the hardware per-entry size latch.
-        let large = self.scan_obj_size_large;
+        let large = self.objs.scan_obj_size_large;
         let sprite_height = if large { 16 } else { 8 };
 
         let oam_offset = sprite_index * OAM_BYTES_PER_SPRITE;
@@ -244,7 +244,7 @@ impl Ppu {
                 oam_index: sprite_index as u8,
             };
 
-            self.sprites_on_line.push(sprite);
+            self.objs.sprites_on_line.push(sprite);
         }
     }
 
@@ -260,8 +260,8 @@ impl Ppu {
         // Fast path: with no OAM-DMA active, no pending CPU OAM write, no DMA
         // window seen last dot, and the snapshot already seeded, neither
         // `change()` trigger in the body can fire.
-        if self.oam_reader_seeded
-            && !self.prev_dma_writing
+        if self.objs.oam_reader_seeded
+            && !self.objs.prev_dma_writing
             && !mmio.oam_snoop_event_possible()
         {
             return;
@@ -273,22 +273,22 @@ impl Ppu {
         let cc = self.abs_cc;
 
         // Lazy seed for the current LCD-on session.
-        if !self.oam_reader_seeded {
+        if !self.objs.oam_reader_seeded {
             let cgb = mmio.is_cgb_features_enabled();
             let mut pos = [0u8; 80];
             mmio.peek_oam_pos(&mut pos);
-            self.oam_reader.reset(&pos, cgb);
-            self.oam_reader.lu = cc;
-            self.oam_reader.large_src = self.lcdc_has(LCDCFlags::SpriteSize);
-            self.prev_dma_writing =
+            self.objs.oam_reader.reset(&pos, cgb);
+            self.objs.oam_reader.lu = cc;
+            self.objs.oam_reader.large_src = self.lcdc_has(LCDCFlags::SpriteSize);
+            self.objs.prev_dma_writing =
                 mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
-            self.oam_reader_seeded = true;
+            self.objs.oam_reader_seeded = true;
             return;
         }
 
         // Keep large-sprites source tracking the live LCDC OBJ-size bit (hardware
         // sets it on the LCDC write; the walk latches it into lsbuf per slot).
-        self.oam_reader.large_src = self.lcdc_has(LCDCFlags::SpriteSize);
+        self.objs.oam_reader.large_src = self.lcdc_has(LCDCFlags::SpriteSize);
 
         // `pos` (the 80-byte Y/X snapshot) is only consumed by the `change()`
         // calls below, which fire only on a DMA-window edge or a pending OAM
@@ -304,7 +304,7 @@ impl Ppu {
         // Y/X scan reads the merged OAM rather than the ghost pair. Treat the
         // merge window as a non-writing (readable) source.
         let dma_writing = mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
-        if dma_writing != self.prev_dma_writing {
+        if dma_writing != self.objs.prev_dma_writing {
             let lc = self.ly_counter(mmio);
             mmio.peek_oam_pos(&mut pos);
             pos_filled = true;
@@ -318,17 +318,17 @@ impl Ppu {
             let cc = cc.saturating_sub((OAMDMA_CHANGE_CC_OFFSET as u64) << lc.ds as u32);
             // change() under the pre-toggle source (the hardware OAM change uses the
             // pointer in effect for the just-completed span).
-            self.oam_reader.change(cc, &lc, &pos);
+            self.objs.oam_reader.change(cc, &lc, &pos);
             // DMA start: latch the scan's retained Y/X bus pair (the last pair
             // walked before the cap) for the ghost sampling inside the window.
             if dma_writing {
-                let line_has_fetches = !self.sprites_on_line.is_empty();
-                self.oam_reader.capture_ghost(line_has_fetches);
+                let line_has_fetches = !self.objs.sprites_on_line.is_empty();
+                self.objs.oam_reader.capture_ghost(line_has_fetches);
             }
             // Toggle source for the new span (OAM-DMA start -> disabled,
             // OAM-DMA end -> real OAM).
-            self.oam_reader.src_disabled = dma_writing;
-            self.prev_dma_writing = dma_writing;
+            self.objs.oam_reader.src_disabled = dma_writing;
+            self.objs.prev_dma_writing = dma_writing;
         }
 
         // CPU OAM write this M-cycle (the hardware OAM change at cc).
@@ -337,7 +337,7 @@ impl Ppu {
             if !pos_filled {
                 mmio.peek_oam_pos(&mut pos);
             }
-            self.oam_reader.change(cc, &lc, &pos);
+            self.objs.oam_reader.change(cc, &lc, &pos);
         }
         // The snapshot is flushed only at `change` (above) and at the mode-2-end
         // `the event dispatch` (build_sprites_from_snapshot). A per-dot flush would consume
@@ -354,23 +354,23 @@ impl Ppu {
         // Re-derive the walk's OBJ-size source here (the per-dot refresh in
         // `process_oam_reader_events` is skipped on its no-event fast path).
         // `lcdc` is constant within a dot, so this matches the old per-dot value.
-        self.oam_reader.large_src = self.lcdc_has(LCDCFlags::SpriteSize);
+        self.objs.oam_reader.large_src = self.lcdc_has(LCDCFlags::SpriteSize);
         let mut pos = [0u8; 80];
         mmio.peek_oam_pos(&mut pos);
-        self.oam_reader.update(cc, &lc, &pos);
+        self.objs.oam_reader.update(cc, &lc, &pos);
 
-        self.sprites_on_line.clear();
+        self.objs.sprites_on_line.clear();
         let ly = mmio.read(LY);
         for i in 0..OAM_SPRITE_COUNT {
-            if self.sprites_on_line.len() >= MAX_SPRITES_PER_LINE {
+            if self.objs.sprites_on_line.len() >= MAX_SPRITES_PER_LINE {
                 break;
             }
-            let sprite_y = self.oam_reader.buf[2 * i];
-            let sprite_x = self.oam_reader.buf[2 * i + 1];
+            let sprite_y = self.objs.oam_reader.buf[2 * i];
+            let sprite_x = self.objs.oam_reader.buf[2 * i + 1];
             // Per-sprite OBJ size from the calibrated incremental scan (preserves
             // the late_sizechange per-slot size-latch timing); the snapshot only
             // governs Y/X visibility.
-            let large = self.scan_slot_large[i];
+            let large = self.objs.scan_slot_large[i];
             let sprite_height: u8 = if large { 16 } else { 8 };
             // Widened compare (no u8 wrap): y < 16 sprites straddle the top
             // screen edge and are visible on lines 0 .. y+height-17 (hardware
@@ -389,7 +389,7 @@ impl Ppu {
                     // MGB OAM-DMA-during-HALT merge: the frozen OAM bus feeds the
                     // PPU merged tile/attr for this entry (see mmio).
                     ta
-                } else if self.oam_reader.ghost_slot[i] {
+                } else if self.objs.oam_reader.ghost_slot[i] {
                     (
                         mmio.ppu_read_oam_live(0xFE00 + (i as u16) * 4 + 2),
                         mmio.ppu_read_oam_live(0xFE00 + (i as u16) * 4 + 3),
@@ -400,7 +400,7 @@ impl Ppu {
                         mmio.read(0xFE00 + (i as u16) * 4 + 3),
                     )
                 };
-                self.sprites_on_line.push(Sprite {
+                self.objs.sprites_on_line.push(Sprite {
                     y: sprite_y,
                     x: sprite_x,
                     tile_index,
@@ -415,8 +415,8 @@ impl Ppu {
         // into the NEXT line's walk (strikethrough: the ghost bar renders on
         // line 68 only; line 69's scan — still inside the ~1.4-line window —
         // sees the clobbered bus and stays clean).
-        if self.oam_reader.src_disabled && !self.sprites_on_line.is_empty() {
-            self.oam_reader.ghost = (0xFF, 0xFF);
+        if self.objs.oam_reader.src_disabled && !self.objs.sprites_on_line.is_empty() {
+            self.objs.oam_reader.ghost = (0xFF, 0xFF);
         }
     }
 
@@ -428,8 +428,8 @@ impl Ppu {
         if !self.lcdc_has(LCDCFlags::SpriteDisplayEnable) {
             return false;
         }
-        self.sprites_on_line
-            .get(self.next_sprite_fetch_index..)
+        self.objs.sprites_on_line
+            .get(self.objs.next_sprite_fetch_index..)
             .unwrap_or(&[])
             .iter()
             .any(|s| s.x.saturating_sub(8) == col)
@@ -441,8 +441,8 @@ impl Ppu {
             return None;
         }
 
-        while self.next_sprite_fetch_index < self.sprites_on_line.len() {
-            let sprite_x = self.sprites_on_line[self.next_sprite_fetch_index].x;
+        while self.objs.next_sprite_fetch_index < self.objs.sprites_on_line.len() {
+            let sprite_x = self.objs.sprites_on_line[self.objs.next_sprite_fetch_index].x;
             let trigger_x = sprite_x.saturating_sub(8);
 
             if trigger_x < self.x {
@@ -450,13 +450,14 @@ impl Ppu {
                 // disabled when the head crossed it): dropped for the line —
                 // no stall, and (DMG) its pixels never reach the mixer.
                 if let Some(rec) = self
+                    .objs
                     .sprite_fetch_recs
-                    .get_mut(self.next_sprite_fetch_index)
+                    .get_mut(self.objs.next_sprite_fetch_index)
                     && rec.phase == SpriteFetchPhase::Pending
                 {
                     rec.phase = SpriteFetchPhase::Aborted;
                 }
-                self.next_sprite_fetch_index += 1;
+                self.objs.next_sprite_fetch_index += 1;
                 continue;
             }
 
@@ -464,11 +465,11 @@ impl Ppu {
                 return None;
             }
 
-            self.next_sprite_fetch_index += 1;
+            self.objs.next_sprite_fetch_index += 1;
             // Record the dot this sprite's stall arms (its first dot is consumed this
             // tick) so the OBJ-disable recompute can refund the not-yet-counted-down
             // remainder of an in-progress sprite (see `remaining_sprite_cost`).
-            self.m3_last_sprite_commit_tick = self.ticks;
+            self.objs.m3_last_sprite_commit_tick = self.ticks;
 
             // Same per-object tile-walk cost the length model uses (see
             // `sprite_tile_walk_cost`): the FIRST sprite in each BG tile costs
@@ -486,8 +487,8 @@ impl Ppu {
             let dist_x = if mmio.is_cgb_features_enabled() { self.x } else { sprite_x };
             let pixel_in_tile = dist_x.wrapping_add(scx) & 0x07;
             let tile_no = (dist_x as i32 + scx as i32) & !7;
-            let first_in_tile = tile_no != self.m3_sprite_prev_tile;
-            self.m3_sprite_prev_tile = tile_no;
+            let first_in_tile = tile_no != self.objs.m3_sprite_prev_tile;
+            self.objs.m3_sprite_prev_tile = tile_no;
 
             let penalty = if sprite_x == 0 {
                 11
@@ -505,8 +506,9 @@ impl Ppu {
             // first-tile prologue), so its byte-fetch dots are earlier by that
             // amount than the arm tick observed here.
             if let Some(rec) = self
+                .objs
                 .sprite_fetch_recs
-                .get_mut(self.next_sprite_fetch_index - 1)
+                .get_mut(self.objs.next_sprite_fetch_index - 1)
             {
                 let left_adj = (8u128).saturating_sub(sprite_x as u128).min(self.ticks);
                 rec.phase = SpriteFetchPhase::Fetched;
@@ -541,7 +543,7 @@ impl Ppu {
         // First, resolve object-to-object priority to find the highest priority opaque sprite pixel
         let mut selected_sprite: Option<(&Sprite, u8, (u8, u8, u8))> = None; // (sprite, pixel_idx, color)
 
-        for sprite in &self.sprites_on_line {
+        for sprite in &self.objs.sprites_on_line {
             // Sprite X coordinate is offset by 8, Y coordinate is offset by 16
             let sprite_actual_x = sprite.x as i16 - 8;
             let sprite_actual_y = sprite.y as i16 - 16;
@@ -753,7 +755,7 @@ impl Ppu {
             return None;
         }
 
-        for (spr_i, sprite) in self.sprites_on_line.iter().enumerate() {
+        for (spr_i, sprite) in self.objs.sprites_on_line.iter().enumerate() {
             // Mid-mode-3 OBJ-enable toggle:
             // - per-sprite FETCH gate: a sprite whose fetch was aborted
             // (disable landed mid-fetch) or whose x-match dot passed while
@@ -768,7 +770,7 @@ impl Ppu {
             // go dark one dot before the disable's normal apply dot; the
             // spx>=8 bands' first-pop pixels at the same dot stay lit).
             if objen_toggled {
-                let rec = self.sprite_fetch_recs.get(spr_i);
+                let rec = self.objs.sprite_fetch_recs.get(spr_i);
                 if rec.map(|r| r.phase) == Some(SpriteFetchPhase::Aborted) {
                     continue;
                 }
@@ -803,7 +805,7 @@ impl Ppu {
                         self.obj_pixel_sized(
                             mmio,
                             sprite,
-                            self.sprite_fetch_recs.get(spr_i),
+                            self.objs.sprite_fetch_recs.get(spr_i),
                             relative_x as u8,
                             screen_y,
                         )

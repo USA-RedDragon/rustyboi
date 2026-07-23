@@ -1872,14 +1872,11 @@ impl Default for PlotHistory {
     }
 }
 
+/// The object pipeline: the lazily-sampled OAM Y/X snapshot the mode-2 scan
+/// walks, the per-line sprite list built from it, and the mode-3 sprite-fetch
+/// stall pacing (plus the exact-cc OBJ-size latch each scan slot samples).
 #[derive(Serialize, Deserialize, Clone)]
-pub struct Ppu {
-    pub(in crate::ppu) fetcher: fetcher::Fetcher,
-    pub(in crate::ppu) disabled: bool,
-    pub(in crate::ppu) state: State,
-    pub(in crate::ppu) ticks: u128,
-    pub(in crate::ppu) x: u8,
-
+pub(in crate::ppu) struct ObjState {
     // Sprite data for current scanline
     pub(in crate::ppu) sprites_on_line: Vec<Sprite>,
     pub(in crate::ppu) current_oam_sprite_index: usize, // Current sprite being checked during OAM search
@@ -1930,8 +1927,70 @@ pub struct Ppu {
     // Reset to 0 on every OAMSearch -> PixelTransfer transition.
     #[serde(default)]
     pub(in crate::ppu) fetcher_cadence_tick: u8,
+    // OBJ-size (LCDC bit2) value used by the mode-2 OAM scan, latched one scan
+    // slot behind the live LCDC. The hardware OAM scanner latches the per-OAM
+    // entry size (`lsbuf_[pos/2]`) when that entry's OAM slot is read; a mid-mode-2
+    // size write only affects entries scanned strictly AFTER the write commits.
+    // Refreshed from the live LCDC after each scan slot so a write landing within
+    // a slot's window applies to the next slot (the late_sizechange 1-cc boundary).
+    #[serde(default)]
+    pub(in crate::ppu) scan_obj_size_large: bool,
+    // Exact-cc OBJ-size (LCDC bit2) latch for the mode-2 OAM scan (PoC extension
+    // of the SCX f1 / LCDC-bit4 pattern). A mid-mode-2 sprite-size write goes
+    // through the pending_lcdc_events queue (a 2-dot quantized self.lcdc.reg commit)
+    // AND the per-slot `scan_obj_size_large` snapshot lags one slot, which on the
+    // late_sizechange* tests pushes the change one OAM slot too late: the sprite
+    // whose 8x16-only y-range straddles the line is scanned with the stale 8x8
+    // size and dropped, so mode-0 time (and the boundary FF41 STAT read) resolves the
+    // wrong mode. The hardware OAM scanner latches each entry's size at that
+    // entry's OAM-read cc; record the exact abs_cc at which the bit2 change
+    // becomes visible (`write_cc + 2*cgb`, an LCDC write taking effect at cc+2 on hardware) and let
+    // each scan slot sample bit2 as-of its OWN abs_cc. (apply_cc, old_large,
+    // new_large); apply_cc == wy2_disabled() means no pending change.
+    #[serde(default = "wy2_disabled")]
+    pub(in crate::ppu) objsize_apply_cc: u64,
+    #[serde(default)]
+    pub(in crate::ppu) objsize_prev_large: bool,
+    #[serde(default)]
+    pub(in crate::ppu) objsize_new_large: bool,
+    // Per-sprite live fetch records, parallel to `sprites_on_line` (see
+    // `SpriteFetchRec`). Rebuilt (all Pending) at mode-3 entry.
+    #[serde(default)]
+    pub(in crate::ppu) sprite_fetch_recs: Vec<SpriteFetchRec>,
+}
 
-    // Window state tracking
+// `scan_slot_large` is a `[bool; 40]` (serde/std stop deriving at 32 elements),
+// `m3_sprite_prev_tile` powers on at the `SPRITE_TILE_NONE` sentinel and
+// `objsize_apply_cc` at `wy2_disabled()`, so this cannot be derived.
+impl Default for ObjState {
+    fn default() -> Self {
+        ObjState {
+            sprites_on_line: Vec::new(),
+            current_oam_sprite_index: 0,
+            oam_reader: OamReader::default(),
+            prev_dma_writing: false,
+            oam_reader_seeded: false,
+            scan_slot_large: [false; OAM_SPRITE_COUNT],
+            next_sprite_fetch_index: 0,
+            m3_sprite_prev_tile: SPRITE_TILE_NONE,
+            m3_last_sprite_commit_tick: 0,
+            sprite_fetch_stall: 0,
+            pixel_transfer_warmup: 0,
+            fetcher_cadence_tick: 0,
+            scan_obj_size_large: false,
+            objsize_apply_cc: wy2_disabled(),
+            objsize_prev_large: false,
+            objsize_new_large: false,
+            sprite_fetch_recs: Vec::new(),
+        }
+    }
+}
+
+/// The window draw-state machine: the hardware window-draw state bits and the
+/// internal window Y line, the DMG fetch-anchor / first-tile-chop startup, and
+/// the WE-off zero-pixel insert glitch with its per-dot window-enable taps.
+#[derive(Serialize, Deserialize, Clone)]
+pub(in crate::ppu) struct WindowState {
     // The hardware `window Y position`: the window's internal Y line, incremented by 1 ONLY
     // at the moment the window actually begins drawing on a line (the mode-3-start window checkpoint /
     // pixel output draw-start), NOT per-line whenever ly > wy. Initialized to 0xFF
@@ -1998,26 +2057,6 @@ pub struct Ppu {
     // following dots.
     #[serde(default)]
     pub(in crate::ppu) win_wx_enable_resolved: bool,
-
-    // STAT interrupt state tracking
-    // True for the first scanline after LCDC.7 transitions 0 -> 1. On real
-    // hardware this line has no Mode 2 phase: STAT reports mode 0 until M3
-    // begins, no Mode 2 STAT IRQ fires, and M3 starts later than usual
-    // (dot 85 on DMG / 86 on CGB instead of 80 / 82).
-    #[serde(default)]
-    pub(in crate::ppu) first_line_after_enable: bool,
-    // The hardware OAM-reader lookup-until (`lu`) boundary for `inactive-after-enable(cc) = cc < lu`:
-    // the master cc until which, right after an LCD enable, the STAT resolve suppresses
-    // mode 2/3 (reports mode 0). Seeded at enable to `enable_cc + (80<<ds) + 1`.
-    #[serde(default)]
-    pub(in crate::ppu) display_enable_inactive_until: u64,
-    // True once we've zeroed FF44 partway through line 153 and before the
-    // line itself ends. Used to gate the end-of-frame transition and the
-    // LY=0 Mode 2 pretrigger (both of which originally checked LY==153).
-    #[serde(default)]
-    pub(in crate::ppu) line_153_ly_zeroed: bool,
-    pub(in crate::ppu) m3: Mode3State,
-    pub(in crate::ppu) m0: Mode0Schedule,
     // DMG window-startup fetch phase anchor: the trigger dot of a mid-line
     // window start. Hardware restarts the fetcher ON the trigger dot
     // (TileNumber dots t..t+1, data-low t+2..t+3, data-high t+4..t+5, push at
@@ -2118,38 +2157,77 @@ pub struct Ppu {
     // to the immediate start for a stable WX. Cleared at M3 arm.
     #[serde(default)]
     pub(in crate::ppu) dmg_wx_trigger_pending: Option<(u128, u8)>,
-    // OBJ-size (LCDC bit2) value used by the mode-2 OAM scan, latched one scan
-    // slot behind the live LCDC. The hardware OAM scanner latches the per-OAM
-    // entry size (`lsbuf_[pos/2]`) when that entry's OAM slot is read; a mid-mode-2
-    // size write only affects entries scanned strictly AFTER the write commits.
-    // Refreshed from the live LCDC after each scan slot so a write landing within
-    // a slot's window applies to the next slot (the late_sizechange 1-cc boundary).
-    #[serde(default)]
-    pub(in crate::ppu) scan_obj_size_large: bool,
-    // Exact-cc OBJ-size (LCDC bit2) latch for the mode-2 OAM scan (PoC extension
-    // of the SCX f1 / LCDC-bit4 pattern). A mid-mode-2 sprite-size write goes
-    // through the pending_lcdc_events queue (a 2-dot quantized self.lcdc.reg commit)
-    // AND the per-slot `scan_obj_size_large` snapshot lags one slot, which on the
-    // late_sizechange* tests pushes the change one OAM slot too late: the sprite
-    // whose 8x16-only y-range straddles the line is scanned with the stale 8x8
-    // size and dropped, so mode-0 time (and the boundary FF41 STAT read) resolves the
-    // wrong mode. The hardware OAM scanner latches each entry's size at that
-    // entry's OAM-read cc; record the exact abs_cc at which the bit2 change
-    // becomes visible (`write_cc + 2*cgb`, an LCDC write taking effect at cc+2 on hardware) and let
-    // each scan slot sample bit2 as-of its OWN abs_cc. (apply_cc, old_large,
-    // new_large); apply_cc == wy2_disabled() means no pending change.
-    #[serde(default = "wy2_disabled")]
-    pub(in crate::ppu) objsize_apply_cc: u64,
-    #[serde(default)]
-    pub(in crate::ppu) objsize_prev_large: bool,
-    #[serde(default)]
-    pub(in crate::ppu) objsize_new_large: bool,
-
     // DMG wx==166 pixel output-at-xpos166 runs once at the mode-3 -> HBlank
     // transition; this guards against the two transition call sites both firing
     // it on the same line. Reset at M3 start. See apply_dmg_wxa6_lineend_windraw.
     #[serde(default)]
     pub(in crate::ppu) wxa6_lineend_applied: bool,
+}
+
+// `win_y_pos` powers on at 0xFF (see the field's comment, so the first
+// window-draw line yields window Y position 0) and `we_dot_hist` seeds every
+// window-enable tap to `true`, so this cannot be derived.
+impl Default for WindowState {
+    fn default() -> Self {
+        WindowState {
+            win_y_pos: 0xFF,
+            win_draw_start: false,
+            win_draw_started_at_x0: false,
+            win_draw_started: false,
+            window_y_triggered: false,
+            window_started_this_line: false,
+            win_weoff_deferred_tail: false,
+            win_start_dot: None,
+            predicted_win_start_dot: None,
+            win_wx_penalty_resolved: false,
+            win_wx_enable_resolved: false,
+            win_fetch_anchor: None,
+            win_first_tile_chop: 0,
+            win_being_fetched: false,
+            insert_bg_pixel: false,
+            we_dot_hist: [true; 5],
+            we_glitch_tile_starts: [None; 2],
+            we_glitch_discard_insert: false,
+            we_insert_suppressed: false,
+            win_kill_tap_late: false,
+            win_wx0_delayed: false,
+            dmg_wx_trigger_pending: None,
+            wxa6_lineend_applied: false,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Ppu {
+    pub(in crate::ppu) fetcher: fetcher::Fetcher,
+    pub(in crate::ppu) disabled: bool,
+    pub(in crate::ppu) state: State,
+    pub(in crate::ppu) ticks: u128,
+    pub(in crate::ppu) x: u8,
+
+    pub(in crate::ppu) objs: ObjState,
+    // Window state tracking
+    pub(in crate::ppu) win: WindowState,
+
+    // STAT interrupt state tracking
+    // True for the first scanline after LCDC.7 transitions 0 -> 1. On real
+    // hardware this line has no Mode 2 phase: STAT reports mode 0 until M3
+    // begins, no Mode 2 STAT IRQ fires, and M3 starts later than usual
+    // (dot 85 on DMG / 86 on CGB instead of 80 / 82).
+    #[serde(default)]
+    pub(in crate::ppu) first_line_after_enable: bool,
+    // The hardware OAM-reader lookup-until (`lu`) boundary for `inactive-after-enable(cc) = cc < lu`:
+    // the master cc until which, right after an LCD enable, the STAT resolve suppresses
+    // mode 2/3 (reports mode 0). Seeded at enable to `enable_cc + (80<<ds) + 1`.
+    #[serde(default)]
+    pub(in crate::ppu) display_enable_inactive_until: u64,
+    // True once we've zeroed FF44 partway through line 153 and before the
+    // line itself ends. Used to gate the end-of-frame transition and the
+    // LY=0 Mode 2 pretrigger (both of which originally checked LY==153).
+    #[serde(default)]
+    pub(in crate::ppu) line_153_ly_zeroed: bool,
+    pub(in crate::ppu) m3: Mode3State,
+    pub(in crate::ppu) m0: Mode0Schedule,
 
     // Event-scheduled STAT/mode/LYC IRQ model. `abs_cc` is a monotonic absolute
     // dot clock; `line_cycle` (0..455) tracks position within the current 456-dot
@@ -2239,10 +2317,6 @@ pub struct Ppu {
     pub(in crate::ppu) out: FrameOut,
     pub(in crate::ppu) lcdc: LcdcState,
     pub(in crate::ppu) wg: BusGlitch,
-    // Per-sprite live fetch records, parallel to `sprites_on_line` (see
-    // `SpriteFetchRec`). Rebuilt (all Pending) at mode-3 entry.
-    #[serde(default)]
-    pub(in crate::ppu) sprite_fetch_recs: Vec<SpriteFetchRec>,
     #[serde(default)]
     pub(in crate::ppu) cgb_color_conversion: ColorCorrection,
 }
@@ -2261,52 +2335,14 @@ impl Ppu {
             state: State::OAMSearch,
             ticks: 0,
             x: 0,
-            sprites_on_line: Vec::new(),
-            current_oam_sprite_index: 0,
-            oam_reader: OamReader::default(),
-            prev_dma_writing: false,
-            oam_reader_seeded: false,
-            scan_slot_large: [false; OAM_SPRITE_COUNT],
-            next_sprite_fetch_index: 0,
-            m3_sprite_prev_tile: SPRITE_TILE_NONE,
-            m3_last_sprite_commit_tick: 0,
-            sprite_fetch_stall: 0,
-            pixel_transfer_warmup: 0,
-            fetcher_cadence_tick: 0,
-            win_y_pos: 0xFF,
-            win_draw_start: false,
-            win_draw_started_at_x0: false,
-            win_draw_started: false,
-            window_y_triggered: false,
-            win_start_dot: None,
-            predicted_win_start_dot: None,
-            win_wx_penalty_resolved: false,
-            win_wx_enable_resolved: false,
-            window_started_this_line: false,
-            win_weoff_deferred_tail: false,
+            objs: ObjState::default(),
+            win: WindowState::default(),
             first_line_after_enable: false,
             display_enable_inactive_until: 0,
             line_153_ly_zeroed: false,
             m3: Mode3State::default(),
             m0: Mode0Schedule::default(),
-            win_fetch_anchor: None,
-            win_first_tile_chop: 0,
-            win_being_fetched: false,
-            insert_bg_pixel: false,
-            we_dot_hist: [true; 5],
-            we_glitch_tile_starts: [None; 2],
-            we_glitch_discard_insert: false,
-            we_insert_suppressed: false,
-            win_kill_tap_late: false,
-            win_wx0_delayed: false,
-            dmg_wx_trigger_pending: None,
-            scan_obj_size_large: false,
-            objsize_apply_cc: wy2_disabled(),
-            objsize_prev_large: false,
-            objsize_new_large: false,
             speed: SpeedPhase::default(),
-            wxa6_lineend_applied: false,
-            sprite_fetch_recs: Vec::new(),
             abs_cc: 0,
             p_now: pnow_disabled(),
             latch: DelayedRegs::default(),

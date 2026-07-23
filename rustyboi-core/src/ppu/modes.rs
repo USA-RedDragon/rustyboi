@@ -41,21 +41,21 @@ impl Ppu {
         self.fetcher.reset();
         self.ticks = 0;
         self.x = 0;
-        self.sprites_on_line.clear();
-        self.current_oam_sprite_index = 0;
-        self.next_sprite_fetch_index = 0;
-        self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
-        self.m3_last_sprite_commit_tick = 0;
-        self.sprite_fetch_stall = 0;
+        self.objs.sprites_on_line.clear();
+        self.objs.current_oam_sprite_index = 0;
+        self.objs.next_sprite_fetch_index = 0;
+        self.objs.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+        self.objs.m3_last_sprite_commit_tick = 0;
+        self.objs.sprite_fetch_stall = 0;
         self.plot.objen_history.clear();
         self.plot.objsize_dot_history.clear();
-        self.sprite_fetch_recs.clear();
-        self.pixel_transfer_warmup = 0;
-        self.win_y_pos = 0xFF;
-        self.win_draw_start = false;
-        self.window_y_triggered = false;
-        self.window_started_this_line = false;
-        self.win_weoff_deferred_tail = false;
+        self.objs.sprite_fetch_recs.clear();
+        self.objs.pixel_transfer_warmup = 0;
+        self.win.win_y_pos = 0xFF;
+        self.win.win_draw_start = false;
+        self.win.window_y_triggered = false;
+        self.win.window_started_this_line = false;
+        self.win.win_weoff_deferred_tail = false;
         self.first_line_after_enable = false;
         self.line_153_ly_zeroed = false;
         self.m3.m3_pixels_discarded = 0;
@@ -78,10 +78,10 @@ impl Ppu {
         // line's mode2) is applied per-slot after the scan, so sprite-0 keeps
         // the pre-boundary size. This is the late_sizechange 1-cc M2-boundary
         // discriminator (the hardware OAM scanner's per-entry size latch).
-        self.scan_obj_size_large = self.lcdc_has(LCDCFlags::SpriteSize);
+        self.objs.scan_obj_size_large = self.lcdc_has(LCDCFlags::SpriteSize);
         // Clear any exact-cc OBJ-size latch left from a prior line so it cannot
         // leak into this line's OAM scan; a mid-mode-2 size write rearms it.
-        self.objsize_apply_cc = wy2_disabled();
+        self.objs.objsize_apply_cc = wy2_disabled();
         Self::set_lcd_status_mode(mmio, 2);
         // Arm the cgbp begin boundary (the hardware CGB-palette-accessible window: blocked once
         // `line cycles(cc) + ds >= 80`) as soon as the line's mode 2 begins, so a
@@ -207,15 +207,15 @@ impl Ppu {
             {
                 let ds = mmio.is_double_speed_mode();
                 let cc = mmio.master_cc().wrapping_sub(self.p_now);
-                self.oam_reader.cgb = mmio.is_cgb_features_enabled();
-                self.oam_reader.large_src =
+                self.objs.oam_reader.cgb = mmio.is_cgb_features_enabled();
+                self.objs.oam_reader.large_src =
                     self.lcdc_has(LCDCFlags::SpriteSize);
                 let dma_writing =
                     mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
-                self.oam_reader.src_disabled = dma_writing;
-                self.oam_reader.enable_display(cc, ds);
-                self.prev_dma_writing = dma_writing;
-                self.oam_reader_seeded = true;
+                self.objs.oam_reader.src_disabled = dma_writing;
+                self.objs.oam_reader.enable_display(cc, ds);
+                self.objs.prev_dma_writing = dma_writing;
+                self.objs.oam_reader_seeded = true;
             }
     }
 
@@ -262,7 +262,7 @@ impl Ppu {
         Self::set_lcd_status_mode(mmio, 0);
         self.disabled = true;
         // Re-arm the sprite snapshot for the next display-enable.
-        self.oam_reader_seeded = false;
+        self.objs.oam_reader_seeded = false;
         let _ = mmio.take_oam_write_pending();
     }
 
@@ -280,19 +280,19 @@ impl Ppu {
             // PixelTransfer start_window site), matching the hardware
             // mode-3-start window-checkpoint semantics.
             // Reset window line flag for new scanline
-            self.window_started_this_line = false;
-            self.win_weoff_deferred_tail = false;
-            self.win_start_dot = None;
-            self.predicted_win_start_dot = None;
-            self.win_wx_penalty_resolved = false;
-            self.win_wx_enable_resolved = false;
+            self.win.window_started_this_line = false;
+            self.win.win_weoff_deferred_tail = false;
+            self.win.win_start_dot = None;
+            self.win.predicted_win_start_dot = None;
+            self.win.win_wx_penalty_resolved = false;
+            self.win.win_wx_enable_resolved = false;
 
             // Initialize OAM search state
-            self.sprites_on_line.clear();
-            self.current_oam_sprite_index = 0;
-            self.next_sprite_fetch_index = 0;
-            self.sprite_fetch_stall = 0;
-            self.pixel_transfer_warmup = 0;
+            self.objs.sprites_on_line.clear();
+            self.objs.current_oam_sprite_index = 0;
+            self.objs.next_sprite_fetch_index = 0;
+            self.objs.sprite_fetch_stall = 0;
+            self.objs.pixel_transfer_warmup = 0;
         }
 
         // First line after enable: VRAM/OAM lock (PPU reports mode 3)
@@ -329,7 +329,7 @@ impl Ppu {
         // Skipped on the first scanline after LCD enable (no Mode 2 phase).
         if !self.first_line_after_enable
             && self.ticks.is_multiple_of(2)
-            && self.current_oam_sprite_index < OAM_SPRITE_COUNT
+            && self.objs.current_oam_sprite_index < OAM_SPRITE_COUNT
         {
             // Exact-cc OBJ-size override: when a mid-mode-2 size write is
             // pending, this slot's size is the value visible as-of its own
@@ -338,22 +338,22 @@ impl Ppu {
             // back to the lagged snapshot semantics (the steady state is
             // unchanged). Sampled BEFORE the OAM read so this entry uses
             // the size effective at its read cc (the hardware per-entry size latch).
-            if self.objsize_apply_cc != wy2_disabled() {
-                self.scan_obj_size_large = self.objsize_large_at_cc(self.abs_cc);
+            if self.objs.objsize_apply_cc != wy2_disabled() {
+                self.objs.scan_obj_size_large = self.objsize_large_at_cc(self.abs_cc);
             }
             // Record this slot's size for the snapshot rebuild, set for
             // every scanned slot (even once 10 sprites are found, so the
             // rebuild has a valid size for all 40 entries).
             {
-                let idx = self.current_oam_sprite_index;
-                self.scan_slot_large[idx] = self.scan_obj_size_large;
+                let idx = self.objs.current_oam_sprite_index;
+                self.objs.scan_slot_large[idx] = self.objs.scan_obj_size_large;
             }
-            self.check_single_sprite_for_scanline(mmio, self.current_oam_sprite_index);
-            self.current_oam_sprite_index += 1;
+            self.check_single_sprite_for_scanline(mmio, self.objs.current_oam_sprite_index);
+            self.objs.current_oam_sprite_index += 1;
             // Latch the OBJ-size for the NEXT scan slot from the live LCDC
             // (DMG: write applies to entries scanned after it commits, not
             // the one just read; the hardware per-slot size latch).
-            self.scan_obj_size_large = self.lcdc_has(LCDCFlags::SpriteSize);
+            self.objs.scan_obj_size_large = self.lcdc_has(LCDCFlags::SpriteSize);
         }
 
         let is_cgb = mmio.is_cgb_features_enabled();
@@ -384,10 +384,10 @@ impl Ppu {
             // Sort sprites by priority after OAM search is complete
             if is_cgb {
                 // CGB mode: Sort by OAM index only (already in order, but ensure it)
-                self.sprites_on_line.sort_by_key(|sprite| sprite.oam_index);
+                self.objs.sprites_on_line.sort_by_key(|sprite| sprite.oam_index);
             } else {
                 // DMG mode: Sort by X coordinate first, then OAM index
-                self.sprites_on_line.sort_by(|a, b| {
+                self.objs.sprites_on_line.sort_by(|a, b| {
                     a.x.cmp(&b.x).then(a.oam_index.cmp(&b.oam_index))
                 });
             }
@@ -398,27 +398,27 @@ impl Ppu {
             // line; a new write this line re-arms it.
             self.m3.subcc_scx_apply_cc = wy2_disabled();
             self.m3.prologue_rekey_armed = false;
-            self.next_sprite_fetch_index = 0;
-            self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
-            self.m3_last_sprite_commit_tick = 0;
-            self.sprite_fetch_stall = 0;
-            self.fetcher_cadence_tick = 0;
-            self.win_fetch_anchor = None;
-            self.win_first_tile_chop = 0;
-            self.win_being_fetched = false;
-            self.insert_bg_pixel = false;
-            self.win_wx0_delayed = false;
-            self.dmg_wx_trigger_pending = None;
+            self.objs.next_sprite_fetch_index = 0;
+            self.objs.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+            self.objs.m3_last_sprite_commit_tick = 0;
+            self.objs.sprite_fetch_stall = 0;
+            self.objs.fetcher_cadence_tick = 0;
+            self.win.win_fetch_anchor = None;
+            self.win.win_first_tile_chop = 0;
+            self.win.win_being_fetched = false;
+            self.win.insert_bg_pixel = false;
+            self.win.win_wx0_delayed = false;
+            self.win.dmg_wx_trigger_pending = None;
             {
                 let we_now =
                     self.lcdc_has(LCDCFlags::WindowDisplayEnable);
-                self.we_dot_hist = [we_now; 5];
-                self.we_glitch_tile_starts = [None; 2];
-                self.we_glitch_discard_insert = false;
-                self.we_insert_suppressed = false;
+                self.win.we_dot_hist = [we_now; 5];
+                self.win.we_glitch_tile_starts = [None; 2];
+                self.win.we_glitch_discard_insert = false;
+                self.win.we_insert_suppressed = false;
             }
             // CGB arms two dots later, so use a shorter warmup to keep the first visible pixel aligned.
-            self.pixel_transfer_warmup = if is_cgb {
+            self.objs.pixel_transfer_warmup = if is_cgb {
                 CGB_PIXEL_TRANSFER_WARMUP
             } else {
                 DMG_PIXEL_TRANSFER_WARMUP
@@ -434,10 +434,10 @@ impl Ppu {
                 // The hardware mode-3-start window checkpoint: if win_draw_start is set and
                 // the window is enabled, the window-draw state becomes win_draw_started
                 // and window Y position increments; otherwise the window-draw state clears.
-                if self.win_draw_start && win_en && !self.first_line_after_enable {
-                    self.win_y_pos = self.win_y_pos.wrapping_add(1);
-                    self.win_draw_started = true;
-                    self.win_draw_started_at_x0 = true;
+                if self.win.win_draw_start && win_en && !self.first_line_after_enable {
+                    self.win.win_y_pos = self.win.win_y_pos.wrapping_add(1);
+                    self.win.win_draw_started = true;
+                    self.win.win_draw_started_at_x0 = true;
                     // The window is `started` from line begin: fetch
                     // window tiles from xpos 0 (after the SCX discard
                     // prefix), not BG. The hardware mode-3-start checkpoint seeds
@@ -446,11 +446,11 @@ impl Ppu {
                     let scx = (mmio.read(SCX) & 0x07) as u32;
                     let start_tile = ((8 + scx) / 8) as u8;
                     self.fetcher.start_window_at_tile(0, start_tile);
-                    self.win_kill_tap_late = false;
-                    self.window_started_this_line = true;
-                    self.win_start_dot = Some(self.ticks);
+                    self.win.win_kill_tap_late = false;
+                    self.win.window_started_this_line = true;
+                    self.win.win_start_dot = Some(self.ticks);
                 } else {
-                    self.win_draw_started_at_x0 = false;
+                    self.win.win_draw_started_at_x0 = false;
                     // The hardware mode-3-start checkpoint: when win_draw_start was
                     // NOT armed, the window-draw state clears to 0 (win_draw_started
                     // bit dropped). Normal (non-wxA6) windows re-set this on
@@ -459,10 +459,10 @@ impl Ppu {
                     // window does not (re)start — which is what lets the DMG
                     // wxA6 START-NOW branch fire again when WY next matches.
                     if win_en && !self.first_line_after_enable {
-                        self.win_draw_started = false;
+                        self.win.win_draw_started = false;
                     }
                 }
-                self.win_draw_start = false;
+                self.win.win_draw_start = false;
             }
             // DMG wx==166 (lcd_hres+6): the hardware pixel-output runs at EVERY
             // xpos as the fetcher walks the line; the wx==xpos==166 branch
@@ -484,7 +484,7 @@ impl Ppu {
             self.first_line_after_enable = false;
             self.m0.mode0_reported_this_line = false;
             self.m3.line_rendered_this_line = false;
-            self.wxa6_lineend_applied = false;
+            self.win.wxa6_lineend_applied = false;
             // SCX fine-scroll discard target (the mode-3-start fine-scroll phase): the
             // break xpos is resolved over the first M3 dots by re-reading
             // SCX live (see the early-window loop in PixelTransfer). Seed
@@ -564,9 +564,9 @@ impl Ppu {
                 0,
                 self.lcdc_has(LCDCFlags::SpriteSize),
             ));
-            self.sprite_fetch_recs.clear();
-            self.sprite_fetch_recs
-                .resize(self.sprites_on_line.len(), SpriteFetchRec::default());
+            self.objs.sprite_fetch_recs.clear();
+            self.objs.sprite_fetch_recs
+                .resize(self.objs.sprites_on_line.len(), SpriteFetchRec::default());
             self.plot.bgp_writes.clear();
             // Carry a mode-2 BGP write into this line's spike cadence as a
             // neighbor-only entry (see on_bgp_write); a mode-3 partner within
@@ -698,7 +698,7 @@ impl Ppu {
                 // ahead of the first window pixel reaching x (the `-1`), so
                 // a disable on the dot before the visible start still keeps
                 // it (late_disable_*_wx11 vs the same-tile wx10).
-                self.predicted_win_start_dot =
+                self.win.predicted_win_start_dot =
                     if !is_cgb && self.m0.m3_scheduled_win {
                         let wx = self.m0.m3_scheduled_wx as i64;
                         let x_at_start = (wx - 7).max(0);
@@ -777,9 +777,9 @@ impl Ppu {
                 mmio.write_ly_from_ppu(next_ly);
                 self.state = State::OAMSearch;
                 self.enter_scheduled_mode2(mmio);
-                self.next_sprite_fetch_index = 0;
-                self.sprite_fetch_stall = 0;
-                self.pixel_transfer_warmup = 0;
+                self.objs.next_sprite_fetch_index = 0;
+                self.objs.sprite_fetch_stall = 0;
+                self.objs.pixel_transfer_warmup = 0;
             }
             return true;
         }
@@ -839,10 +839,10 @@ impl Ppu {
                 // dots into the new frame by `step` (below).
                 self.l154_vblank_glitch_window = true;
                 self.enter_scheduled_mode2(mmio);
-                self.next_sprite_fetch_index = 0;
-                self.sprite_fetch_stall = 0;
-                self.pixel_transfer_warmup = 0;
-                self.win_y_pos = 0xFF;
+                self.objs.next_sprite_fetch_index = 0;
+                self.objs.sprite_fetch_stall = 0;
+                self.objs.pixel_transfer_warmup = 0;
+                self.win.win_y_pos = 0xFF;
                 // NOTE: win_draw_start / win_draw_started are intentionally
                 // NOT reset here. The hardware resets window Y position at the line-0 mode-2 checkpoint but
                 // leaves the window-draw state (both bits) untouched across the frame
@@ -852,8 +852,8 @@ impl Ppu {
                 // through vblank and activates the window on the next frame's
                 // line 0 (the mode-3-start window checkpoint consumes win_draw_start, the window-Y increment).
                 // This is the wxA6 window-enable-master-persistence path.
-                self.window_y_triggered = false;
-                self.window_started_this_line = false;
+                self.win.window_y_triggered = false;
+                self.win.window_started_this_line = false;
 
                 // CGB panel repeat (see `panel_holds_image`): the first
                 // frame completed after an LCDC.7 enable is never driven

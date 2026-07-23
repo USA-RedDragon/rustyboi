@@ -495,7 +495,7 @@ impl Ppu {
                 // snapshot rebuild sit past its end. A pending exact-cc
                 // OBJ-size override needs its per-dot/per-slot abs_cc
                 // resolution, so no batching then.
-                if self.first_line_after_enable || self.objsize_apply_cc != wy2_disabled() {
+                if self.first_line_after_enable || self.objs.objsize_apply_cc != wy2_disabled() {
                     return 0;
                 }
                 // A pending CPU OAM write must be consumed by
@@ -504,7 +504,7 @@ impl Ppu {
                 // is cc-precise DURING the scan (gambatte late_spXX). A
                 // batch would consume it n dots late. (Mode 0/1 skips are
                 // immune: the walk is already capped at scan end there.)
-                if self.prev_dma_writing || mmio.oam_snoop_event_possible() {
+                if self.objs.prev_dma_writing || mmio.oam_snoop_event_possible() {
                     return 0;
                 }
                 let arm = if mmio.is_cgb_features_enabled() {
@@ -563,14 +563,14 @@ impl Ppu {
         if matches!(self.state, State::OAMSearch) {
             let slots = ((t + n).div_ceil(2)) - (t.div_ceil(2));
             for _ in 0..slots {
-                if self.current_oam_sprite_index >= OAM_SPRITE_COUNT {
+                if self.objs.current_oam_sprite_index >= OAM_SPRITE_COUNT {
                     break;
                 }
-                let idx = self.current_oam_sprite_index;
-                self.scan_slot_large[idx] = self.scan_obj_size_large;
+                let idx = self.objs.current_oam_sprite_index;
+                self.objs.scan_slot_large[idx] = self.objs.scan_obj_size_large;
                 self.check_single_sprite_for_scanline(mmio, idx);
-                self.current_oam_sprite_index += 1;
-                self.scan_obj_size_large =
+                self.objs.current_oam_sprite_index += 1;
+                self.objs.scan_obj_size_large =
                     self.lcdc_has(LCDCFlags::SpriteSize);
             }
         }

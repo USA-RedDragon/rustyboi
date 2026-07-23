@@ -451,7 +451,7 @@ impl Ppu {
     }
 
     pub fn get_sprite_fetch_stall(&self) -> u8 {
-        self.sprite_fetch_stall
+        self.objs.sprite_fetch_stall
     }
 
     pub fn is_disabled(&self) -> bool {
@@ -552,6 +552,6 @@ impl Ppu {
     }
 
     pub fn get_sprites_on_line_count(&self) -> usize {
-        self.sprites_on_line.len()
+        self.objs.sprites_on_line.len()
     }
 }

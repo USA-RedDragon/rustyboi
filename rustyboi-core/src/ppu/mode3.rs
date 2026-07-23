@@ -46,7 +46,7 @@ impl Ppu {
             && self.ticks == (1 + is_cgb as u128)
         {
             if wy == 0 {
-                self.window_y_triggered = true;
+                self.win.window_y_triggered = true;
             }
             return;
         }
@@ -60,13 +60,13 @@ impl Ppu {
         // Prior-to-LY-inc check at line cycle 450: window-enable master |= (ly == wy).
         if self.ticks == 450 {
             if ly == wy {
-                self.window_y_triggered = true;
+                self.win.window_y_triggered = true;
             }
             return;
         }
         // After-LY-inc check at line cycle 454: window-enable master |= (ly + 1 == wy).
         if self.ticks == 454 && ly + 1 == wy {
-            self.window_y_triggered = true;
+            self.win.window_y_triggered = true;
         }
     }
 
@@ -76,8 +76,8 @@ impl Ppu {
     fn draw_fifo_pixel(&mut self, mmio: &mmio::Mmio) -> bool {
         // Window-reactivation insert: render a color-0 pixel without popping
         // (driven by the window-reactivation pixel-insert flag set below).
-        let (bg_pixel_idx, bg_attrs) = if self.insert_bg_pixel {
-            self.insert_bg_pixel = false;
+        let (bg_pixel_idx, bg_attrs) = if self.win.insert_bg_pixel {
+            self.win.insert_bg_pixel = false;
             (0u8, 0u8)
         } else {
             let Ok(bg_pixel) = self.fetcher.pixel_fifo.pop() else {
@@ -85,7 +85,7 @@ impl Ppu {
             };
             (bg_pixel.color, bg_pixel.attrs)
         };
-        self.win_being_fetched = false;
+        self.win.win_being_fetched = false;
         let ly = mmio.ppu_io_reg(LY) as u16;
         let fb_offset = (ly * 160) + self.x as u16;
 
@@ -218,7 +218,7 @@ impl Ppu {
         if !win_en {
             return false;
         }
-        if self.window_y_triggered {
+        if self.win.window_y_triggered {
             return true;
         }
         self.latch.wy2 == mmio.read(LY)
@@ -257,29 +257,29 @@ impl Ppu {
     // runs once at the mode-3->HBlank transition (the two transition call sites
     // are mutually exclusive per line).
     fn apply_dmg_wxa6_lineend_windraw(&mut self, mmio: &mmio::Mmio, is_cgb: bool) {
-        if self.wxa6_lineend_applied {
+        if self.win.wxa6_lineend_applied {
             return;
         }
         if is_cgb || self.first_line_after_enable || mmio.read(WX) != 166 {
             return;
         }
-        self.wxa6_lineend_applied = true;
+        self.win.wxa6_lineend_applied = true;
         let win_en_now = self.lcdc_has(LCDCFlags::WindowDisplayEnable);
-        let we_gate = self.window_y_triggered
+        let we_gate = self.win.window_y_triggered
             || (self.latch.wy2 == mmio.read(LY) && win_en_now);
         if !we_gate {
             return;
         }
-        let win_draw_state_zero = !self.win_draw_start && !self.win_draw_started;
+        let win_draw_state_zero = !self.win.win_draw_start && !self.win.win_draw_started;
         if win_draw_state_zero && win_en_now {
             // branch A (886): start now (no visible window at xpos 166).
-            self.win_draw_start = true;
-            self.win_draw_started = true;
-            self.win_y_pos = self.win_y_pos.wrapping_add(1);
+            self.win.win_draw_start = true;
+            self.win.win_draw_started = true;
+            self.win.win_y_pos = self.win.win_y_pos.wrapping_add(1);
         } else {
             // branch B (889): arm win_draw_start (xpos==166 term, fires
             // regardless of window-enable) for the next line's mode-3-start window-checkpoint consume.
-            self.win_draw_start = true;
+            self.win.win_draw_start = true;
         }
     }
 
@@ -336,7 +336,7 @@ impl Ppu {
             if wx < targetx {
                 nwx = wx;
                 cycles += WIN_M3_PENALTY;
-                if is_cgb && scx == 5 && self.sprites_on_line.is_empty() {
+                if is_cgb && scx == 5 && self.objs.sprites_on_line.is_empty() {
                     let dflt = if mmio.is_double_speed_mode() { 0 } else { -1 };
                     cycles += dflt;
                 }
@@ -344,7 +344,7 @@ impl Ppu {
         }
 
         let obj_enabled = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
-        let mut sprite_xs: Vec<i32> = self.sprites_on_line.iter().map(|s| s.x as i32).collect();
+        let mut sprite_xs: Vec<i32> = self.objs.sprites_on_line.iter().map(|s| s.x as i32).collect();
         sprite_xs.sort_unstable();
         cycles += sprite_tile_walk_cost(&sprite_xs, scx, nwx, targetx, obj_enabled || mmio.is_cgb());
 
@@ -397,7 +397,7 @@ impl Ppu {
             // a window that starts mid-tile; at WX=0 the window starts at the tile
             // grid origin so that dispatch penalty does not apply (age
             // stat-mode-window-cgbBCE WX=0 scx5 row reads mode 3, not mode 0).
-            if is_cgb && scx == 5 && self.sprites_on_line.is_empty() && nwx != 0 {
+            if is_cgb && scx == 5 && self.objs.sprites_on_line.is_empty() && nwx != 0 {
                 let dflt = if mmio.is_double_speed_mode() { 0 } else { -1 };
                 cycles += dflt;
             }
@@ -416,7 +416,7 @@ impl Ppu {
         // CGB always evaluates them).
         let obj_enabled = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
         let target_x = 167;
-        let mut sprite_xs: Vec<i32> = self.sprites_on_line.iter().map(|s| s.x as i32).collect();
+        let mut sprite_xs: Vec<i32> = self.objs.sprites_on_line.iter().map(|s| s.x as i32).collect();
         sprite_xs.sort_unstable();
         // The CGB "OBJ-disable does not shorten mode 3" quirk is a property of the
         // CGB PPU SILICON, not of CGB mode: a CGB running a DMG cart in compat mode
@@ -446,7 +446,7 @@ impl Ppu {
         if !(obj_enabled || is_cgb) {
             return 0;
         }
-        if !self.sprites_on_line.iter().any(|s| s.x == 0) {
+        if !self.objs.sprites_on_line.iter().any(|s| s.x == 0) {
             return 0;
         }
         let scx = (self.m3.first_line_scx_override.unwrap_or_else(|| mmio.read(SCX)) & 0x07) as i64;
@@ -473,8 +473,8 @@ impl Ppu {
     fn mode3_rekey_wx_change(&mut self, mmio: &mmio::Mmio, fast: bool) {
         if !fast
             && self.m0.scheduled_mode0_dot.is_some()
-            && !self.window_started_this_line
-            && !self.win_wx_enable_resolved
+            && !self.win.window_started_this_line
+            && !self.win.win_wx_enable_resolved
             && (mmio.read(WX) != self.m0.m3_scheduled_wx
                 || self.window_will_start(mmio, mmio.is_cgb_features_enabled())
                     != self.m0.m3_scheduled_win)
@@ -504,12 +504,12 @@ impl Ppu {
                 && wx_into_range
                 && mmio.is_cgb_features_enabled()
                 && !mmio.is_double_speed_mode()
-                && self.sprites_on_line.is_empty();
+                && self.objs.sprites_on_line.is_empty();
             let mut keep_schedule = false;
             if wx_enable_clean && let Some(m0t) = self.m0.m0_time_master {
                 // Latch: this clean WX-enable is now resolved for the line, so
                 // later dots (WX still != arm) do not re-enter and null.
-                self.win_wx_enable_resolved = true;
+                self.win.win_wx_enable_resolved = true;
                 keep_schedule = true;
                 let wx = mmio.read(WX) as i32;
                 let x_at_start = (wx - 7).max(0);
@@ -564,12 +564,12 @@ impl Ppu {
                 && (0..=7).contains(&wx_now)
                 && mmio.is_cgb_features_enabled()
                 && !mmio.is_double_speed_mode()
-                && self.sprites_on_line.is_empty()
+                && self.objs.sprites_on_line.is_empty()
                 && let Some(m0t) = self.m0.m0_time_master
             {
                 // This WY-trigger enable is resolved for the line; suppress
                 // re-entry on later dots (window_will_start stays != arm).
-                self.win_wx_enable_resolved = true;
+                self.win.win_wx_enable_resolved = true;
                 keep_schedule = true;
                 // Commit dot = the M3 dot at which the fetcher reaches the
                 // window-start xpos. For an x==0 window (WX 0..=7) that is
@@ -616,10 +616,10 @@ impl Ppu {
                 && (0..=7).contains(&wx_now)
                 && !mmio.is_cgb_features_enabled()
                 && !mmio.is_double_speed_mode()
-                && self.sprites_on_line.is_empty()
+                && self.objs.sprites_on_line.is_empty()
                 && let Some(m0t) = self.m0.m0_time_master
             {
-                self.win_wx_enable_resolved = true;
+                self.win.win_wx_enable_resolved = true;
                 keep_schedule = true;
                 let commit_dot = self.m3.m3_arm_dot as i64
                     + (self.m3.m3_arm_scx & 7) as i64
@@ -654,7 +654,7 @@ impl Ppu {
                 && !now_will_start
                 && !mmio.is_cgb_features_enabled()
                 && !mmio.is_double_speed_mode()
-                && self.sprites_on_line.is_empty()
+                && self.objs.sprites_on_line.is_empty()
                 && self.m0.m0_time_master.is_some()
             {
                 let commit_dot = self.m3.m3_arm_dot as i64
@@ -664,7 +664,7 @@ impl Ppu {
                     + self.m0.m3_scheduled_wx as i64;
                 if (self.ticks as i64) >= commit_dot {
                     keep_schedule = true;
-                    self.win_wx_penalty_resolved = true;
+                    self.win.win_wx_penalty_resolved = true;
                 }
             }
             if !keep_schedule {
@@ -757,10 +757,10 @@ impl Ppu {
             if should_start_window
                 && !is_cgb
                 && wx == 0
-                && !self.win_wx0_delayed
+                && !self.win.win_wx0_delayed
                 && scx_fine != 0
             {
-                self.win_wx0_delayed = true;
+                self.win.win_wx0_delayed = true;
                 return true;
             }
 
@@ -769,7 +769,7 @@ impl Ppu {
                 // dot so a WX store landing on the commit dot is seen by
                 // the comparator (see dmg_wx_trigger_pending).
                 if is_dmg && wx >= 7 && self.x + 7 == wx {
-                    self.dmg_wx_trigger_pending = Some((self.ticks, wx));
+                    self.win.dmg_wx_trigger_pending = Some((self.ticks, wx));
                     return true;
                 }
                 // Window draw-start (the mode-3-start window checkpoint /
@@ -807,7 +807,7 @@ impl Ppu {
                     // plain trigger (separate activation-position quirk
                     // cluster; see win_wx0_delayed).
                     let chop = if (1..7).contains(&wx) { 7 - wx } else { 0 };
-                    self.win_first_tile_chop = chop;
+                    self.win.win_first_tile_chop = chop;
                     // DMG window bus-glitch grid origin (see wg_apply):
                     // this TileNumber's conceptual dot is `chop` dots in
                     // the past; a pre-window sprite stall delayed the
@@ -823,7 +823,7 @@ impl Ppu {
                             mmio,
                             fls,
                             crate::ppu::fetcher::FetchPos {
-                                window_line: self.win_y_pos,
+                                window_line: self.win.win_y_pos,
                                 display_x: self.x,
                                 pending_discard: 0,
                                 scy: self.latch.scy_delayed,
@@ -847,9 +847,9 @@ impl Ppu {
                     // (phase 6), so its first discard pop is due on this
                     // very dot.
                     if chop >= 6 && self.fetcher.pixel_fifo.pop().is_ok() {
-                        self.win_first_tile_chop -= 1;
+                        self.win.win_first_tile_chop -= 1;
                     }
-                    self.win_fetch_anchor =
+                    self.win.win_fetch_anchor =
                         Some(self.ticks.wrapping_sub(chop as u128));
                 } else if cgb_wx0_fine {
                     // The SCX fine-scroll discard below trims scx&7 pixels off
@@ -858,7 +858,7 @@ impl Ppu {
                     // early (SameBoy's `(position_in_line & 7) == 6 && scx&7 ==
                     // 7` shortcut while the window is being fetched), so it
                     // lands like scx&7 == 6.
-                    self.win_first_tile_chop = 0;
+                    self.win.win_first_tile_chop = 0;
                     if scx_fine == 7 {
                         self.m3.m3_pixels_discarded = 1;
                     }
@@ -876,15 +876,15 @@ impl Ppu {
                     // on the normal cadence, so no DMG-style fetch-anchor
                     // phase-lock is needed. Leaves the WX=0+SCX fine-scroll
                     // discard (win_x0_locked / m3_window_timing_wx_0) intact.
-                    self.win_first_tile_chop = 7 - wx;
+                    self.win.win_first_tile_chop = 7 - wx;
                 }
                 // The post-window sprite group restarts the BG-tile grid
                 // (hardware resets the previous sprite tile number to none after
                 // the window split), so the first post-window sprite in a
                 // tile is again charged the leading rate.
-                self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
-                if self.win_start_dot.is_none() {
-                    self.win_start_dot = Some(self.ticks);
+                self.objs.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+                if self.win.win_start_dot.is_none() {
+                    self.win.win_start_dot = Some(self.ticks);
                 }
                 return true; // Skip this cycle to let window fetching start
             }
@@ -905,7 +905,7 @@ impl Ppu {
         let mut push_this_dot = false;
         if cadence_even
             && let Some(event) = self.fetcher.step(mmio, fetcher_lcdc_state, crate::ppu::fetcher::FetchPos {
-                window_line: self.win_y_pos,
+                window_line: self.win.win_y_pos,
                 display_x: self.x,
                 pending_discard,
                 scy: self.latch.scy_delayed,
@@ -928,6 +928,7 @@ impl Ppu {
                             // Visible boundary: queue for the pop-side
                             // WE-off zero-pixel insert check.
                             if let Some(slot) = self
+                                .win
                                 .we_glitch_tile_starts
                                 .iter_mut()
                                 .find(|s| s.is_none())
@@ -948,13 +949,13 @@ impl Ppu {
                             let logical = first_x + 7;
                             let logical =
                                 if (0..=167).contains(&logical) { logical } else { 0 };
-                            if self.window_y_triggered
+                            if self.win.window_y_triggered
                                 && !self.fetcher.is_fetching_window()
-                                && !self.we_dot_hist[2]
-                                && !self.we_insert_suppressed
+                                && !self.win.we_dot_hist[2]
+                                && !self.win.we_insert_suppressed
                                 && mmio.read(WX) as i32 == logical
                             {
-                                self.we_glitch_discard_insert = true;
+                                self.win.we_glitch_discard_insert = true;
                             }
                         }
                     }
@@ -991,7 +992,7 @@ impl Ppu {
                                 n: event.tile_index as u64,
                                 tn: event.tile_num,
                                 first_x: first_x as u8,
-                                y: self.win_y_pos,
+                                y: self.win.win_y_pos,
                                 live_low_tds: self.fetcher.last_low_tds(),
                                 live_high_tds: self.fetcher.last_high_tds(),
                             });
@@ -1052,7 +1053,7 @@ impl Ppu {
                     let dmg_ss_lowx_sprite = dsf == 0
                         && !mmio.is_cgb_features_enabled()
                         && self.lcdc_has(LCDCFlags::SpriteDisplayEnable)
-                        && self.sprites_on_line.iter().any(|s| s.x <= 8);
+                        && self.objs.sprites_on_line.iter().any(|s| s.x <= 8);
                     // DS (Stage 2): the gap proxy is ambiguous across
                     // initial-scx, but the underlying resonance is that the
                     // write's apply cc lands at the MIDPOINT of the armed
@@ -1087,7 +1088,7 @@ impl Ppu {
                     // MUST keep it.
                     let ds_two_tile = dsf == 1
                         && mmio.is_cgb_features_enabled()
-                        && self.sprites_on_line.iter().any(|s| s.x <= 16);
+                        && self.objs.sprites_on_line.iter().any(|s| s.x <= 16);
                     if flip {
                         let new_col = (((self.m3.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
                         let old_col = (((self.m3.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
@@ -1122,6 +1123,7 @@ impl Ppu {
                             // LY0 (sprite x==2), an odd one does not (x==1),
                             // so the revert is gated on the low sprite x parity.
                             let lowspr_even = self
+                                .objs
                                 .sprites_on_line
                                 .iter()
                                 .filter(|s| s.x <= 16)
@@ -1141,7 +1143,7 @@ impl Ppu {
                     } else if dsf == 0
                         && mmio.is_cgb_features_enabled()
                         && gap == 1
-                        && self.sprites_on_line.iter().any(|s| s.x >= 1 && s.x <= 8)
+                        && self.objs.sprites_on_line.iter().any(|s| s.x >= 1 && s.x <= 8)
                     {
                         // First rendered line (LY=0) straddle, CGB SS: the
                         // line after LCD-enable runs its mode-3 fetcher
@@ -1235,12 +1237,12 @@ impl Ppu {
     #[inline(always)]
     pub(in crate::ppu) fn step_mode3_dot(&mut self, mmio: &mut mmio::Mmio, fast: bool) {
         // Shift the DMG WE per-dot visibility history (see we_dot_hist).
-        self.we_dot_hist = [
+        self.win.we_dot_hist = [
             self.lcdc_has(LCDCFlags::WindowDisplayEnable),
-            self.we_dot_hist[0],
-            self.we_dot_hist[1],
-            self.we_dot_hist[2],
-            self.we_dot_hist[3],
+            self.win.we_dot_hist[0],
+            self.win.we_dot_hist[1],
+            self.win.we_dot_hist[2],
+            self.win.we_dot_hist[3],
         ];
         // A mid-mode-3 WX change before the window starts invalidates the
         // closed-form schedule; fall back to the live emergent transition.
@@ -1270,16 +1272,16 @@ impl Ppu {
         // (no refund). DMG / no sprites / SS.
         if !fast
             && self.m0.m0_time_master.is_some()
-            && self.window_started_this_line
+            && self.win.window_started_this_line
             && !mmio.is_cgb_features_enabled()
-            && self.sprites_on_line.is_empty()
+            && self.objs.sprites_on_line.is_empty()
             && mmio.read(WX) != self.m0.m3_scheduled_wx
-            && !self.win_wx_penalty_resolved
+            && !self.win.win_wx_penalty_resolved
             && (self.m0.m3_scheduled_wx as i32) >= 7
         {
             let wx_now = mmio.read(WX) as i32;
             let wx_in_range = (0..=166).contains(&wx_now);
-            if let (Some(ws), Some(m0t)) = (self.win_start_dot, self.m0.m0_time_master)
+            if let (Some(ws), Some(m0t)) = (self.win.win_start_dot, self.m0.m0_time_master)
                 && !wx_in_range
             {
                 let commit = ws as i64 + (self.m3.m3_arm_scx & 7) as i64 + 2;
@@ -1287,25 +1289,25 @@ impl Ppu {
                     self.m0.m0_time_master =
                         Some((m0t as i64 - WIN_M3_PENALTY as i64).max(0) as u64);
                 }
-                self.win_wx_penalty_resolved = true;
+                self.win.win_wx_penalty_resolved = true;
             }
         }
         else if self.m0.m0_time_master.is_some()
-            && self.window_started_this_line
+            && self.win.window_started_this_line
             && mmio.is_cgb_features_enabled()
             && !mmio.is_double_speed_mode()
-            && self.sprites_on_line.is_empty()
+            && self.objs.sprites_on_line.is_empty()
             && mmio.read(WX) != self.m0.m3_scheduled_wx
-            && !self.win_wx_penalty_resolved
+            && !self.win.win_wx_penalty_resolved
         {
             let wx_now = mmio.read(WX) as i32;
             let wx_in_range = (0..=166).contains(&wx_now);
-            if let (Some(ws), Some(m0t)) = (self.win_start_dot, self.m0.m0_time_master)
+            if let (Some(ws), Some(m0t)) = (self.win.win_start_dot, self.m0.m0_time_master)
                 && !wx_in_range
             {
                 if (self.m0.m3_scheduled_wx as i32) < 7 {
                     // Immediate-start window: penalty already locked.
-                    self.win_wx_penalty_resolved = true;
+                    self.win.win_wx_penalty_resolved = true;
                 } else {
                     let scx_bias = if (self.m3.m3_arm_scx & 7) != 0 { 1 } else { 0 };
                     // SCX > 3 fine-scroll: the x==0 window's StartWindowDraw
@@ -1319,7 +1321,7 @@ impl Ppu {
                     let accrued = drawn.clamp(0, WIN_M3_PENALTY as i64);
                     let refund = WIN_M3_PENALTY as i64 - accrued;
                     self.m0.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
-                    self.win_wx_penalty_resolved = true;
+                    self.win.win_wx_penalty_resolved = true;
                 }
             }
         }
@@ -1335,17 +1337,17 @@ impl Ppu {
         // (write 2 dots later, or scx0 1 dot in) keep the full mode-0 time -> mode 3
         // (out3). CGB / no sprites; live pipeline untouched, only read-at-cc.
         else if self.m0.m0_time_master.is_some()
-            && self.window_started_this_line
+            && self.win.window_started_this_line
             && mmio.is_cgb_features_enabled()
             && mmio.is_double_speed_mode()
-            && self.sprites_on_line.is_empty()
+            && self.objs.sprites_on_line.is_empty()
             && mmio.read(WX) != self.m0.m3_scheduled_wx
-            && !self.win_wx_penalty_resolved
+            && !self.win.win_wx_penalty_resolved
             && (self.m0.m3_scheduled_wx as i32) >= 7
         {
             let wx_now = mmio.read(WX) as i32;
             let wx_in_range = (0..=166).contains(&wx_now);
-            if let (Some(ws), Some(m0t)) = (self.win_start_dot, self.m0.m0_time_master)
+            if let (Some(ws), Some(m0t)) = (self.win.win_start_dot, self.m0.m0_time_master)
                 && !wx_in_range
             {
                 let commit = ws as i64 + (self.m3.m3_arm_scx & 7) as i64 + 1;
@@ -1353,7 +1355,7 @@ impl Ppu {
                     let refund = (WIN_M3_PENALTY as i64) << 1;
                     self.m0.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
                 }
-                self.win_wx_penalty_resolved = true;
+                self.win.win_wx_penalty_resolved = true;
             }
         }
         // ATOMIC mode-3 END: mode 3 ends at the exact closed-form mode-0 time
@@ -1383,7 +1385,7 @@ impl Ppu {
                 // until x==160 so the final window pixel is drawn, then enter
                 // HBlank via the x==160 fallback below. For all other lines
                 // the flush completed the line, so end mode 3 now.
-                if !((self.window_started_this_line || self.win_weoff_deferred_tail)
+                if !((self.win.window_started_this_line || self.win.win_weoff_deferred_tail)
                     && self.x < 160)
                 {
                     // DMG wx==166 pixel output-at-xpos166 (mode-3 end). See
@@ -1499,15 +1501,15 @@ impl Ppu {
             }
         }
 
-        if self.sprite_fetch_stall > 0 {
-            self.sprite_fetch_stall -= 1;
+        if self.objs.sprite_fetch_stall > 0 {
+            self.objs.sprite_fetch_stall -= 1;
             return;
         }
 
-        if self.fetcher.pixel_fifo.size() != 0 && self.pixel_transfer_warmup == 0 {
-            self.sprite_fetch_stall = self.sprite_fetch_penalty_for_current_x(mmio).unwrap_or(0);
-            if self.sprite_fetch_stall > 0 {
-                self.sprite_fetch_stall -= 1;
+        if self.fetcher.pixel_fifo.size() != 0 && self.objs.pixel_transfer_warmup == 0 {
+            self.objs.sprite_fetch_stall = self.sprite_fetch_penalty_for_current_x(mmio).unwrap_or(0);
+            if self.objs.sprite_fetch_stall > 0 {
+                self.objs.sprite_fetch_stall -= 1;
                 return;
             }
         }
@@ -1531,7 +1533,7 @@ impl Ppu {
             && !self.first_line_after_enable
             && self.m3.m3_discard_target >= 0
             // Comparator WE tap (see we_dot_hist): delayed, not live.
-            && self.window_y_active_with(mmio, self.we_dot_hist[1] && self.we_dot_hist[2])
+            && self.window_y_active_with(mmio, self.win.we_dot_hist[1] && self.win.we_dot_hist[2])
         {
             let wx = mmio.read(WX);
             // WX==0 with SCX&7==0 takes the same early-comparator
@@ -1557,15 +1559,15 @@ impl Ppu {
                 let pos = self.ticks as i64 - base;
                 if pos == wx as i64 - 6 {
                     self.begin_window_draw(0);
-                    self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
-                    if self.win_start_dot.is_none() {
-                        self.win_start_dot = Some(self.ticks);
+                    self.objs.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+                    if self.win.win_start_dot.is_none() {
+                        self.win.win_start_dot = Some(self.ticks);
                     }
                     // Remaining prologue pops become the first-tile chop;
                     // the warmup/scx-discard bookkeeping is superseded
                     // (their dots are consumed by the restart fetch).
-                    self.win_first_tile_chop = 7 - wx;
-                    self.pixel_transfer_warmup = 0;
+                    self.win.win_first_tile_chop = 7 - wx;
+                    self.objs.pixel_transfer_warmup = 0;
                     self.m3.m3_pixels_discarded = self.m3.m3_discard_target as u8;
                     // The activation dot itself was one dot ago: its
                     // TileNumber is due now (catch-up), low/high/push at
@@ -1576,7 +1578,7 @@ impl Ppu {
                         mmio,
                         fls,
                         crate::ppu::fetcher::FetchPos {
-                            window_line: self.win_y_pos,
+                            window_line: self.win.win_y_pos,
                             display_x: self.x,
                             pending_discard: 0,
                             scy: self.latch.scy_delayed,
@@ -1591,7 +1593,7 @@ impl Ppu {
                         }
                         self.record_fetch_debug_event(event, mmio);
                     }
-                    self.win_fetch_anchor = Some(self.ticks.wrapping_sub(1));
+                    self.win.win_fetch_anchor = Some(self.ticks.wrapping_sub(1));
                     return;
                 }
             }
@@ -1602,10 +1604,10 @@ impl Ppu {
         // sprite-fetch stall dots don't flip the fetcher's even/odd phase
         // (matches hardware). On DMG, keep the original self.ticks gate.
         let cadence_even = if mmio.is_cgb_features_enabled() {
-            let even = self.fetcher_cadence_tick.is_multiple_of(2);
-            self.fetcher_cadence_tick = self.fetcher_cadence_tick.wrapping_add(1);
+            let even = self.objs.fetcher_cadence_tick.is_multiple_of(2);
+            self.objs.fetcher_cadence_tick = self.objs.fetcher_cadence_tick.wrapping_add(1);
             even
-        } else if let Some(anchor) = self.win_fetch_anchor {
+        } else if let Some(anchor) = self.win.win_fetch_anchor {
             // Window-startup fetch: phase-locked to the trigger dot so
             // the first window pixel pops exactly 6 dots after it.
             self.ticks.wrapping_sub(anchor).is_multiple_of(2)
@@ -1627,11 +1629,11 @@ impl Ppu {
             && !mmio.is_cgb_features_enabled()
             && self.fetcher.is_fetching_window()
             && self.fetcher.fetch_state_is_tile_number()
-            && !self.we_dot_hist[if self.win_kill_tap_late { 3 } else { 2 }]
+            && !self.win.we_dot_hist[if self.win.win_kill_tap_late { 3 } else { 2 }]
         {
             self.fetcher.stop_window_with_extra(0);
-            self.window_started_this_line = false;
-            self.win_being_fetched = false;
+            self.win.window_started_this_line = false;
+            self.win.win_being_fetched = false;
         }
 
         // DMG BG fetch-grid origin (see bg_wg_apply): the line's first
@@ -1668,8 +1670,8 @@ impl Ppu {
             return;
         }
 
-        if self.pixel_transfer_warmup > 0 {
-            self.pixel_transfer_warmup -= 1;
+        if self.objs.pixel_transfer_warmup > 0 {
+            self.objs.pixel_transfer_warmup -= 1;
             return;
         }
 
@@ -1681,14 +1683,14 @@ impl Ppu {
         // executed as-of the arm dot (TileNumber catch-up + anchor one
         // dot back), byte-identical to the immediate start for stable WX.
         if !mmio.is_cgb_features_enabled()
-            && let Some((arm_dot, arm_wx)) = self.dmg_wx_trigger_pending.take()
+            && let Some((arm_dot, arm_wx)) = self.win.dmg_wx_trigger_pending.take()
             && self.ticks == arm_dot.wrapping_add(1)
                 && mmio.read(WX) == arm_wx
                 && self.x + 7 == arm_wx
                 && !self.fetcher.is_fetching_window()
             {
                 self.begin_window_draw(self.x);
-                self.win_first_tile_chop = 0;
+                self.win.win_first_tile_chop = 0;
                 // The activation dot was one dot ago: its TileNumber is
                 // due now (catch-up); low/high/push at +1/+3/+5 via the
                 // anchored cadence.
@@ -1698,7 +1700,7 @@ impl Ppu {
                     mmio,
                     fls,
                     crate::ppu::fetcher::FetchPos {
-                        window_line: self.win_y_pos,
+                        window_line: self.win.win_y_pos,
                         display_x: self.x,
                         pending_discard: 0,
                         scy: self.latch.scy_delayed,
@@ -1713,10 +1715,10 @@ impl Ppu {
                     }
                     self.record_fetch_debug_event(event, mmio);
                 }
-                self.win_fetch_anchor = Some(self.ticks.wrapping_sub(1));
-                self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
-                if self.win_start_dot.is_none() {
-                    self.win_start_dot = Some(self.ticks.wrapping_sub(1));
+                self.win.win_fetch_anchor = Some(self.ticks.wrapping_sub(1));
+                self.objs.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+                if self.win.win_start_dot.is_none() {
+                    self.win.win_start_dot = Some(self.ticks.wrapping_sub(1));
                 }
                 return;
             }
@@ -1743,9 +1745,9 @@ impl Ppu {
                 0
             };
             match pending {
-                0 => self.we_dot_hist[1] && self.we_dot_hist[2],
-                1 => self.we_dot_hist[0] && self.we_dot_hist[1],
-                _ => self.we_dot_hist[0],
+                0 => self.win.we_dot_hist[1] && self.win.we_dot_hist[2],
+                1 => self.win.we_dot_hist[0] && self.win.we_dot_hist[1],
+                _ => self.win.we_dot_hist[0],
             }
         };
         if self.mode3_activate_window(mmio, trigger_we) {
@@ -1755,10 +1757,10 @@ impl Ppu {
         // WX<7 chopped window start: the prologue discard pops that ran
         // past the (earlier) activation position chop the first window
         // tile's leading pixels, one per dot (see win_first_tile_chop).
-        if self.x == 0 && self.win_first_tile_chop > 0 {
+        if self.x == 0 && self.win.win_first_tile_chop > 0 {
             if self.fetcher.pixel_fifo.pop().is_ok() {
-                self.win_first_tile_chop -= 1;
-                self.win_being_fetched = false;
+                self.win.win_first_tile_chop -= 1;
+                self.win.win_being_fetched = false;
             }
             return;
         }
@@ -1779,10 +1781,10 @@ impl Ppu {
             // first pixel this discard dot drops — no real FIFO pixel
             // is consumed, so one extra leading BG pixel survives and
             // the visible line shifts right by one.
-            if self.m3.m3_pixels_discarded < target && self.we_glitch_discard_insert {
-                self.we_glitch_discard_insert = false;
+            if self.m3.m3_pixels_discarded < target && self.win.we_glitch_discard_insert {
+                self.win.we_glitch_discard_insert = false;
                 self.m3.m3_pixels_discarded += 1;
-                self.win_being_fetched = false;
+                self.win.win_being_fetched = false;
                 return;
             }
             // A full-width HUD window (WX==7) triggers at LX==0 via the
@@ -1803,13 +1805,13 @@ impl Ppu {
             // path — flagged by win_draw_started_at_x0 — and keeps it too
             // (gambatte wxA6_scx7).
             let win_x0_locked = self.fetcher.is_fetching_window()
-                && !self.win_draw_started_at_x0
+                && !self.win.win_draw_started_at_x0
                 && mmio.read(WX) == 7;
             if self.m3.m3_pixels_discarded < target
                 && !win_x0_locked
                 && let Ok(_) = self.fetcher.pixel_fifo.pop() {
                     self.m3.m3_pixels_discarded += 1;
-                    self.win_being_fetched = false;
+                    self.win.win_being_fetched = false;
                     return;
             }
         }
@@ -1829,13 +1831,13 @@ impl Ppu {
         // color-0 pixel WITHOUT consuming the FIFO, inserting one pixel into
         // the line.
         if !mmio.is_cgb_features_enabled()
-            && self.window_started_this_line
+            && self.win.window_started_this_line
             && self.fetcher.is_fetching_window()
-            && !self.win_being_fetched
+            && !self.win.win_being_fetched
             && self.fetcher.pixel_fifo.size() == 8
             && mmio.read(WX) == self.x + 7
         {
-            self.insert_bg_pixel = true;
+            self.win.insert_bg_pixel = true;
         }
         // DMG WE-off zero-pixel insertion glitch: with the window Y-latch
         // triggered but the window enable OFF (delayed tap, see
@@ -1845,7 +1847,7 @@ impl Ppu {
         // the trigger-missed rows).
         // Pan Docs: Window mid-frame behavior — https://gbdev.io/pandocs/Window.html
         let mut at_tile_boundary = false;
-        for slot in self.we_glitch_tile_starts.iter_mut() {
+        for slot in self.win.we_glitch_tile_starts.iter_mut() {
             if let Some(fx) = *slot {
                 if fx == self.x {
                     at_tile_boundary = true;
@@ -1859,17 +1861,17 @@ impl Ppu {
         // Pre-CGB machines only (!is_cgb): the CGB PPU has no WE-off
         // insert glitch even in DMG-compat mode (the line is unshifted).
         if !mmio.is_cgb()
-            && self.window_y_triggered
+            && self.win.window_y_triggered
             && !self.fetcher.is_fetching_window()
-            && !self.we_dot_hist[2]
-            && !self.we_insert_suppressed
+            && !self.win.we_dot_hist[2]
+            && !self.win.we_insert_suppressed
             && at_tile_boundary
             && mmio.read(WX) == self.x + 7
         {
-            self.insert_bg_pixel = true;
+            self.win.insert_bg_pixel = true;
             // The inserted pixel shifts every later boundary one to the
             // right.
-            for fx in self.we_glitch_tile_starts.iter_mut().flatten() {
+            for fx in self.win.we_glitch_tile_starts.iter_mut().flatten() {
                 *fx = fx.saturating_add(1);
             }
         }
@@ -1887,8 +1889,8 @@ impl Ppu {
             // is driven off master_cc above and the renderer never reaches
             // this x==160 fallback before that boundary, so we must NOT end
             // mode 3 early here on ordinary (non-window) lines.
-            let window_deferred = (self.window_started_this_line
-                || self.win_weoff_deferred_tail)
+            let window_deferred = (self.win.window_started_this_line
+                || self.win.win_weoff_deferred_tail)
                 && self.m0.mode0_reported_this_line;
             if self.m0.m0_time_master.is_none() {
                 self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());

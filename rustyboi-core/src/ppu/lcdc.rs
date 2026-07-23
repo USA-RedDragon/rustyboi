@@ -41,9 +41,9 @@ impl Ppu {
             && display_stays_enabled
             && (old_lcdc & win_en_bit) != 0
             && (value & win_en_bit) == 0
-            && self.win_being_fetched
+            && self.win.win_being_fetched
         {
-            self.we_insert_suppressed = true;
+            self.win.we_insert_suppressed = true;
         }
 
         // Per-pixel BG-enable history. A mid-mode-3 LCDC.0 (BG-enable) toggle must
@@ -70,8 +70,8 @@ impl Ppu {
             // StartWindowDraw stall, so the 2-dot commit spans ~2 extra display
             // columns; add +2 on window lines (net boundary self.x+4).
             let new_on = (value & bgen_bit) != 0;
-            let win = self.window_started_this_line
-                || self.win_draw_start
+            let win = self.win.window_started_this_line
+                || self.win.win_draw_start
                 || self.window_y_active(mmio);
             // DMG stall-aware boundary: the +2-dot commit is a POP-schedule
             // property, not a column offset. When pops are frozen at the write
@@ -81,7 +81,7 @@ impl Ppu {
             // span starts AT the stalled column). No stall keeps x+2.
             let cgb_compat = mmio.is_cgb() && !mmio.is_cgb_features_enabled();
             let stall_adj = if !mmio.is_cgb_features_enabled() {
-                if cgb_compat && self.sprite_fetch_stall > 0 {
+                if cgb_compat && self.objs.sprite_fetch_stall > 0 {
                     // CGB-compat: the sprite-fetch stall freezes the pipeline but
                     // the LCDC.0 commit dot keeps advancing toward the display
                     // column it lands on. The commit offset is GRADUATED by the
@@ -91,8 +91,8 @@ impl Ppu {
                     // sprite's fetch stall: stall=3 -> boundary 0, stall=1 ->
                     // boundary 2). cgb_compat_adj below stays +1 for the stall
                     // case, so the total commit offset is 3 - stall.
-                    3i32 - self.sprite_fetch_stall as i32
-                } else if self.sprite_fetch_stall > 0 || self.dmg_unfetched_sprite_at(self.x) {
+                    3i32 - self.objs.sprite_fetch_stall as i32
+                } else if self.objs.sprite_fetch_stall > 0 || self.dmg_unfetched_sprite_at(self.x) {
                     0
                 } else if self.dmg_unfetched_sprite_at(self.x.saturating_add(1)) {
                     1
@@ -108,7 +108,7 @@ impl Ppu {
             // EARLIER than DMG+1 (e.g. self.x=8 with an unfetched sprite wants
             // boundary 8, not 9).
             let cgb_compat_adj = if cgb_compat {
-                let sprite_active = self.sprite_fetch_stall > 0
+                let sprite_active = self.objs.sprite_fetch_stall > 0
                     || self.dmg_unfetched_sprite_at(self.x)
                     || self.dmg_unfetched_sprite_at(self.x.saturating_add(1));
                 if sprite_active { 0 } else { 1 }
@@ -165,16 +165,17 @@ impl Ppu {
             // full fetch cost is spent regardless of the OBJ-disable — a short
             // OBJ-off pulse that re-enables mid-line does not shorten mode 3.
             if !mmio.is_cgb()
-                && !new_on && self.sprite_fetch_stall > 0 && self.next_sprite_fetch_index > 0
+                && !new_on && self.objs.sprite_fetch_stall > 0 && self.objs.next_sprite_fetch_index > 0
                 && let Some(rec) = self
+                    .objs
                     .sprite_fetch_recs
-                    .get_mut(self.next_sprite_fetch_index - 1)
+                    .get_mut(self.objs.next_sprite_fetch_index - 1)
                 && rec.phase == SpriteFetchPhase::Fetched
             {
                 let fetch_end = rec.arm_tick + rec.penalty as u128;
                 if fetch_end > self.ticks + 1 {
                     rec.phase = SpriteFetchPhase::Aborted;
-                    self.sprite_fetch_stall = self.sprite_fetch_stall.min(1);
+                    self.objs.sprite_fetch_stall = self.objs.sprite_fetch_stall.min(1);
                 }
             }
         }
@@ -223,9 +224,9 @@ impl Ppu {
             let ds = mmio.is_double_speed_mode();
             let disable = (old_lcdc & ssz) != 0 && (value & ssz) == 0;
             let off = if ds { 2 } else { 2 + if disable { 2 } else { 0 } };
-            self.objsize_prev_large = self.objsize_large_at_cc(self.write_cc(ds));
-            self.objsize_new_large = (value & ssz) != 0;
-            self.objsize_apply_cc = (self.write_cc(ds) as i64 + off).max(0) as u64;
+            self.objs.objsize_prev_large = self.objsize_large_at_cc(self.write_cc(ds));
+            self.objs.objsize_new_large = (value & ssz) != 0;
+            self.objs.objsize_apply_cc = (self.write_cc(ds) as i64 + off).max(0) as u64;
         }
 
         if mmio.is_cgb_features_enabled() && display_stays_enabled {
@@ -402,9 +403,10 @@ impl Ppu {
             //
             // Sprites at index >= nsfi: stall not yet started -> fully refundable.
             let mut tail: Vec<i32> = self
+                .objs
                 .sprites_on_line
                 .iter()
-                .skip(self.next_sprite_fetch_index)
+                .skip(self.objs.next_sprite_fetch_index)
                 .map(|s| s.x as i32)
                 .collect();
             tail.sort_unstable();
@@ -413,8 +415,8 @@ impl Ppu {
             // `m3_last_sprite_commit_tick`; the dots remaining are its standalone
             // leading-rate cost minus the dots already counted down. Refund only the
             // remaining (clamped at 0 once fully drawn).
-            if self.next_sprite_fetch_index > 0 {
-                let in_prog = &self.sprites_on_line[self.next_sprite_fetch_index - 1];
+            if self.objs.next_sprite_fetch_index > 0 {
+                let in_prog = &self.objs.sprites_on_line[self.objs.next_sprite_fetch_index - 1];
                 let single = sprite_tile_walk_cost(&[in_prog.x as i32], scx, 167, 167, true);
                 // The live renderer consumes the in-progress sprite's first stall dot
                 // on the same tick it advances `next_sprite_fetch_index` (the stall is
@@ -422,7 +424,7 @@ impl Ppu {
                 // the commit tick itself: `ticks - commit_tick + 1`.
                 let elapsed = self
                     .ticks
-                    .saturating_sub(self.m3_last_sprite_commit_tick) as i32
+                    .saturating_sub(self.objs.m3_last_sprite_commit_tick) as i32
                     + 1;
                 cost += (single - elapsed).max(0);
             }
@@ -435,6 +437,7 @@ impl Ppu {
         // enabling at x = spx-9 still fetches, at x = spx-8 does not.)
         let cutoff = self.x as i32 + 8;
         let mut sprite_xs: Vec<i32> = self
+            .objs
             .sprites_on_line
             .iter()
             .map(|s| s.x as i32)
@@ -635,7 +638,7 @@ impl Ppu {
             let win_enable_clean = (old_lcdc & spr_bits) == (value & spr_bits)
                 && (old_lcdc & win_bit) == 0
                 && (value & win_bit) != 0
-                && self.sprites_on_line.is_empty();
+                && self.objs.sprites_on_line.is_empty();
             let mut win_enable_handled = false;
             if win_enable_clean {
                 win_enable_handled = true;
@@ -651,7 +654,7 @@ impl Ppu {
                 // the first line after enable (LY=0), where the previous line's
                 // checkpoints never ran so `window_y_triggered` is still false even
                 // when WY==0 — exactly the late_enable_ly0 case.
-                let wy_ok = self.window_y_triggered || self.latch.wy2 == self.internal_ly_val;
+                let wy_ok = self.win.window_y_triggered || self.latch.wy2 == self.internal_ly_val;
                 let wx_in_range = (0..=166).contains(&wx) && (cgb_features_enabled || wx != 166);
                 // The window penalty applies iff the enable lands BEFORE the
                 // fetcher reaches the window-tile commit dot. The window draws from
@@ -724,10 +727,10 @@ impl Ppu {
             // after the disable and expects mode 3 to persist whenever the window
             // had already committed, which the binary keep provides; the prior
             // null-and-fall-back-to-live-no-window path reported mode 0 too early.
-            let clean_ss = !ds && self.sprites_on_line.is_empty();
+            let clean_ss = !ds && self.objs.sprites_on_line.is_empty();
             let clean_ds = cgb_features_enabled
                 && ds
-                && self.sprites_on_line.is_empty();
+                && self.objs.sprites_on_line.is_empty();
             // On DMG the LCDC-write hook fires one PPU step before the
             // PixelTransfer code latches `win_start_dot`, so a disable landing
             // exactly on the window-start dot still sees
@@ -748,7 +751,7 @@ impl Ppu {
             // null below; dot 102 = at commit -> out3 keep).
             let cgb_spr_commit = if cgb_features_enabled
                 && !ds
-                && !self.sprites_on_line.is_empty()
+                && !self.objs.sprites_on_line.is_empty()
                 && self.m0.m3_scheduled_win
             {
                 let x_at_start = (self.m0.m3_scheduled_wx as i64 - 7).max(0);
@@ -761,15 +764,16 @@ impl Ppu {
             } else {
                 None
             };
-            let win_started_for_refund = self.window_started_this_line
+            let win_started_for_refund = self.win.window_started_this_line
                 || (!cgb_features_enabled
                     && self
+                        .win
                         .predicted_win_start_dot
                         .is_some_and(|p| self.ticks >= p))
                 || cgb_spr_commit.is_some_and(|c| (self.ticks as i64) >= c);
             // CGB keeps the graduated refund (predicted_win_start_dot is DMG-only,
             // so this is just win_start_dot on CGB); DMG uses the binary keep below.
-            let refund_start_dot = self.win_start_dot.or(self.predicted_win_start_dot);
+            let refund_start_dot = self.win.win_start_dot.or(self.win.predicted_win_start_dot);
             if win_enable_handled {
                 // The clean window-ENABLE adjusted m0_time_master above; skip the
                 // disable-refund / null path (which would otherwise null it because
@@ -778,7 +782,7 @@ impl Ppu {
                 self.m0.m0_time_master = None;
             } else if !ds
                 && !cgb_features_enabled
-                && !self.sprites_on_line.is_empty()
+                && !self.objs.sprites_on_line.is_empty()
                 && win_started_for_refund
             {
                 // DMG late window-disable WITH a sprite on the line (late_disable_spx10
@@ -792,7 +796,7 @@ impl Ppu {
                 // boundary. Keep m0_time_master as captured (no-op).
             } else if !ds
                 && cgb_features_enabled
-                && !self.sprites_on_line.is_empty()
+                && !self.objs.sprites_on_line.is_empty()
                 && win_started_for_refund
             {
                 // CGB single-speed late window-disable WITH a sprite on the line
@@ -850,7 +854,7 @@ impl Ppu {
                     self.m0.m0_time_master = None;
                 }
             } else if clean_ds {
-                if let (Some(m0t), Some(ws)) = (self.m0.m0_time_master, self.win_start_dot) {
+                if let (Some(m0t), Some(ws)) = (self.m0.m0_time_master, self.win.win_start_dot) {
                     // GRADUATED refund (as in the single-speed branch): the window
                     // penalty accrues one dot per drawn window dot, capped at
                     // WIN_M3_PENALTY; the unaccrued remainder is refunded. At double
@@ -891,8 +895,8 @@ impl Ppu {
                 // WE-off: clear win_draw_started iff the window-draw state == win_draw_started
                 // (started but not armed) OR the line is finished. win_draw_start
                 // (the arm bit) survives, so a re-enable can resume next line.
-                if (self.win_draw_started && !self.win_draw_start) || at_line_end {
-                    self.win_draw_started = false;
+                if (self.win.win_draw_started && !self.win.win_draw_start) || at_line_end {
+                    self.win.win_draw_started = false;
                     // If the fetcher is actively drawing the window mid-line, the
                     // window stops here and the next tile fetch reverts to BG
                     // (the hardware window-tile fetch gates on `window-draw-state & win_draw_started`).
@@ -935,24 +939,24 @@ impl Ppu {
                         if cgb_features_enabled {
                             let extra = self.cgb_weoff_extra_tiles();
                             self.fetcher.stop_window_with_extra(extra);
-                            self.window_started_this_line = false;
-                            self.win_weoff_deferred_tail = true;
+                            self.win.window_started_this_line = false;
+                            self.win.win_weoff_deferred_tail = true;
                         } else if at_line_end {
                             // DMG at line end (the wxA6 xpos-166 dance): no
                             // TileNumber will run again this line, so the
                             // deferred kill cannot land; stop immediately as
                             // The hardware window-draw-state clear does.
                             self.fetcher.stop_window_with_extra(0);
-                            self.window_started_this_line = false;
+                            self.win.window_started_this_line = false;
                         }
                     }
                 }
             } else {
                 // WE-on: if the window-draw state == win_draw_start (armed but not started),
                 // promote to started and advance the window Y line.
-                if self.win_draw_start && !self.win_draw_started {
-                    self.win_draw_started = true;
-                    self.win_y_pos = self.win_y_pos.wrapping_add(1);
+                if self.win.win_draw_start && !self.win.win_draw_started {
+                    self.win.win_draw_started = true;
+                    self.win.win_y_pos = self.win.win_y_pos.wrapping_add(1);
                 }
             }
         }

@@ -100,7 +100,7 @@ impl Ppu {
     /// of the frame. Skipped once the latch is set (the comparison is sticky,
     /// so a re-run can only ever set it again).
     pub(in crate::ppu) fn arm_wy_recheck(&mut self, cc: u64, ds: bool) {
-        if self.disabled || self.window_y_triggered {
+        if self.disabled || self.win.window_y_triggered {
             return;
         }
         // 4 dots (8 cc at double speed) after the store, quantized onto the
@@ -120,7 +120,7 @@ impl Ppu {
             return;
         }
         if self.disabled
-            || self.window_y_triggered
+            || self.win.window_y_triggered
             || !self.lcdc_has(LCDCFlags::WindowDisplayEnable)
         {
             return;
@@ -175,7 +175,7 @@ impl Ppu {
         // re-check before that delay has elapsed.
         let wy = if self.latch.wy1_apply_cc != wy2_disabled() { self.latch.wy1_pending } else { self.latch.wy1 };
         if wy == self.wy_comparator_ly(cgb_hw, ds) {
-            self.window_y_triggered = true;
+            self.win.window_y_triggered = true;
         }
     }
     /// Line value the window-Y comparator sees right now.
@@ -262,7 +262,7 @@ impl Ppu {
             // write is still RECORDED (victim 0xFF, never painted) so its
             // partner keeps its cadence neighbor. On stall-free lines the
             // victim is exactly `self.x + lat` (the old column model).
-            let stall = self.sprite_fetch_stall as i32;
+            let stall = self.objs.sprite_fetch_stall as i32;
             // Pending SCX discard: at x==0 the first display column has not popped
             // while pixels remain to be discarded (m3_pixels_discarded <
             // m3_discard_target). The write's victim pixel is one of those discarded
@@ -424,10 +424,10 @@ impl Ppu {
     // colors the whole line (the column-0 pixel pops at/after pos 0), and must
     // not seed a two-write spike either — exactly like a write during the warmup.
     fn in_previsible_prologue(&self) -> bool {
-        if self.pixel_transfer_warmup > 0 {
+        if self.objs.pixel_transfer_warmup > 0 {
             return true;
         }
-        if self.x == 0 && self.m3.m3_discard_target >= 0 && self.win_fetch_anchor.is_some() {
+        if self.x == 0 && self.m3.m3_discard_target >= 0 && self.win.win_fetch_anchor.is_some() {
             let base = self.m3.m3_arm_dot + 12 - (self.m3.m3_arm_dot & 1)
                 + self.m3.m3_discard_target as u128;
             return self.ticks < base;
@@ -606,7 +606,7 @@ impl Ppu {
         // here, so the sprite gate is required to protect those cases.
         let sprites_enabled = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
         let low_x_sprite = sprites_enabled
-            && self.sprites_on_line.iter().any(|s| s.x <= 8);
+            && self.objs.sprites_on_line.iter().any(|s| s.x <= 8);
         self.m3.prologue_rekey_armed = !self.disabled
             && !cgb
             && ds == 0
@@ -636,15 +636,15 @@ impl Ppu {
     /// no pending change (`apply_cc == disabled`) it falls back to the live LCDC
     /// bit2, so the steady-state per-slot snapshot is unchanged.
     pub(in crate::ppu) fn objsize_large_at_cc(&self, cc: u64) -> bool {
-        if self.objsize_apply_cc != wy2_disabled() {
+        if self.objs.objsize_apply_cc != wy2_disabled() {
             // Strict `>`: an OAM slot read exactly AT the apply cc still sees the
             // pre-write size (the late_sizechange2_sp01_ds bracket: ds_1's slot
             // cc is strictly past apply -> new size IN; ds_2's slot cc equals
             // apply -> old size OUT, the 1-slot boundary hardware resolves).
-            if cc > self.objsize_apply_cc {
-                self.objsize_new_large
+            if cc > self.objs.objsize_apply_cc {
+                self.objs.objsize_new_large
             } else {
-                self.objsize_prev_large
+                self.objs.objsize_prev_large
             }
         } else {
             self.lcdc_has(LCDCFlags::SpriteSize)

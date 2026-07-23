@@ -116,13 +116,13 @@ impl Ppu {
     }
 
     pub(in crate::ppu) fn begin_window_draw_at_tile(&mut self, window_x: u8, start_tile: u8) {
-        self.win_y_pos = self.win_y_pos.wrapping_add(1);
-        self.win_draw_started = true;
+        self.win.win_y_pos = self.win.win_y_pos.wrapping_add(1);
+        self.win.win_draw_started = true;
         self.fetcher.start_window_at_tile(window_x, start_tile);
-        self.we_glitch_tile_starts = [None; 2];
-        self.win_kill_tap_late = true;
-        self.window_started_this_line = true;
-        self.win_being_fetched = true;
+        self.win.we_glitch_tile_starts = [None; 2];
+        self.win.win_kill_tap_late = true;
+        self.win.window_started_this_line = true;
+        self.win.win_being_fetched = true;
     }
 
     pub(in crate::ppu) fn wg_set_anchor(&mut self, chop: u64) {
@@ -139,11 +139,11 @@ impl Ppu {
         // the hardware grid.
         // Not in Pan Docs, TCAGBD, or GBCTR; sub-dot render timing from mealybug-tearoom-tests refs.
         let mut pre: Option<(u8, u64)> = None;
-        for (i, s) in self.sprites_on_line.iter().enumerate() {
+        for (i, s) in self.objs.sprites_on_line.iter().enumerate() {
             if s.x > 8 {
                 continue;
             }
-            let Some(rec) = self.sprite_fetch_recs.get(i) else {
+            let Some(rec) = self.objs.sprite_fetch_recs.get(i) else {
                 continue;
             };
             match rec.phase {
@@ -230,12 +230,12 @@ impl Ppu {
         // read-granular instead: only reads whose unshifted dot is at/after
         // the sprite's arm dot A = F + arm + pos shift, by
         // max(6, 13 - pos % 8).
-        for (i, s) in self.sprites_on_line.iter().enumerate() {
+        for (i, s) in self.objs.sprites_on_line.iter().enumerate() {
             let pos = s.x as i64 - 8;
             if pos < 0 {
                 continue; // offscreen-left: folded into wg_dpre
             }
-            let Some(rec) = self.sprite_fetch_recs.get(i) else {
+            let Some(rec) = self.objs.sprite_fetch_recs.get(i) else {
                 continue;
             };
             if self.wg.wg_cgb {
@@ -275,7 +275,7 @@ impl Ppu {
             (LCDCFlags::WindowTileMapDisplaySelect as u8) | (LCDCFlags::BGWindowTileDataSelect as u8);
         if self.wg.wg_cgb {
             let sub = WgSubDot {
-                phase8: -((self.win_y_pos % 8) as i64),
+                phase8: -((self.win.win_y_pos % 8) as i64),
                 shifted: h != base,
                 pending,
             };
@@ -503,14 +503,14 @@ impl Ppu {
     // line (per-row jitter).
     fn bg_hw_read_dot_ex(&self, n: u64, k: u8, ly: u8, scy_mode: bool) -> Option<u64> {
         let anchor = self.wg.bg_anchor_cc?;
-        if self.fetcher.is_fetching_window() || self.window_started_this_line {
+        if self.fetcher.is_fetching_window() || self.win.window_started_this_line {
             return None;
         }
         let base = anchor + 8 * n + 2 * k as u64;
         let mut h = base;
         let cgb_stall_bias: u64 = if scy_mode { 2 } else { 0 };
-        for (i, s) in self.sprites_on_line.iter().enumerate() {
-            let Some(rec) = self.sprite_fetch_recs.get(i) else {
+        for (i, s) in self.objs.sprites_on_line.iter().enumerate() {
+            let Some(rec) = self.objs.sprite_fetch_recs.get(i) else {
                 continue;
             };
             let counted = match rec.phase {
@@ -723,8 +723,8 @@ impl Ppu {
             let tall = self.lcdc_has(LCDCFlags::SpriteSize);
             let height: i32 = if tall { 16 } else { 8 };
             let mut best: Option<(i64, u8)> = None;
-            for (i, s) in self.sprites_on_line.iter().enumerate() {
-                let Some(rec) = self.sprite_fetch_recs.get(i) else { continue };
+            for (i, s) in self.objs.sprites_on_line.iter().enumerate() {
+                let Some(rec) = self.objs.sprite_fetch_recs.get(i) else { continue };
                 let counted = match rec.phase {
                     SpriteFetchPhase::Fetched => true,
                     SpriteFetchPhase::Pending => obj_on,
@@ -921,12 +921,12 @@ impl Ppu {
                     .get_tile_data_address(ptn, line, if base { tds } else { 0 });
                 return Some(mmio.read_vram_bank(0, a + high as u16));
             }
-            for (i, s) in this.sprites_on_line.iter().enumerate() {
+            for (i, s) in this.objs.sprites_on_line.iter().enumerate() {
                 if (s.x as i64 - 8) < 0 {
                     continue;
                 }
                 if !matches!(
-                    this.sprite_fetch_recs.get(i).map(|r| r.phase),
+                    this.objs.sprite_fetch_recs.get(i).map(|r| r.phase),
                     Some(SpriteFetchPhase::Fetched)
                 ) {
                     continue;
