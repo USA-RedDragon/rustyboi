@@ -10,7 +10,8 @@
 //! A child module of `mmio`, so it reaches `Mmio`'s private fields, the engine
 //! structs and the parent's private helpers directly. Behaviour is identical
 //! to the pre-split code — this is a pure relocation.
-use super::*;
+use crate::memory::mmio::{Mmio, VRAM_START};
+use crate::memory::{self, Addressable};
 
 impl Mmio {
     /// Copy a single byte from `src` to the VRAM destination corresponding

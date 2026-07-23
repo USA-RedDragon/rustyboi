@@ -496,7 +496,7 @@ pub(super) fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     // mode-3 the VRAM byte now reads 0xFF).
     if matches!(
             mmio.halt_hdma_state(),
-            crate::memory::mmio::HaltHdmaState::Requested
+            crate::memory::dma::HaltHdmaState::Requested
         )
     {
         // Same real-read semantics as the HALT-bug prefetch above.

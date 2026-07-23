@@ -1,4 +1,5 @@
 pub mod buffer;
+pub mod dma;
 pub mod mmio;
 
 pub use buffer::{Addressable, Memory};

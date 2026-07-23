@@ -12,11 +12,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 
-mod dma;
-mod gdma;
-mod hdma;
+use crate::memory::dma::{HaltHdmaState, HdmaEngine, OamDmaEngine};
 
-const EMPTY_BYTE: u8 = 0xFF;
+pub(in crate::memory) const EMPTY_BYTE: u8 = 0xFF;
 
 fn default_oam_high() -> [u8; 0x60] {
     [0; 0x60]
@@ -66,11 +64,11 @@ fn default_pending_oam_zero() -> std::cell::Cell<i16> {
 }
 
 const BIOS_START: u16 = 0x0000;
-const BIOS_SIZE: usize = 256; // DMG boot ROM length
+pub(in crate::memory) const BIOS_SIZE: usize = 256; // DMG boot ROM length
 /// CGB boot ROM length. It occupies 0x0000-0x00FF AND 0x0200-0x08FF; the gap
 /// 0x0100-0x01FF is the live cartridge header (the boot ROM reads the cart logo
 /// there). The 2304-byte file is stored contiguously and indexed by address.
-const CGB_BIOS_SIZE: usize = 2304;
+pub(in crate::memory) const CGB_BIOS_SIZE: usize = 2304;
 /// Highest address the largest (CGB) boot ROM overlay can map.
 const BIOS_OVERLAY_END: u16 = 0x08FF;
 /// During CGB boot the cartridge header is visible in this window (not boot ROM).
@@ -161,14 +159,14 @@ fn bios_masked_crc_set(len: usize) -> &'static [u32] {
 /// its masked crc is in `bios_masked_crc_set(len)` OR (256-byte only) its UNMASKED
 /// crc equals the canonical SGB dump — SGB is the one length-256 image we accept
 /// by unmasked crc because we hold no local file to derive a masked value.
-fn bios_crc_is_known(len: usize, masked: u32, unmasked: u32) -> bool {
+pub(in crate::memory) fn bios_crc_is_known(len: usize, masked: u32, unmasked: u32) -> bool {
     bios_masked_crc_set(len).contains(&masked)
         || (len == BIOS_SIZE && unmasked == SGB_BIOS_CRC32_UNMASKED)
 }
 
 /// Validate a boot-ROM image: accepts any known-good DMG/SGB (256-byte) or
 /// CGB/AGB (2304-byte) dump; returns the rejection reason on failure.
-fn validate_bios_bytes(data: &[u8]) -> Result<(), String> {
+pub(in crate::memory) fn validate_bios_bytes(data: &[u8]) -> Result<(), String> {
     match data.len() {
         BIOS_SIZE | CGB_BIOS_SIZE => {}
         other => {
@@ -197,22 +195,22 @@ fn validate_bios_bytes(data: &[u8]) -> Result<(), String> {
 
 pub const VRAM_START: u16 = 0x8000;
 const VRAM_SIZE: usize = 8192; // 8KB
-const VRAM_END: u16 = VRAM_START + VRAM_SIZE as u16 - 1;
-const EXTERNAL_RAM_START: u16 = 0xA000;
+pub(in crate::memory) const VRAM_END: u16 = VRAM_START + VRAM_SIZE as u16 - 1;
+pub(in crate::memory) const EXTERNAL_RAM_START: u16 = 0xA000;
 const EXTERNAL_RAM_SIZE: usize = 8192; // 8KB
-const EXTERNAL_RAM_END: u16 = EXTERNAL_RAM_START + EXTERNAL_RAM_SIZE as u16 - 1;
-const WRAM_START: u16 = 0xC000;
+pub(in crate::memory) const EXTERNAL_RAM_END: u16 = EXTERNAL_RAM_START + EXTERNAL_RAM_SIZE as u16 - 1;
+pub(in crate::memory) const WRAM_START: u16 = 0xC000;
 const WRAM_SIZE: usize = 4096; // 4KB
 const WRAM_END: u16 = WRAM_START + WRAM_SIZE as u16 - 1;
-const WRAM_BANK_START: u16 = 0xD000;
+pub(in crate::memory) const WRAM_BANK_START: u16 = 0xD000;
 const WRAM_BANK_SIZE: usize = 4096; // 4KB
 const WRAM_BANK_END: u16 = WRAM_BANK_START + WRAM_BANK_SIZE as u16 - 1;
 const ECHO_RAM_START: u16 = 0xE000;
 const ECHO_RAM_SIZE: usize = 7680; // 7.5KB
 const ECHO_RAM_END: u16 = ECHO_RAM_START + ECHO_RAM_SIZE as u16 - 1;
 const ECHO_RAM_MIRROR_END: u16 = 0xDDFF; // Echo RAM mirrors WRAM and most of WRAM_BANK
-const OAM_START: u16 = 0xFE00;
-const OAM_SIZE: usize = 160; // 160 bytes
+pub(in crate::memory) const OAM_START: u16 = 0xFE00;
+pub(in crate::memory) const OAM_SIZE: usize = 160; // 160 bytes
 const OAM_END: u16 = OAM_START + OAM_SIZE as u16 - 1;
 const UNUSED_START: u16 = 0xFEA0;
 const UNUSED_SIZE: usize = 96; // 96 bytes
@@ -267,36 +265,6 @@ mod or_mask {
     pub(super) const FF75: u8 = 0x8F; // FF75: only bits 4-6 R/W
 }
 
-/// Source-region classification of the active OAM DMA, as decoded from the
-/// FF46 source-high byte. Drives the per-region bus-conflict rules.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum DmaSrcKind {
-    Rom,
-    Sram,
-    Vram,
-    Wram,
-    /// CGB-only: source E000-FFFF drives the external bus with the RAM chip
-    /// select asserted, so only the cartridge answers.
-    ExternalBus,
-}
-
-/// CGB HDMA halt-state machine
-/// Captured at HALT and consulted on unhalt to decide whether the next
-/// Mode 0 should immediately fire an HDMA block.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-#[derive(Default)]
-pub(crate) enum HaltHdmaState {
-    /// Not in an HDMA period when halt was entered.
-    #[default]
-    Low,
-    /// Halt entered while in HDMA period, HDMA armed, no block scheduled.
-    High,
-    /// Halt entered with a block already scheduled (req flagged).
-    Requested,
-}
-
-
-
 /// One 4KB page of the passive-read map (see `Mmio::passive_read`). `Rom`
 /// carries the byte base of the page inside the bank-resolved ROM image; the
 /// WRAM variants name the backing buffer; `Fallback` takes the full dispatch.
@@ -311,315 +279,10 @@ enum PassivePage {
     WramBankIdx(u8),
 }
 
-/// CGB HDMA/GDMA engine: the FF51-FF55 registers plus the block-timing,
-/// arm/kick and deferred-write machinery. Most of this is `#[serde(skip)]`
-/// sub-dot scheduling state; only the six register-backed fields persist.
-#[derive(Serialize, Deserialize, Clone)]
-struct HdmaEngine {
-    // CGB HDMA-tracker sleep: master cc below which the per-dot step_hdma
-    // maintenance is a proven no-op (the PPU sets it at its own mode
-    // transitions — mode-2 entry until just before the pixel-transfer arm,
-    // and the arm until just before the closed-form mode-0 time; no period
-    // edge, LY change, or block fire can occur inside). Cleared by any IO
-    // write and by set_hdma_req (halt-exit reflags). Not serialized: 0 = no
-    // sleep.
-    #[serde(skip)]
-    #[serde(default)]
-    tracker_sleep_until: u64,
-    // CGB HDMA state
-    source: u16,       // HDMA source address (advances per byte)
-    dest: u16,         // HDMA destination (advances per byte; low 13 bits used for VRAM offset)
-    // Blocks remaining, minus one.
-    // 0x7F means "fully done": FF55 reads as 0xFF.
-    // Pan Docs: CGB Registers (VRAM DMA) — https://gbdev.io/pandocs/CGB_Registers.html
-    length: u8,
-    // True while HDMA is armed (FF55 bit7 written as 1, not yet completed
-    // or cancelled).
-    #[serde(default)]
-    enabled: bool,
-    // True while a 0x10-byte block is scheduled to fire on the next CPU
-    // cycle. Mirrors the hardware's pending-DMA request. Set by the PPU at
-    // Mode 3->0 boundary (when `enabled`) and by LCD enable/disable
-    // edges; cleared after `run_hdma_block` runs.
-    #[serde(default)]
-    req_pending: bool,
-    // Cached `Ppu::is_hdma_period()` value, refreshed each PPU step. Read
-    // by the HALT opcode handler so it does not need a `&Ppu` borrow.
-    #[serde(skip, default)]
-    is_in_period_cached: bool,
-    // Previous STAT mode observed by `step_hdma`, used to detect the Mode 3->0
-    // (HBlank) edge that arms an HDMA block (fallback path). Not part of save state.
-    #[serde(skip, default)]
-    prev_stat_mode: u8,
-    // Previous `Ppu::hdma_period` value, used to detect the rising edge of the
-    // cycle-exact HDMA-eligibility window. Not part of save state.
-    #[serde(skip, default)]
-    prev_period: bool,
-    // Enforces Pan Docs' "one 0x10-byte HBlank-DMA block per HBlank": set when a
-    // block fires, cleared on every LY change so a second edge (or an in-HBlank
-    // FF55 kick that coincides with the closed-form mode-0 edge) can't arm a
-    // second block for the same scanline. Keyed off LY (not the CPU-visible STAT
-    // mode, which lags the cycle-exact predicate). Transient timing state.
-    #[serde(skip, default)]
-    block_fired_this_hblank: bool,
-    // None until the first block; LY is a u8 register, so no sentinel is needed.
-    #[serde(skip, default)]
-    last_dma_ly: Option<u8>,
-    // True while the bus is advancing the world in
-    // lockstep through an HDMA block's transfer cc (the event-interleaved dma()).
-    // While set, `step_hdma` must NOT fire/arm a new block (the lockstep advance
-    // only ticks timer/PPU through the in-flight transfer; the next m0-edge is
-    // handled by the normal per-dot crank after the lockstep).
-    #[serde(skip, default)]
-    lockstep_active: bool,
-    // Armed at a Requested-context (multi-block) HDMA unhalt so the
-    // per-dot lockstep advance (run_to_min_event) applies ONLY to the block that
-    // fires during the resume instruction, not to the
-    // normal m0-edge / GDMA-calibration blocks (which keep the deferred-stall
-    // path). Cleared when the resume instruction completes.
-    #[serde(skip, default)]
-    resume_lockstep_window: bool,
-    // Sticky: FF55 (HDMA5) has been written at least once since power-on, i.e.
-    // this ROM drives the HDMA/GDMA machinery. The CGB LCD-woken halt-exit
-    // stall (sm83.rs) is scoped away from such ROMs: the engine's entire
-    // GDMA/HDMA cc-web (block fire cc's, dma_prefetch STAT biases, the
-    // hdma_start/late_* race models) is co-tuned end-to-end to the un-stalled
-    // wake cc, and the wake-time hdma predicates cannot see a GDMA / late-armed
-    // HDMA that the woken stream will fire only after the wake. On real
-    // hardware those streams stall too; modeling that requires re-anchoring
-    // the whole DMA web (documented debt; no test ROM currently distinguishes it).
-    // Serialized (additive `default`) so a state saved after the ROM first
-    // touched FF55 preserves the sticky exactly rather than self-healing.
-    #[serde(default)]
-    machinery_used: bool,
-    // Whether the HDMA block owed for the *current* eligibility period has
-    // already been serviced. rustyboi fires the period block immediately at the
-    // rising edge, whereas hardware defers it to the DMA event; this
-    // flag lets `on_cpu_halt` recover hardware's distinction between "in period,
-    // block already done" (hdma_high) and "in period, block still owed"
-    // (hdma_requested -> fires on the deferred/unhalt path). Reset on the period
-    // falling edge.
-    #[serde(skip, default)]
-    block_done_this_period: bool,
-    // An HDMA-period rising edge that occurred WHILE the CPU was halted and whose
-    // block was ALREADY serviced this period (the halt was entered in-period with
-    // the block done -> `halt.hdma_state == High`). Hardware's during-halt period
-    // HDMA request is suppressed (by the halted gate) AND consumed —
-    // it never re-fires after unhalt; the next-line m0 edge fires the next block.
-    // rustyboi's per-dot edge machine can resurrect that suppressed edge via the
-    // STAT mode-3->0 fallback the first dot after unhalt (when the renderer's
-    // closed-form `hdma_period` has handed off to None mid-HBlank). This flag marks
-    // such a consumed edge so the STAT fallback skips it. NOT set for a Low-at-halt
-    // period entry (`late_hdma_vs_tima_*_halt`: the halt was out-of-period, so the
-    // post-unhalt m0 edge is a genuine first block and MUST fire). Cleared once the
-    // suppressed edge has been consumed or on the next falling edge.
-    #[serde(skip, default)]
-    halt_edge_consumed: bool,
-    // High-at-halt unhalt: the next-line m0 edge consume that lands JUST AFTER the
-    // unhalt (not during the halt window, so `halt_edge_consumed` was never
-    // set for it). When a HALT was entered in-period with the block already served
-    // (`halt.hdma_state == High`), hardware suppresses+consumes the during-halt m0
-    // HDMA request for the immediately-following line; rustyboi's unhalt cc can land
-    // ONE dot before that line's m0 (vs hardware's unhalt landing just after it), so
-    // the edge fires through the post-unhalt STAT 3->0 fallback instead of being
-    // consumed (`hdma_late_m0halt_*_lcdoffset*_1`: a spurious extra block one line
-    // early). This flag, set at the High-unhalt site, suppresses exactly the first
-    // post-unhalt m0 fire; unlike `halt_edge_consumed` it is NOT cleared by an
-    // intervening `period == Some(false)` dot, so it survives the unhalt-to-m0 gap.
-    #[serde(skip, default)]
-    high_unhalt_consume: bool,
-    // When a Requested-at-halt HDMA block is reflagged+fired at unhalt, the NEXT
-    // line's m0 rising edge that re-arms the following block may fall WITHIN that
-    // block's transfer span. In hardware that m0 HDMA event is
-    // absorbed by the in-flight transfer (the event is processed at the block's end
-    // cc, its HDMA request reschedules to the line AFTER), so the genuine next
-    // block fires a full line later. rustyboi fires synchronously at the per-dot m0
-    // edge, so without this it arms the next block at that absorbed edge — one line
-    // early. The absorption window is `[block1_fire_cc, block1_fire_cc + 16*(2+2*ds)]`
-    // (the dma() transfer length, inclusive end — an edge AT the transfer end is
-    // still absorbed); armed at the Requested unhalt reflag, `step_hdma` consumes
-    // every m0 arm inside it and disarms on the first arm strictly past it.
-    // HDMA transfers one block per H-Blank (base): TCAGBD §9.6.2. The m0-edge
-    // absorption-window sub-cycle timing is not in Pan Docs/TCAGBD/GBCTR — test-ROM refs.
-    #[serde(skip, default)]
-    peraccess_consume_pending: bool,
-    // Deferred HDMA block byte writes. Hardware reads each byte
-    // at `cc` but writes it to VRAM at `cc + (2 + 2*ds)`,
-    // so byte 0 lands one sub-M-cycle AFTER the trigger/prefetch boundary and
-    // after VRAM unlocks. rustyboi fires the block synchronously; to place the
-    // VRAM writes at the correct sub-M-cycle (the 4cc window the hdma_start /
-    // hdma_late read tests probe) the resolved (vram_addr, value, into_bank1)
-    // triples are read at fire time and drained `write_delay` dots later.
-    // The `into_bank1` flag records the VBK bank captured at fire so a mid-delay
-    // VBK switch cannot retarget the in-flight bytes. Not part of save state
-    // (the buffer always drains within a few dots of the trigger).
-    #[serde(skip, default)]
-    pending_writes: Vec<(u16, u8, bool)>,
-    #[serde(skip, default)]
-    write_delay: u32,
-    // PC-in-DMA-dest prefetch absorption (hardware runs
-    // the next-opcode fetch at the instruction boundary, BEFORE the DMA event
-    // overwrites VRAM). When a synchronous GDMA/HDMA block fires and the CPU's
-    // very next opcode fetch lands on the block's first destination byte
-    // (pc straddles ROM bank0->VRAM at 0x7FFE->0x8000), that opcode must read the
-    // PRE-transfer VRAM byte while the instruction's operands (dest+1..) read the
-    // POST-transfer bytes. Records the first-dest address and its pre-transfer
-    // byte at fire; sm83 consults it for exactly the next prefetch.
-    // (hdma_pc_7ffe / late_gdma_pc_7ffe.)
-    #[serde(skip, default)]
-    fire_dest0: Option<u16>,
-    #[serde(skip, default)]
-    fire_dest0_prebyte: u8,
-    // The dma-event cc at which the block fired. The hardware
-    // prefetch reads the next opcode at THIS cc (before the transfer), so the
-    // prefetch's VRAM-lock decision must be taken here, not at rustyboi's
-    // post-stall prefetch cc (which trails the fire by the whole transfer stall).
-    #[serde(skip, default)]
-    fire_cc: u64,
-    // Armed by the FF55-write immediate kick (in-period HDMA enable on the same
-    // instruction). Only such an instruction-driven block can flow the CPU's PC
-    // straight into its VRAM destination (pc 0x7FFE -> 0x8000), so the
-    // prefetch-absorption snapshot is gated on it: an m0-edge block firing inside
-    // a HALT window (no kick this instruction) must NOT arm the shadow.
-    #[serde(skip, default)]
-    snapshot_armed: bool,
-    // Resume-read pre-transfer shadow. When an HDMA block fires inside the
-    // Requested-context HALT-bug resume window (`resume_lockstep_window`),
-    // hardware runs the resume instruction's reads at the dma-event cc,
-    // BEFORE the DMA commits the dest writes. So a resume read of any in-block VRAM
-    // dest byte must observe the PRE-transfer value (the lockstep advances the PPU
-    // to mode-0 readable, but the dest byte read at 0x80FA must still be its
-    // pre-write value, not the just-transferred byte). Capture the pre-transfer
-    // bytes of the whole dest range at fire; `read()` serves them for the window's
-    // duration (one resume instruction). 1FFF-masked VRAM offset -> pre-byte.
-    #[serde(skip, default)]
-    resume_pre_shadow: std::collections::HashMap<u16, u8>,
-    // Armed for BOTH IME states (unlike the !ime lockstep window); scopes the
-    // pre-transfer shadow capture/serve through the resume read (HALT-bug double
-    // execute OR the IME-on interrupt-service ISR read).
-    #[serde(skip, default)]
-    resume_shadow_window: bool,
-    /// (CGB dma-due deferral) cc added to a VRAM WRITE's PPU
-    /// mode-block check for the deferred post-HALT `ld (nn),a`. The hardware's
-    /// DMA event advances the PPU across block1's transfer before the CPU
-    /// resumes, so that write lands in the post-transfer mode-0 window. rustyboi
-    /// defers block1's stall (block2's next/same-line timing depends on that
-    /// deferral), so instead of advancing the world it biases only this write's
-    /// mode check by the pending transfer span. One-shot (cleared on consume).
-    #[serde(skip, default)]
-    dma_due_write_cc_bias: u64,
-    // FF55-kick fire-timing: set when an FF55 bit7=1 write (enable or
-    // restart) wants to arm the first block immediately. Hardware
-    // gates that immediate flag on the LIVE in-HBlank-period predicate (at cc+4), not
-    // the 1-dot-lagged renderer period cache. The bus resolves this flag after
-    // the FF55 write by evaluating the PPU's `hdma_period` at the write access cc;
-    // if not in period the kick is dropped (the block then arms on the next
-    // Mode 3->0 edge). The enable-vs-restart distinction the two write paths
-    // once encoded here was never consumed -- every reader only asks whether a
-    // kick is pending -- so this is a plain flag.
-    #[serde(skip, default)]
-    kick_eval_pending: bool,
-    // FF55=00 disable-vs-m0-edge race: a FF55 bit7=0
-    // write only clears the FUTURE m0-edge HDMA schedule; it CANNOT un-flag a
-    // block whose m0 edge already fired (the DMA event latched -> the transfer still
-    // runs). The bus sets this BEFORE the FF55 write by evaluating the PPU's
-    // `disable_fires(cc)` (true => m0 edge already passed => the block must
-    // still run despite the disable). The write handler reads it: true =>
-    // keep the request and let the block fire (then HDMA ends normally),
-    // false => the historical unconditional cancel. Consumed once. The PPU
-    // reports this as an Option, but "no opinion" and "does not fire" drive the
-    // identical cancel, so only the fires/does-not distinction is stored.
-    #[serde(skip, default)]
-    disable_fires: bool,
-    // Interrupt-vs-dma precedence: while an interrupt service is
-    // mid-flight (its PC pushes not yet complete), the M-cycle-boundary HDMA fire
-    // is suppressed so the block fires AFTER the pushes. Set
-    // by `service_interrupt` around the pushes, cleared once it fires the block.
-    #[serde(skip, default)]
-    mcycle_fire_suppressed: bool,
-    // Late-hdma-vs-interrupt unhalt precedence: set at unhalt when a Low-at-halt
-    // HDMA block did NOT reflag (the reflag gate was false at unhalt), so
-    // its m0-edge falls within the immediately-following interrupt service window.
-    // The service then suppresses+reorders that block to fire AFTER its PC pushes
-    // (the `late_hdma_vs_tima_*_halt_2` content tests: copy the pushed 0x11C9).
-    // Cleared once consumed by the service (or the next unhalt).
-    #[serde(skip, default)]
-    unhalt_noreflag_deferred: bool,
-    // Next-M-cycle dma() scheduling for the IME-off HALT-bug resume. A block
-    // reflagged at unhalt fires (in hardware) at the instruction boundary AFTER
-    // the resume instruction (the DMA event runs after the opcode completes), so
-    // its VRAM write lands AFTER the resume instruction's own memory read. The
-    // synchronous m0-edge fire instead lands DURING the resume instruction,
-    // ahead of that read (hdma_late_if_and_ie_halt_1: the `ld a,(80FA)` read sees
-    // the post-DMA byte 0x02 instead of the pre-DMA 0x00). Set at the unhalt
-    // reflag, this suppresses the synchronous fire across the resume instruction
-    // and fires the held block at the next boundary.
-    #[serde(skip, default)]
-    unhalt_reflag_deferred: bool,
-    // Late-hdma-vs-interrupt re-order: the master_cc at which the most
-    // recent m0-edge HDMA block fired (read its 16 source bytes). Hardware orders
-    // the DMA event (HDMA, flagged at the m0 time) vs the interrupt event
-    // race by event time: DMA wins only when the m0 time <= the interrupt's
-    // serviceable cc. rustyboi fires the block greedily the dot the
-    // m0-edge is reached — one or two cc BEFORE the interrupt-triggering
-    // instruction's boundary — so when an interrupt dispatches within the same
-    // M-cycle window the block wrongly read pre-push memory. `service_interrupt`
-    // compares this against its access cc and, when the interrupt won the race,
-    // re-runs the block AFTER the pushes (the `late_hdma_vs_*` content tests).
-    // None when no block is in-flight for the current period.
-    #[serde(skip, default)]
-    last_fire_cc: Option<u64>,
-    // Snapshot of (source, dest, length, enabled) captured immediately BEFORE the
-    // last m0-edge block fired, so the late-hdma-vs re-order can restore the
-    // pre-fire pointers and re-run the block reading post-push memory.
-    #[serde(skip, default)]
-    pre_fire_state: Option<(u16, u16, u8, bool)>,
-    // True when the HDMA block was already set up (FF55 written, `enabled`) at
-    // HALT entry. Distinguishes the `hdma_*halt_*_ly_*`/`inc_*` family (HDMA armed in
-    // the m3halt ISR BEFORE the HALT; the value-read is a downstream post-unhalt FF44
-    // -> drop the +6 stall fudge) from `hdma_cycles_2` (FF55 written in the wakeup
-    // ISR AFTER the HALT; the immediate FF41 STAT read needs the +6).
-    #[serde(skip, default)]
-    enabled_at_halt: bool,
-}
-
-/// OAM DMA (FF46) engine: the in-flight transfer cursor and the prefetch
-/// STAT-read bias the absorbed prefetch M-cycle leaves behind.
-#[derive(Serialize, Deserialize, Clone)]
-struct OamDmaEngine {
-    // OAM DMA state. Models the hardware's continuously-running OAM-DMA engine:
-    // `pos` idles at 254 (-2). On an FF46 write
-    // the engine is armed (`active`) and `start_pos = (pos + 2)`;
-    // the transfer of byte 0 therefore begins two M-cycles after the write.
-    // Each M-cycle (4 dots) advances `pos`; when it reaches `start_pos`
-    // the transfer (re)starts at 0, copies bytes 0..=159, then ends at 160.
-    active: bool,
-    source_base: u16,
-    #[serde(default)]
-    pos: u8,
-    #[serde(default)]
-    start_pos: u8,
-    #[serde(default)]
-    subcycle: u8, // dots elapsed within the current M-cycle (0..=3)
-    // DMA prefetch absorption: hardware runs GDMA/HDMA with a preceding opcode
-    // prefetch that fetches the next opcode at the DMA event cc with NO extra cc —
-    // the opcode-fetch M-cycle is folded into the DMA's trailing `+4`. rustyboi
-    // copies the block synchronously and drains the cc as an idle stall, so the
-    // FIRST access after the stall starts its M-cycle one dot higher than hardware
-    // (the absorbed prefetch M-cycle is double-counted). This flag, set when the
-    // stall is consumed, tells the next FF41 STAT-mode read to resolve at
-    // `master_cc - 1` (hardware's true read cc) so the post-DMA mode-3 boundary
-    // `_1`/`_2` brackets land on the same sub-dot hardware does. Cleared after the
-    // first STAT mode read consumes it.
-    // Not in Pan Docs, TCAGBD, or GBCTR; sub-cycle STAT-bias timing from test-ROM refs.
-    #[serde(skip, default)]
-    prefetch_stat_bias: bool,
-}
-
 /// HALT wake-path state: the wake-reason latches and the HDMA-period
 /// interaction that decides when a halted CPU resumes.
 #[derive(Serialize, Deserialize, Clone)]
-struct HaltWake {
+pub(in crate::memory) struct HaltWake {
     // Allow the OAM-DMA to advance this many M-cycles at HALT entry before the
     // freeze takes hold (hardware advances the OAM-DMA by the HALT instruction's
     // own M-cycle before halting, so that one M-cycle moves the OAM-DMA;
@@ -629,10 +292,10 @@ struct HaltWake {
     // must resume it — otherwise the woken OAM-DMA advances one M-cycle off (proven
     // by the mid-HALT round-trip test).
     #[serde(default)]
-    oam_grace: u8,
+    pub(in crate::memory) oam_grace: u8,
     // HDMA period/block state latched at HALT entry.
     #[serde(default)]
-    hdma_state: HaltHdmaState,
+    pub(in crate::memory) hdma_state: HaltHdmaState,
     // HALT-wakeup access-cc skew guard. rustyboi does not yet model the
     // HALT-wakeup prefetch cost (the documented +9cc HALT bug), so the master_cc
     // the bus snapshots for memory accesses in the instruction stream resumed by a
@@ -646,7 +309,7 @@ struct HaltWake {
     // regress against their HALT-free twins, which land the same access_cc but
     // read mode 2.
     #[serde(skip, default)]
-    wakeup_skew: bool,
+    pub(in crate::memory) wakeup_skew: bool,
     // True when the live HALT-woken stream was woken by an m0- or m2-proximate
     // LCD STAT IRQ (the wake landed on/near the m0/m2 event cc). The
     // line-tail mode-2 overrides in `get_stat_mode_midframe` model the unmodeled
@@ -663,7 +326,7 @@ struct HaltWake {
     // bias is already folded into the HDMA wakeup phase (the in-halt block transfer
     // / unhalt reflag), so the plain-wakeup bias must be suppressed for these.
     #[serde(skip, default)]
-    wakeup_hdma: bool,
+    pub(in crate::memory) wakeup_hdma: bool,
     // Set at HALT-exit when the hardware +4 wakeup-latency fixup applies on
     // The pre-snap master_cc at real HALT entry (on_cpu_halt). This is the
     // un-snapped HALT-entry cc that hardware's ceil-to-M-cycle event-time snap
@@ -672,61 +335,6 @@ struct HaltWake {
     // byte-identical woken instruction streams. None when not in a real-halt window.
     #[serde(skip, default)]
     entry_cc: Option<u64>,
-}
-
-impl Default for HdmaEngine {
-    fn default() -> Self {
-        Self {
-            tracker_sleep_until: 0,
-            source: 0,
-            dest: 0,
-            length: 0,
-            enabled: false,
-            req_pending: false,
-            machinery_used: false,
-            is_in_period_cached: false,
-            prev_stat_mode: 0,
-            prev_period: false,
-            block_fired_this_hblank: false,
-            last_dma_ly: None,
-            lockstep_active: false,
-            resume_lockstep_window: false,
-            block_done_this_period: false,
-            halt_edge_consumed: false,
-            high_unhalt_consume: false,
-            peraccess_consume_pending: false,
-            pending_writes: Vec::new(),
-            fire_dest0: None,
-            fire_dest0_prebyte: 0xFF,
-            fire_cc: 0,
-            snapshot_armed: false,
-            resume_pre_shadow: std::collections::HashMap::new(),
-            resume_shadow_window: false,
-            dma_due_write_cc_bias: 0,
-            write_delay: 0,
-            kick_eval_pending: false,
-            disable_fires: false,
-            mcycle_fire_suppressed: false,
-            unhalt_noreflag_deferred: false,
-            unhalt_reflag_deferred: false,
-            last_fire_cc: None,
-            pre_fire_state: None,
-            enabled_at_halt: false,
-        }
-    }
-}
-
-impl Default for OamDmaEngine {
-    fn default() -> Self {
-        Self {
-            active: false,
-            source_base: 0,
-            pos: 0xFE,
-            start_pos: 0,
-            subcycle: 0,
-            prefetch_stat_bias: false,
-        }
-    }
 }
 
 impl Default for HaltWake {
@@ -763,12 +371,12 @@ pub struct Mmio {
     // entirely; they deserialize to `None` here and fall back to a reattached
     // fresh cart, matching the pre-change behavior (`#[serde(default)]`).
     #[serde(default)]
-    cartridge: Option<cartridge::Cartridge>,
+    pub(in crate::memory) cartridge: Option<cartridge::Cartridge>,
     input: input::Input,
-    vram: Box<memory::Memory<VRAM_START, VRAM_SIZE>>,
-    wram: Box<memory::Memory<WRAM_START, WRAM_SIZE>>,
-    wram_bank: Box<memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>>,
-    oam: memory::Memory<OAM_START, OAM_SIZE>,
+    pub(in crate::memory) vram: Box<memory::Memory<VRAM_START, VRAM_SIZE>>,
+    pub(in crate::memory) wram: Box<memory::Memory<WRAM_START, WRAM_SIZE>>,
+    pub(in crate::memory) wram_bank: Box<memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>>,
+    pub(in crate::memory) oam: memory::Memory<OAM_START, OAM_SIZE>,
     // CGB-only shadow for the 0xFEA0-0xFEFF "unused" region, which on CGB
     // mirrors the OAM index space masked with 0xE7.
     // Indexed by `(addr & 0xFF) & 0xE7` minus 0xA0 (reachable indices are
@@ -778,7 +386,7 @@ pub struct Mmio {
     // "Memory Map / FEA0-FEFF range" (CGB = a revision-masked RAM area; our &0xE7
     // fold reproduces TCAGBD's BGB-described three-groups-of-8 mirror pattern).
     #[serde(default = "default_oam_high", with = "serde_bytes")]
-    oam_high: [u8; 0x60],
+    pub(in crate::memory) oam_high: [u8; 0x60],
     timer: timer::Timer,
     #[serde(default = "serial::Serial::new")]
     serial: serial::Serial,
@@ -807,7 +415,7 @@ pub struct Mmio {
     #[serde(default)]
     passive_pages_valid: bool,
 
-    hdma: HdmaEngine,
+    pub(in crate::memory) hdma: HdmaEngine,
     // Carried CPU lag: passive-read M-cycles whose world resolution was
     // deferred ACROSS an instruction boundary (see Bus::tick_remaining's
     // carry gate). Pulled into the next Bus's lag at construction, so the
@@ -815,23 +423,23 @@ pub struct Mmio {
     // resolution identically on load.
     #[serde(default)]
     cpu_lag: u32,
-    io_registers: memory::Memory<IO_REGISTERS_START, IO_REGISTERS_SIZE>,
+    pub(in crate::memory) io_registers: memory::Memory<IO_REGISTERS_START, IO_REGISTERS_SIZE>,
     hram: memory::Memory<HRAM_START, HRAM_SIZE>,
     ie_register: u8,
     audio: audio::Audio,
 
-    dma: OamDmaEngine,
+    pub(in crate::memory) dma: OamDmaEngine,
     // Set when a CPU write lands in OAM (0xFE00-0xFE9F) this M-cycle, so the PPU
     // can fire the sprite snapshot on an OAM write.
     // Drained by the PPU each dot.
     #[serde(default)]
-    oam_write_pending: bool,
+    pub(in crate::memory) oam_write_pending: bool,
     // CGB VRAM-source OAM-DMA conflict reads return OAM[dma.pos] and then
     // zero that OAM byte. The read path is &self,
     // so record the position here and apply the zero on the next DMA advance.
     // -1 = none.
     #[serde(skip, default = "default_pending_oam_zero")]
-    pending_oam_zero: std::cell::Cell<i16>,
+    pub(in crate::memory) pending_oam_zero: std::cell::Cell<i16>,
 
     // OAM-DMA-source VRAM bus-conflict model. The PPU pushes its BG fetcher's
     // current VRAM data-bus address/bank here each dot during mode 3 (VRAM locked).
@@ -843,11 +451,11 @@ pub struct Mmio {
     // TCAGBD §9.6.3's VRAM-read corruption is the GDMA/HDMA engine, not OAM-DMA);
     // the AND-with-fetcher formula is from real-silicon .dump captures.
     #[serde(skip, default)]
-    fetcher_bus_addr: u16,
+    pub(in crate::memory) fetcher_bus_addr: u16,
     #[serde(skip, default)]
-    fetcher_bus_bank: u8,
+    pub(in crate::memory) fetcher_bus_bank: u8,
     #[serde(skip, default)]
-    fetcher_bus_locked: bool,
+    pub(in crate::memory) fetcher_bus_locked: bool,
     // The first OAM-DMA VRAM-source read after the fetcher bus lock engages (a
     // fresh mode-3 entry) still resolves to true VRAM: the BG fetcher has not yet
     // settled a displayed-tile byte on the conflict bus during the line's warmup,
@@ -855,7 +463,7 @@ pub struct Mmio {
     // byte of each crossed line is identity). Set on the lock's rising edge,
     // consumed by the first conflicting read.
     #[serde(skip, default)]
-    fetcher_bus_warmup: bool,
+    pub(in crate::memory) fetcher_bus_warmup: bool,
     // DMG-only mode-2 fetcher-prefetch onset. On DMG the BG fetcher's first
     // tile-NUMBER fetch begins one M-cycle (4 dots) BEFORE the official mode-3
     // VRAM lock — the mode-2->mode-3 prefetch. A VRAM-source OAM-DMA M-cycle in
@@ -868,9 +476,9 @@ pub struct Mmio {
     // PPU publishes the predicted first tilemap address here for the 4-dot window
     // preceding the mode-3 arm; `dmg_prefetch_addr` is 0 when inactive.
     #[serde(skip, default)]
-    dmg_prefetch_active: bool,
+    pub(in crate::memory) dmg_prefetch_active: bool,
     #[serde(skip, default)]
-    dmg_prefetch_addr: u16,
+    pub(in crate::memory) dmg_prefetch_addr: u16,
     // Second-order conflict: when an OAM-DMA M-cycle reads VRAM while the BG
     // fetcher is driving a TILE-NUMBER (tilemap) address, both the DMA byte and the
     // tile number the fetcher would latch are `VRAM[tilemap_addr & dma_src]`. That
@@ -880,7 +488,7 @@ pub struct Mmio {
     // tile-data base (0x8000 + tile*16) here from the tilemap read to the next
     // tile-data read; the row low bits come from that read's own fetcher address.
     #[serde(skip, default)]
-    poison_tiledata_base: Option<u16>,
+    pub(in crate::memory) poison_tiledata_base: Option<u16>,
 
     // Set true when the CPU writes to a register that affects the STAT line
     // (FF40 LCDC, FF41 STAT, FF45 LYC). Consumed by the PPU between CPU
@@ -901,33 +509,33 @@ pub struct Mmio {
     cpu_t_phase: u64,
 
     // CGB-specific state
-    vram_bank: u8,          // VRAM bank select (0-1)
-    wram_bank_select: u8,   // WRAM bank select (1-7)
+    pub(in crate::memory) vram_bank: u8,          // VRAM bank select (0-1)
+    pub(in crate::memory) wram_bank_select: u8,   // WRAM bank select (1-7)
 
     // CGB speed switching state
     key0_locked: bool,      // Whether KEY0 register is locked (after boot ROM finishes)
     key0_dmg_mode: bool,    // DMG compatibility mode (KEY0 bit 0)
     key1_current_speed: bool, // Current speed mode (KEY1 bit 7): false=normal, true=double
-    key1_switch_armed: bool,  // Speed switch armed (KEY1 bit 0)
+    pub(in crate::memory) key1_switch_armed: bool,  // Speed switch armed (KEY1 bit 0)
 
     // CGB VRAM bank 1 (bank 0 is the existing vram field)
-    vram_bank1: Box<memory::Memory<VRAM_START, VRAM_SIZE>>,
+    pub(in crate::memory) vram_bank1: Box<memory::Memory<VRAM_START, VRAM_SIZE>>,
 
     // CGB WRAM banks 2-7 (bank 1 is the existing wram_bank field)
-    wram_banks: Vec<memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>>, // Banks 2-7
+    pub(in crate::memory) wram_banks: Vec<memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>>, // Banks 2-7
     // Back-to-back GDMA word-bus conflict: set true while an OAM DMA is active once a
     // GDMA-conflict pass has run in this OAM-DMA lifetime, so the NEXT GDMA block (no
     // OAM-DMA completion in between) is recognised as a back-to-back second block.
     // Not in Pan Docs, TCAGBD, or GBCTR; the 2x-GDMA word-bus first-word duplication
     // is from real-silicon oamdumper .dump captures (not modelled by prior emulators).
     #[serde(skip, default)]
-    gdma_conflict_ran: bool,
+    pub(in crate::memory) gdma_conflict_ran: bool,
     // CPU-cycle stall owed for HDMA/GDMA blocks already transferred; the CPU
     // idles these cycles (peripherals keep ticking) before its next fetch.
     // Serialized (additive `default`): owed cycles can straddle an instruction
     // boundary, so a state saved with a stall pending must resume with it.
     #[serde(default)]
-    pending_dma_stall: u32,
+    pub(in crate::memory) pending_dma_stall: u32,
     // VRAM-source GDMA first-word latch. A GDMA whose source is VRAM reads
     // nothing (same-bus read: floats 0xFF), EXCEPT the transfer's first 16-bit
     // word, which latches the byte the CPU's absorbed next-opcode prefetch
@@ -942,7 +550,7 @@ pub struct Mmio {
     // identity of the two bytes (the word-duplicated prefetch opcode) is from the
     // AntonioND hdma_valid_sources captures — not in Pan Docs/GBCTR.
     #[serde(skip, default)]
-    gdma_vram_src_fixup: Option<(u16, bool)>,
+    pub(in crate::memory) gdma_vram_src_fixup: Option<(u16, bool)>,
     // Joypad IRQ input-filter delay for the JOYP select-write edge, in master
     // cc (dots) remaining until the IF bit is raised; 0 = idle. The P1 lines
     // pass through an analog filter, so a select write that pulls a held
@@ -964,9 +572,9 @@ pub struct Mmio {
     // Serialized (additive `default`): the suppression window drains across the
     // CPU stall, spanning instruction boundaries.
     #[serde(default)]
-    oam_dma_stall_suppress: u32,
+    pub(in crate::memory) oam_dma_stall_suppress: u32,
 
-    halt: HaltWake,
+    pub(in crate::memory) halt: HaltWake,
     // True while the CPU is parked in the STOP speed-switch unhalt window
     // (0x20000 cycles). The CPU is halted for this
     // window, so the OAM-DMA takes its halted branch (elapsed time is
@@ -976,7 +584,7 @@ pub struct Mmio {
     // Serialized (additive `default`): the freeze persists across the whole STOP
     // window, spanning instruction boundaries.
     #[serde(default)]
-    oam_dma_stop_freeze: bool,
+    pub(in crate::memory) oam_dma_stop_freeze: bool,
     // Mirror of the HALT-entry `halt.oam_grace`, but for the STOP speed-switch.
     // Hardware advances the OAM-DMA by the STOP instruction's own M-cycle before
     // halting, so that M-cycle advances the
@@ -990,14 +598,14 @@ pub struct Mmio {
     // Serialized (additive `default`): persists across the STOP window like the
     // freeze it pairs with.
     #[serde(default)]
-    stop_oam_grace: u8,
+    pub(in crate::memory) stop_oam_grace: u8,
 
     // True while the CPU is in HALT. Hardware suppresses the period-edge
     // HDMA request while halted; the
     // halt-time block is governed instead by the `halt.hdma_state` machine and
     // re-flagged only on unhalt. Set by the HALT opcode, cleared on unhalt.
     #[serde(skip, default)]
-    cpu_halted: bool,
+    pub(in crate::memory) cpu_halted: bool,
 
     // CGB STOP speed-switch unhalt window. Hardware halts the CPU
     // for the 0x20000-cycle unhalt window, so the HDMA
@@ -1008,7 +616,7 @@ pub struct Mmio {
     // / cleared by `stop_window_exit_reflag` so `step_hdma`'s arm gate (and edge
     // consumption) treats the STOP window as halted.
     #[serde(skip, default)]
-    in_stop_window: bool,
+    pub(in crate::memory) in_stop_window: bool,
 
     // Set at an m2-woken CGB HALT exit that charged the +4 halt-exit M-cycle as a
     // REAL cpu stall (sm83.rs `return 4`). Because the stall advances the whole
@@ -1129,7 +737,7 @@ pub struct Mmio {
     obj_palette_spec: u8,        // OCPS register
 
     // CGB feature enablement
-    cgb_features_enabled: bool, // Whether CGB-specific features should be active
+    pub(in crate::memory) cgb_features_enabled: bool, // Whether CGB-specific features should be active
     // Cached: the inserted cart has a peripheral clock (MBC3/HuC-3 RTC or
     // the POCKET CAMERA capture countdown). Lets the per-dot tick_rtc skip
     // the call into the cartridge entirely for the common clockless cart.
@@ -1761,7 +1369,7 @@ impl Mmio {
     /// Returns Some(byte) when the address is currently served by the boot ROM;
     /// None means the caller should fall through to the cartridge. The CGB boot
     /// ROM maps 0x000-0x0FF and 0x200-0x8FF; 0x100-0x1FF is the live cart header.
-    fn bios_overlay_read(&self, addr: u16) -> Option<u8> {
+    pub(in crate::memory) fn bios_overlay_read(&self, addr: u16) -> Option<u8> {
         let bios = self.bios.as_ref()?;
         if self.io_registers.read(REG_BOOT_OFF) != 0 {
             return None;
@@ -3006,7 +2614,7 @@ impl Mmio {
     }
 
     /// Read a VRAM byte from a specific bank (0/1), bypassing the DMA-conflict path.
-    fn read_vram_bank_internal(&self, bank: u8, addr: u16) -> u8 {
+    pub(in crate::memory) fn read_vram_bank_internal(&self, bank: u8, addr: u16) -> u8 {
         if self.cgb_features_enabled && bank == 1 {
             self.vram_bank1.read(addr)
         } else {
@@ -3243,7 +2851,7 @@ impl Mmio {
     /// entry holds a "magic" value in range (`mgb_frozen_render_enabled`); if none
     /// does, the corrupted entry is suppressed (returns the offscreen Y $00) so no
     /// sprite draws, matching hardware.
-    fn mgb_frozen_oam_entry(&self, entry: u8) -> Option<[u8; 4]> {
+    pub(in crate::memory) fn mgb_frozen_oam_entry(&self, entry: u8) -> Option<[u8; 4]> {
         if !self.is_mgb || !self.cpu_halted || !self.dma.active || self.halt.oam_grace > 0 {
             return None;
         }
@@ -3434,7 +3042,7 @@ impl Mmio {
         self.ff41_write_pending = true;
     }
 
-    fn write_lcd_control(&mut self, value: u8) {
+    pub(in crate::memory) fn write_lcd_control(&mut self, value: u8) {
         let de = ppu::LCDCFlags::DisplayEnable as u8;
         let was_on = self.io_registers.read(ppu::LCD_CONTROL) & de != 0;
         let now_off = value & de == 0;
@@ -3985,22 +3593,7 @@ impl memory::Addressable for Mmio {
                         // reads always return 0xFF: the read falls
                         // through to the never-written I/O-shadow bytes.
                         REG_HDMA1 | REG_HDMA2 | REG_HDMA3 | REG_HDMA4 => 0xFF,
-                        REG_HDMA5 => {
-                            if self.cgb_features_enabled {
-                                if self.hdma.enabled {
-                                    // In-progress: bit 7 clear, low 7 bits =
-                                    // blocks remaining minus 1.
-                                    self.hdma.length & 0x7F
-                                } else {
-                                    // Done / cancelled / never-armed: bit 7
-                                    // set. `hdma.length == 0x7F` after a
-                                    // completed transfer encodes 0xFF.
-                                    self.hdma.length | 0x80
-                                }
-                            } else {
-                                0xFF
-                            }
-                        },
+                        REG_HDMA5 => self.hdma_status_byte(),
                         REG_SVBK => {
                             if self.cgb_features_enabled {
                                 // Read back the RAW written low 3 bits, not the
@@ -4309,135 +3902,11 @@ impl memory::Addressable for Mmio {
                             }
                             // On DMG hardware, writes are ignored
                         },
-                        REG_HDMA1 => {
-                            if self.cgb_features_enabled {
-                                // Sticky HDMA/GDMA-machinery marker: src/dst
-                                // setup usually precedes the (one-time) vsync
-                                // halt in the DMA-preamble test ROMs, so mark
-                                // here too, not just on the FF55 trigger.
-                                self.hdma.machinery_used = true;
-                                self.hdma.source = (self.hdma.source & 0x00FF) | ((value as u16) << 8);
-                            }
-                        },
-                        REG_HDMA2 => {
-                            if self.cgb_features_enabled {
-                                // Low nibble of source low byte is masked off on real hardware.
-                                // The low nibble is masked: `value & 0xF0`.
-                                self.hdma.source = (self.hdma.source & 0xFF00) | ((value as u16) & 0x00F0);
-                            }
-                        },
-                        REG_HDMA3 => {
-                            if self.cgb_features_enabled {
-                                self.hdma.dest = (self.hdma.dest & 0x00FF) | ((value as u16) << 8);
-                            }
-                        },
-                        REG_HDMA4 => {
-                            if self.cgb_features_enabled {
-                                // Low nibble of dest low byte is masked off on real hardware.
-                                // The low nibble is masked: `value & 0xF0`.
-                                self.hdma.dest = (self.hdma.dest & 0xFF00) | ((value as u16) & 0x00F0);
-                            }
-                        },
-                        REG_HDMA5 => {
-                            if self.cgb_features_enabled {
-                                // Sticky HDMA/GDMA-machinery marker (see
-                                // `hdma.machinery_used`): scopes the CGB LCD
-                                // halt-exit stall away from the DMA cc-web.
-                                self.hdma.machinery_used = true;
-                                let length_blocks_minus_1 = value & 0x7F;
-                                let new_mode = (value >> 7) & 0x01; // 0=GDMA, 1=HDMA
-                                let lcd_on = (self.io_registers.read(ppu::LCD_CONTROL)
-                                    & (ppu::LCDCFlags::DisplayEnable as u8)) != 0;
-
-                                if self.hdma.enabled {
-                                    // HDMA already armed: bit7=0 cancels,
-                                    // bit7=1 restarts with new length / src
-                                    // / dst.
-                                    if new_mode == 0 {
-                                        // FF55=00 disable-vs-m0-edge race:
-                                        // the disable
-                                        // only clears the FUTURE m0-edge schedule.
-                                        // A block whose m0 edge already fired
-                                        // (the DMA event latched) STILL runs. The
-                                        // bus stashes that decision in
-                                        // `hdma.disable_fires` by evaluating the
-                                        // PPU mode-0 time at this write's access cc.
-                                        // The race only exists while the period's
-                                        // block is still OWED (latched by the m0
-                                        // edge, not yet run). Once the block for
-                                        // this period has already been serviced
-                                        // (`hdma.block_done_this_period`, e.g. an
-                                        // in-period FF55 kick fired it), the next
-                                        // dma event is the NEXT line's m0 edge —
-                                        // in the future — so the disable always
-                                        // wins (SameSuite dma/hdma_mode0: enable+
-                                        // kick in mode 0, then disable a few
-                                        // M-cycles later must stop the transfer).
-                                        if self.hdma.disable_fires
-                                            && !self.hdma.block_done_this_period
-                                        {
-                                            // m0 edge already passed: keep the
-                                            // request latched so the block fires
-                                            // this M-cycle (step_hdma), exactly as
-                                            // hardware runs it despite the
-                                            // disable. The block-fire decrements
-                                            // length and ends HDMA normally.
-                                            self.hdma.req_pending = true;
-                                            // Leave hdma.enabled = true so the
-                                            // M-cycle fire gate passes; the
-                                            // post-block length wrap clears it.
-                                        } else {
-                                            // Disable wins. Hardware latches the
-                                            // WRITTEN length bits on every FF55
-                                            // write, including the cancel (it stores
-                                            // `(value & 0x7F) + 1`
-                                            // before the abort early-return), so a
-                                            // later read returns 0x80|written, NOT
-                                            // the preserved remaining count
-                                            // (SameSuite dma/hdma_lcd_off expects
-                                            // 0x80 after FF55=00 with 3 blocks
-                                            // left).
-                                            self.hdma.length = length_blocks_minus_1;
-                                            self.hdma.enabled = false;
-                                            self.hdma.req_pending = false;
-                                        }
-                                        self.hdma.disable_fires = false;
-                                    } else {
-                                        self.hdma.length = length_blocks_minus_1;
-                                        if !lcd_on {
-                                            // LCD off: hardware fires immediately
-                                            // (no HDMA period concept).
-                                            self.hdma.req_pending = true;
-                                        } else {
-                                            // LCD on: gate the immediate kick on the
-                                            // LIVE in-HBlank-period predicate (at cc+4), resolved by
-                                            // the bus after this write.
-                                            self.hdma.kick_eval_pending = true;
-                                        }
-                                    }
-                                } else if new_mode == 0 {
-                                    // GDMA kick (synchronous).
-                                    let total_bytes = (length_blocks_minus_1 as usize + 1) * 16;
-                                    self.execute_gdma(total_bytes);
-                                    self.hdma.length = 0x7F; // FF55 reads 0xFF
-                                } else {
-                                    // Arm HDMA. Fire the first block now if
-                                    // LCD off; otherwise gate the immediate kick
-                                    // on the live in-HBlank-period predicate (at cc+4, resolved by
-                                    // the bus), else the Mode 3->0 trigger arms it.
-                                    self.hdma.enabled = true;
-                                    self.hdma.length = length_blocks_minus_1;
-                                    if !lcd_on {
-                                        self.hdma.req_pending = true;
-                                    } else {
-                                        self.hdma.kick_eval_pending = true;
-                                    }
-                                }
-                                // Consume the per-write disable-race decision (only
-                                // the disable branch above uses it).
-                                self.hdma.disable_fires = false;
-                            }
-                        },
+                        REG_HDMA1 => self.write_hdma_src_high(value),
+                        REG_HDMA2 => self.write_hdma_src_low(value),
+                        REG_HDMA3 => self.write_hdma_dst_high(value),
+                        REG_HDMA4 => self.write_hdma_dst_low(value),
+                        REG_HDMA5 => self.write_hdma5(value),
                         REG_SVBK => {
                             if self.cgb_features_enabled {
                                 let bank = value & 0x07; // Bits 0-2 = bank select
@@ -4497,340 +3966,6 @@ impl memory::Addressable for Mmio {
                 IE_REGISTER => self.ie_register = value,
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod hblank_dma_tests {
-    //! Regression: Pan Docs specifies an HBlank DMA transfers exactly one
-    //! 0x10-byte block per HBlank. When an in-HBlank FF55 kick fires this HBlank's
-    //! block via the cycle-exact closed-form mode-0 predicate (which leads the
-    //! CPU-visible STAT mode), the STAT-fallback edge must NOT arm a SECOND block
-    //! for the same scanline — else the transfer finishes a line early. That early
-    //! finish is what turned Pokémon Crystal's Elm's-lab HBlank-DMA cancel into a
-    //! spurious mid-frame GDMA that corrupted the lower screen. The `hdma_block_
-    //! fired_this_hblank` flag enforces one block per line and, keyed off LY,
-    //! resets every scanline (so it never goes stale across frames).
-    use super::*;
-
-    /// A 5-block HBlank DMA (WRAM->VRAM), armed and enabled, positioned at the
-    /// STAT mode-3->0 edge of line 46 that the fallback path arms on.
-    fn armed_at_hblank_edge() -> Mmio {
-        let mut m = Mmio::new();
-        m.set_cgb_features_enabled(true);
-        m.io_registers.write(ppu::LCD_CONTROL, ppu::LCDCFlags::DisplayEnable as u8);
-        m.io_registers.write(ppu::LY, 46);
-        m.io_registers.write(ppu::LCD_STATUS, 0); // mode 0 (HBlank)
-        m.hdma.source = 0xC000;
-        m.hdma.dest = 0x8000;
-        m.hdma.length = 4; // blocks-1 => 5 blocks
-        m.hdma.enabled = true;
-        m.hdma.prev_stat_mode = 3;
-        m.hdma.prev_period = false;
-        m.hdma.halt_edge_consumed = false;
-        m.hdma.last_dma_ly = Some(46); // already synced to this line
-        m
-    }
-
-    #[test]
-    fn second_block_on_same_line_is_suppressed() {
-        let mut m = armed_at_hblank_edge();
-        // The in-HBlank kick already fired this line's block.
-        m.hdma.block_fired_this_hblank = true;
-        let len = m.hdma.length;
-        m.step_hdma(None); // STAT mode-3->0 fallback edge
-        assert_eq!(m.hdma.length, len, "a second block fired in the same HBlank");
-        assert!(!m.hdma.req_pending);
-    }
-
-    #[test]
-    fn flag_resets_on_ly_change_so_next_line_fires() {
-        let mut m = armed_at_hblank_edge();
-        m.hdma.block_fired_this_hblank = true;
-        // A new scanline: LY advanced past the recorded line.
-        m.io_registers.write(ppu::LY, 47);
-        m.step_hdma(None);
-        // The LY-change reset cleared the flag, so this line's edge arms its block.
-        assert!(!m.hdma.block_fired_this_hblank || m.hdma.req_pending || m.hdma.length < 4,
-            "the flag must clear on LY change so the next HBlank's block still fires");
-        assert_eq!(m.hdma.last_dma_ly, Some(47), "LY tracker follows the live line");
-    }
-
-    #[test]
-    fn same_ly_next_frame_still_fires_a_block() {
-        // The flag keys off LY *changes*, not the LY value, so the same LY
-        // recurring next frame is not mistaken for an already-serviced HBlank
-        // (a raw-LY compare regressed this, dropping tiles like the "P" glyph).
-        let mut m = armed_at_hblank_edge();
-        m.hdma.block_fired_this_hblank = true;
-        // Simulate a full frame passing: LY walks away and returns to 46.
-        for ly in [47u8, 48, 100, 0, 45, 46] {
-            m.io_registers.write(ppu::LY, ly);
-            m.step_hdma(None);
-        }
-        // Back on line 46 in a fresh frame, the flag is clear (it was reset on
-        // every LY change), so an edge here would arm normally.
-        assert!(!m.hdma.block_fired_this_hblank, "flag must not persist across a frame");
-    }
-
-    // ---- Adversarial audit tests (double-fire campaign review) ----
-    //
-    // At single speed the renderer nulls `scheduled_mode0_dot` at the m0-time
-    // crossing BEFORE the bus reads `hdma_period`, so the ordinary per-line block
-    // fires through the STAT-3->0 fallback with `period == None` =>
-    // `in_period == false` at the fire site. `step_hdma`'s bottom only set
-    // `hdma.block_done_this_period` when `in_period` was true, so a normally
-    // fired block left the period marked UN-serviced. Everything that gates a
-    // re-fire on `!hdma.block_done_this_period` (the FF55=00 cancel race branch,
-    // the SS->DS STOP synchronous fire, `on_stop_window_enter`) could then run a
-    // SECOND block for a period whose block already ran.
-    //
-    // The two SILICON-OBSERVABLE consequences of this internal root cause split
-    // between a ROM and host-side tests:
-    //   - FF55=00 cancel after the block fired: the FF55 read-back value ($AC,
-    //     the written low 7 bits with bit 7 latched) is host-side in
-    //     `ff55_cancel_after_block_reads_back_written_length_with_bit7`; the ROM
-    //     `hdma_ff55_cancel_after_block.cgb.mooneye.asm` keeps only its VRAM
-    //     sentinels (block0 copied, blocks 1/2 untouched — no spurious extra
-    //     block, no dropped disable).
-    //   - SS->DS STOP after the block fired: fully host-side in
-    //     `ssds_stop_after_block_fired_does_not_refire` (the ROM
-    //     `hdma_ff55_ssds_stop_after_block` was removed — the STOP speed-switch
-    //     window is not portable across the internal-suite runners).
-    // The remaining host-side tests below pin state with no standalone silicon
-    // observable: the root-cause flag contract, and the LCD-off case that is not
-    // reachable from a cold ROM (see its comment).
-
-    /// A block fired via the normal fallback edge must mark this period's block
-    /// as serviced — that is the flag's documented contract ("whether the HDMA
-    /// block owed for the *current* eligibility period has already been
-    /// serviced"). Pure internal state (no standalone silicon observable), so it
-    /// is pinned here rather than by a ROM.
-    #[test]
-    fn edge_fired_block_marks_period_serviced() {
-        let mut m = armed_at_hblank_edge();
-        m.step_hdma(None); // STAT 3->0 fallback fires this line's block
-        assert_eq!(m.hdma.length, 3, "the line's block fired");
-        assert!(
-            m.hdma.block_done_this_period,
-            "an edge-fired block must mark hdma_block_done_this_period; leaving it \
-             clear re-opens every !block_done re-fire gate (FF55 cancel race, \
-             SS->DS STOP fire) for a block that already ran"
-        );
-    }
-
-    /// LCD disable/enable does not reset `hdma.block_fired_this_hblank`; when
-    /// LY holds the same value across the off/on cycle (it reads 0 on hardware
-    /// throughout), the stale flag suppresses the first post-enable HBlank
-    /// block. Fixed by clearing the flag while the LCD is off (no HBlank periods
-    /// exist there, so the per-HBlank marker is meaningless — a display restart
-    /// begins a fresh frame).
-    ///
-    /// Kept host-side, NOT ROMed: this is not reachable from a cold ROM. The only
-    /// LY at which the flag can go stale across an off/on cycle is LY 0 (any other
-    /// LY self-heals — disabling the LCD drops LY to 0, and that LY change clears
-    /// the flag). Firing the first block at LY 0 AND toggling LCD off/on before LY
-    /// advances to 1 is not robustly achievable: the post-block spin-exit + LCDC
-    /// write latency crosses into LY 1, which auto-resets the flag. A cold-ROM
-    /// reproduction (block at LY 0, LCD off/on, then completion timing) produced
-    /// byte-identical VRAM end-states with and without the fix — the divergence is
-    /// a one-block TIMING shift (the suppressed block fires one HBlank later), so
-    /// the end state is identical once the transfer completes; there is no
-    /// end-state bus observable to grade.
-    #[test]
-    fn lcd_off_on_same_ly_stale_flag_suppresses_first_block() {
-        let mut m = armed_at_hblank_edge();
-        // This line's block fired just before the game disables the LCD.
-        m.hdma.block_fired_this_hblank = true;
-        m.io_registers.write(ppu::LCD_CONTROL, 0);
-        m.step_hdma(None); // an LCD-off tracker step; LY unchanged
-        // LCD back on; LY unchanged across the off/on cycle. First HBlank edge:
-        m.io_registers.write(ppu::LCD_CONTROL, ppu::LCDCFlags::DisplayEnable as u8);
-        m.io_registers.write(ppu::LCD_STATUS, 0);
-        m.hdma.prev_stat_mode = 3;
-        m.step_hdma(None);
-        assert_eq!(
-            m.hdma.length, 3,
-            "first post-enable HBlank block suppressed by a stale \
-             hdma_block_fired_this_hblank (no reset on LCD disable/enable)"
-        );
-    }
-
-    // ---- Silicon-observable re-fire consequences (re-homed from ROMs) ----
-    //
-    // The two host-side tests below re-home the silicon observables of the
-    // double-fire root cause. `hdma_ff55_ssds_stop_after_block` is being deleted
-    // as a ROM (its observable is A3 here); `hdma_ff55_cancel_after_block` keeps
-    // only its VRAM sentinels as a ROM, and its $AC read-back (SameSuite-derived)
-    // moves to A4 here.
-
-    /// A single->double-speed STOP taken mid-HBlank AFTER this line's HBlank-DMA
-    /// block already fired must NOT re-fire the serviced block. The fired block
-    /// marks the period serviced, so the STOP captures the period as `High` (in
-    /// period, block done, no reflag), not `Requested` — the synchronous-fire
-    /// gate keys on `!block_done_this_period`. FF55 therefore still reads $01
-    /// (block1 pending), not $FF (completed a block early). Re-homed from the
-    /// deleted ROM `hdma_ff55_ssds_stop_after_block`.
-    #[test]
-    fn ssds_stop_after_block_fired_does_not_refire() {
-        let mut m = armed_at_hblank_edge();
-        m.hdma.length = 2; // blocks-1 => 3 blocks (FF55 reads $02)
-        // block0 fires through the single-speed STAT-3->0 fallback; the fix marks
-        // the period serviced.
-        m.step_hdma(None);
-        assert_eq!(m.hdma.length, 1, "block0 fired: 3 -> 2 blocks remaining");
-        assert!(m.hdma.block_done_this_period, "the fired block marked the period serviced");
-        assert_eq!(m.read(REG_HDMA5), 0x01, "FF55 shows block1 pending after block0");
-
-        // SS->DS STOP in the SAME HBlank: capture at entry, re-flag at unhalt.
-        m.on_stop_window_enter(true);
-        assert!(
-            matches!(m.halt.hdma_state, HaltHdmaState::High),
-            "an already-serviced in-period block must capture High, not Requested"
-        );
-        m.stop_window_exit_reflag(true);
-
-        // The serviced block was NOT re-fired: length/enable untouched.
-        assert_eq!(m.hdma.length, 1, "SS->DS STOP must not re-fire the serviced block");
-        assert!(m.hdma.enabled, "the transfer is still in progress");
-        assert!(!m.hdma.req_pending, "no re-fire was queued");
-        assert_eq!(
-            m.read(REG_HDMA5),
-            0x01,
-            "FF55 stays $01 (not $FF) right after the switch"
-        );
-    }
-
-    /// A mid-HBlank FF55=$00 cancel written as $2C (bit7=0), AFTER this line's
-    /// block already fired, stops the transfer and latches the WRITTEN low 7 bits
-    /// as the read-back length: FF55 reads back 0x80|$2C = $AC (NOT the preserved
-    /// remaining count, NOT $FF). The serviced-period cancel fires no spurious
-    /// extra block. Re-homed $AC read-back (SameSuite dma/hdma_lcd_off) from
-    /// `hdma_ff55_cancel_after_block`, whose ROM keeps only the VRAM sentinels.
-    #[test]
-    fn ff55_cancel_after_block_reads_back_written_length_with_bit7() {
-        let mut m = armed_at_hblank_edge();
-        // block fires through the fallback edge, marking the period serviced.
-        m.step_hdma(None);
-        assert!(m.hdma.block_done_this_period, "the fired block marked the period serviced");
-        assert!(m.hdma.enabled, "the transfer is still armed before the cancel");
-
-        // FF55 = $2C: bit7 clear cancels; the low 7 bits latch as the read-back.
-        m.write(REG_HDMA5, 0x2C);
-
-        assert!(!m.hdma.enabled, "FF55=00 cancels the transfer");
-        assert!(!m.hdma.req_pending, "a serviced-period cancel fires no spurious block");
-        assert_eq!(
-            m.read(REG_HDMA5),
-            0xAC,
-            "FF55 reads back 0x80 | written ($2C), not the remaining count"
-        );
-    }
-
-    /// Disabling the LCD during an ACTIVE HBlank DMA fires exactly one block —
-    /// documented hardware behavior, NOT a spurious rustyboi block. SameBoy
-    /// `GB_lcd_off` runs a block on `hdma_on_hblank && (STAT & 3)`, and SameSuite
-    /// `dma/hdma_lcd_off` (real hardware) confirms a single tile copies. With the
-    /// LCD off the HDMA period is permanently active, so entering it services one
-    /// owed block and then stops — it does not keep transferring.
-    #[test]
-    fn lcd_off_during_active_hblank_dma_fires_one_block() {
-        let mut m = armed_at_hblank_edge();
-        // Mid-frame, drawing (mode 3): not a serviced HBlank — the case SameBoy's
-        // `(STAT & 3) != 0` gate fires on.
-        m.io_registers.write(ppu::LCD_STATUS, 3);
-        m.hdma.prev_stat_mode = 3;
-        m.hdma.prev_period = false;
-        m.hdma.block_fired_this_hblank = false;
-        m.hdma.block_done_this_period = false;
-        let before = m.hdma.length;
-        m.write_lcd_control(0); // LCD off
-        m.step_hdma(None);
-        assert_eq!(
-            m.hdma.length,
-            before - 1,
-            "LCD-off during an active HBlank DMA fires exactly one block"
-        );
-        // The permanent off-period must not keep firing (SameSuite: one tile).
-        m.step_hdma(None);
-        m.step_hdma(None);
-        assert_eq!(
-            m.hdma.length,
-            before - 1,
-            "only ONE block fires on LCD-off, not continuously"
-        );
-    }
-
-    /// SameBoy fires on LCD-off only when `(STAT & 3) != 0` — i.e. NOT when the
-    /// current HBlank's block already fired. rustyboi's `block_done_this_period`
-    /// guard stands in for that gate: LCD-off in an already-serviced HBlank adds
-    /// no second block. (Equivalence check for the two double-fire guards.)
-    #[test]
-    fn lcd_off_after_serviced_hblank_does_not_double_fire() {
-        let mut m = armed_at_hblank_edge();
-        m.step_hdma(None); // block0 fires via the mode-0 fallback, marks the period serviced
-        let after_one = m.hdma.length;
-        assert!(m.hdma.block_done_this_period, "this HBlank's block is serviced");
-        m.write_lcd_control(0); // LCD off in the same, already-serviced HBlank
-        m.step_hdma(None);
-        assert_eq!(
-            m.hdma.length, after_one,
-            "no second block on LCD-off after this HBlank's block already fired"
-        );
-    }
-
-    // ---- Boot-ROM acceptance (per-length CRC set + SGB unmasked path) ----
-
-    /// The four known-good boot-ROM crcs sit in the accepted set for their
-    /// length: DMG/SGB at 256, CGB/AGB at 2304.
-    #[test]
-    fn known_boot_crcs_are_accepted() {
-        // DMG + SGB share length 256; CGB + AGB share length 2304.
-        assert!(bios_crc_is_known(BIOS_SIZE, DMG_BIOS_CRC32, 0));
-        assert!(bios_crc_is_known(CGB_BIOS_SIZE, CGB_BIOS_CRC32, 0));
-        assert!(bios_crc_is_known(CGB_BIOS_SIZE, AGB_BIOS_CRC32, 0));
-        // SGB is accepted via its UNMASKED crc, regardless of the masked value.
-        assert!(bios_crc_is_known(BIOS_SIZE, 0xDEAD_BEEF, SGB_BIOS_CRC32_UNMASKED));
-    }
-
-    /// The obscure-model boot ROMs added in Part 2 sit in the accepted masked set
-    /// for their length: DMG0/SGB2 at 256, CGB0/CGBE at 2304. MGB masks to DMG's
-    /// value (differs only at byte 0xFD) so DMG_BIOS_CRC32 covers it.
-    #[test]
-    fn extended_boot_crcs_are_accepted() {
-        assert!(bios_crc_is_known(BIOS_SIZE, DMG0_BIOS_CRC32, 0));
-        assert!(bios_crc_is_known(BIOS_SIZE, SGB2_BIOS_CRC32, 0));
-        assert!(bios_crc_is_known(CGB_BIOS_SIZE, CGB0_BIOS_CRC32, 0));
-        assert!(bios_crc_is_known(CGB_BIOS_SIZE, CGBE_BIOS_CRC32, 0));
-        // MGB shares DMG's masked crc (0x580A33B9).
-        assert!(bios_crc_is_known(BIOS_SIZE, DMG_BIOS_CRC32, 0));
-        // A 256-byte image with an unknown masked crc is still rejected.
-        assert!(!bios_crc_is_known(BIOS_SIZE, 0x1234_5678, 0));
-    }
-
-    /// The SGB unmasked path is 256-byte only and must not collide with DMG.
-    /// A DMG image (unmasked crc 0x59C8598E) is never mistaken for SGB, and the
-    /// SGB unmasked crc at the 2304 length is not accepted (vice versa).
-    #[test]
-    fn sgb_unmasked_path_is_256_only_and_distinct_from_dmg() {
-        const DMG_UNMASKED_CRC32: u32 = 0x59C8_598E; // plain crc32 of dmg_boot.bin
-        assert_ne!(SGB_BIOS_CRC32_UNMASKED, DMG_UNMASKED_CRC32);
-        // DMG's unmasked crc alone (with a non-DMG masked crc) is NOT accepted:
-        // DMG loads via its masked crc, not by being mistaken for SGB.
-        assert!(!bios_crc_is_known(BIOS_SIZE, 0xDEAD_BEEF, DMG_UNMASKED_CRC32));
-        // Vice versa: the SGB unmasked crc at CGB length is rejected.
-        assert!(!bios_crc_is_known(CGB_BIOS_SIZE, 0, SGB_BIOS_CRC32_UNMASKED));
-    }
-
-    /// Genuinely-wrong inputs are still rejected: bad length, and right length
-    /// with an unknown crc (all-zero image).
-    #[test]
-    fn wrong_length_and_wrong_crc_are_rejected() {
-        assert!(validate_bios_bytes(&[0u8; 100]).is_err());
-        assert!(validate_bios_bytes(&[0u8; BIOS_SIZE]).is_err());
-        assert!(validate_bios_bytes(&[0u8; CGB_BIOS_SIZE]).is_err());
-        // AGB's masked crc at the wrong (256) length is rejected.
-        assert!(!bios_crc_is_known(BIOS_SIZE, AGB_BIOS_CRC32, 0));
     }
 }
 

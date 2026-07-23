@@ -350,7 +350,7 @@ impl SM83 {
                         || mmio.mmio.hdma_machinery_used()
                         || !matches!(
                             mmio.halt_hdma_state(),
-                            memory::mmio::HaltHdmaState::Low
+                            memory::dma::HaltHdmaState::Low
                         );
                     // Mid-m3 LCDC-race streams keep the legacy timing.
                     let lcdc_racer = mmio.mmio.m3_lcdc_write_seen();
@@ -402,7 +402,7 @@ impl SM83 {
                     || mmio.hdma_last_fire_cc().is_some()
                     || !matches!(
                         mmio.halt_hdma_state(),
-                        memory::mmio::HaltHdmaState::Low
+                        memory::dma::HaltHdmaState::Low
                     );
                 mmio.set_halt_wakeup_hdma(hdma_wakeup);
                 // The resumed stream carries the unmodeled HALT-prefetch sub-M-cycle
@@ -473,7 +473,7 @@ impl SM83 {
                 let req_halt_peek = self.prefetched
                     && matches!(
                         mmio.halt_hdma_state(),
-                        memory::mmio::HaltHdmaState::Requested
+                        memory::dma::HaltHdmaState::Requested
                     );
                 if pending_interrupt == Some(registers::InterruptFlag::Timer)
                     && mmio.mmio.is_cgb()
@@ -500,9 +500,9 @@ impl SM83 {
                 let limit_adj: i64 = 4;
                 let in_period_unhalt = mmio.hdma_in_period_for_unhalt_adj(limit_adj);
                 let was_requested =
-                    matches!(mmio.halt_hdma_state(), memory::mmio::HaltHdmaState::Requested);
+                    matches!(mmio.halt_hdma_state(), memory::dma::HaltHdmaState::Requested);
                 match mmio.halt_hdma_state() {
-                    memory::mmio::HaltHdmaState::Requested => {
+                    memory::dma::HaltHdmaState::Requested => {
                         mmio.set_hdma_req();
                         // A multi-block Requested transfer (hdma_length() != 0) does
                         // NOT inline-fire at unhalt (gated off below); its first block
@@ -543,12 +543,12 @@ impl SM83 {
                         // transfer span, deferring it one line.
                         mmio.arm_hdma_peraccess_consume();
                     }
-                    memory::mmio::HaltHdmaState::Low
+                    memory::dma::HaltHdmaState::Low
                         if in_period_unhalt && mmio.hdma_is_enabled() =>
                     {
                         mmio.set_hdma_req()
                     }
-                    memory::mmio::HaltHdmaState::High if mmio.hdma_is_enabled() => {
+                    memory::dma::HaltHdmaState::High if mmio.hdma_is_enabled() => {
                         // High-at-halt: the held block was already served and the
                         // unhalt does NOT reflag. Hardware also consumed the following
                         // line's m0 HDMA request during the halt; our unhalt cc lands
@@ -574,7 +574,7 @@ impl SM83 {
                 let fires_before_pushes = mmio.hdma_unhalt_fires_before_pushes();
                 let noreflag_deferred = pending_is_timer
                     && mmio.hdma_is_enabled()
-                    && matches!(mmio.halt_hdma_state(), memory::mmio::HaltHdmaState::Low)
+                    && matches!(mmio.halt_hdma_state(), memory::dma::HaltHdmaState::Low)
                     && !fires_before_pushes;
                 mmio.set_hdma_unhalt_noreflag_deferred(noreflag_deferred);
                 // Engage the M-cycle fire suppression NOW (before the boundary
@@ -585,7 +585,7 @@ impl SM83 {
                 if noreflag_deferred {
                     mmio.set_hdma_mcycle_fire_suppressed(true);
                 }
-                mmio.set_halt_hdma_state(memory::mmio::HaltHdmaState::Low);
+                mmio.set_halt_hdma_state(memory::dma::HaltHdmaState::Low);
                 // Unhalt-cc / LY phase fix. A Requested-held HDMA block (flagged at
                 // halt entry) runs its dma() DURING the halt period on hardware
                 // (mid-halt, at ~mode-0 time; the unhalt NOP resumes after it). Deferring

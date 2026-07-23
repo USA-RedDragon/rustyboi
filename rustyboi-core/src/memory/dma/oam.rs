@@ -8,7 +8,13 @@
 //! A child module of `mmio`, so it reaches `Mmio`'s private fields, the engine
 //! structs and the parent's private helpers directly. Behaviour is identical
 //! to the pre-split code — this is a pure relocation.
-use super::*;
+use super::DmaSrcKind;
+use crate::memory::mmio::{
+    Mmio, CARTRIDGE_BANK_END, CARTRIDGE_BANK_START, CARTRIDGE_END, CARTRIDGE_START, EMPTY_BYTE,
+    EXTERNAL_RAM_END, EXTERNAL_RAM_START, OAM_SIZE, OAM_START, REG_DMA, VRAM_END, VRAM_START,
+    WRAM_BANK_START, WRAM_START,
+};
+use crate::memory::{self, Addressable};
 
 impl Mmio {
     /// Freeze/unfreeze the OAM-DMA across the STOP speed-switch unhalt window
@@ -44,7 +50,7 @@ impl Mmio {
     ///   - WRAM source -> the WRAM block selected by `src_high >> 4 & 1`, indexed by
     ///     the 12-bit offset (DMA source-high bit, NOT the CPU SVBK selection).
     ///   - rom/sram/vram -> normal read of `source_base + pos`.
-    pub(super) fn dma_source_byte(&self, pos: u8) -> u8 {
+    pub(in crate::memory) fn dma_source_byte(&self, pos: u8) -> u8 {
         match self.dma_src_kind() {
             // CGB src E000-FFFF: the DMA drives the external bus with the RAM
             // chip select asserted (gb-ctr "OAM DMA address decoding": all
@@ -285,7 +291,7 @@ impl Mmio {
     /// begins two M-cycles later (`dma.start_pos = dma.pos + 2`). A write while
     /// a transfer is already running schedules a restart at that point, leaving
     /// the in-flight transfer to continue until then (DMA-restart behavior).
-    pub(super) fn start_oam_dma(&mut self, value: u8) {
+    pub(in crate::memory) fn start_oam_dma(&mut self, value: u8) {
         self.dma.start_pos = self.dma.pos.wrapping_add(2);
         self.dma.subcycle = 0;
         self.dma.source_base = (value as u16) << 8;
@@ -416,7 +422,7 @@ impl Mmio {
 
     /// True while a transfer is actively placing bytes into OAM (the window in
     /// which the CPU bus conflicts with OAM DMA). Mirrors `dma.pos < 160`.
-    pub(super) fn dma_transfer_in_progress(&self) -> bool {
+    pub(in crate::memory) fn dma_transfer_in_progress(&self) -> bool {
         self.dma.active && self.dma.pos < 160
     }
 
@@ -532,7 +538,7 @@ impl Mmio {
     /// DMA copies the CPU-driven byte into `OAM[dma.pos]` instead of the
     /// original source byte. Returns true if the write was consumed here (and
     /// must not reach normal memory).
-    pub(super) fn dma_write_conflict(&mut self, addr: u16, value: u8) -> bool {
+    pub(in crate::memory) fn dma_write_conflict(&mut self, addr: u16, value: u8) -> bool {
         if !self.dma_transfer_in_progress() || !self.dma_address_conflicts(addr) {
             return false;
         }
@@ -563,7 +569,7 @@ impl Mmio {
     }
 
     /// As `dma_transfer_in_progress`, but using the read-observed position.
-    pub(super) fn dma_read_conflict_active(&self) -> bool {
+    pub(in crate::memory) fn dma_read_conflict_active(&self) -> bool {
         self.dma.active && self.dma.pos < 160
     }
 
@@ -573,7 +579,7 @@ impl Mmio {
     /// bus tick already advanced the engine before this read resolves). On CGB,
     /// a read of the WRAM region with a non-WRAM source instead returns the live
     /// WRAM byte.
-    pub(super) fn dma_conflict_byte(&self, addr: u16) -> u8 {
+    pub(in crate::memory) fn dma_conflict_byte(&self, addr: u16) -> u8 {
         // Hardware-level CGB gates: the WRAM-quirk read and
         // VRAM-source zeroing are silicon bus behaviors, active in DMG-compat
         // too (AntonioND dma_valid_sources_dmg_mode real_gbc.sav probes D0/E8/
@@ -595,7 +601,7 @@ impl Mmio {
     /// Faithful hardware model: classify the DMA
     /// source into rom/sram/vram/wram/invalid, then test a per-4KB-block
     /// conflict bitmask (which differs between DMG and CGB).
-    pub(super) fn dma_address_conflicts(&self, addr: u16) -> bool {
+    pub(in crate::memory) fn dma_address_conflicts(&self, addr: u16) -> bool {
         if addr >= OAM_START {
             return false;
         }
