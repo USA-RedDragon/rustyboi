@@ -205,6 +205,32 @@ const VF001Z_THUNK: [u8; 17] = [
     0x7F,
 ];
 
+/// Whole-ROM CRC32 (reflected IEEE) of Super Fighters S (Taiwan) (GB Compatible)
+/// (Unl). The one dump the `Vf001Zook` challenge/response set and the low-memory
+/// vector overlay below were observed on (via its de-protected twin); pinned
+/// exactly so no other VF001 cart can pick up SFS-specific behaviour.
+const VF001Z_SFS_CRC32: u32 = 0x64DB_799A;
+
+/// Super Fighters S bank-0 low-memory vectors ($0008-$002F) as the VF001-Zook
+/// board synthesises them on hardware. SFS's raw ROM carries a *packed* decoy in
+/// this region: its rst $10 handler spills across $0010-$0021, so `rst $18`
+/// ($0018) lands inside it (`cp $91`'s operand) and turns the LCD off instead of
+/// jumping to the display-enable routine at $00A2 -- the game deadlocks with
+/// interrupts never enabled. The real board serves the *unpacked* table (rst $10
+/// relocated to `jp $0088`, rst $18 = `jp $00A2`); $0000-$0007 (the far-return
+/// trampoline) and $0030+ are already correct in the raw ROM and stay untouched.
+/// PROVENANCE: OBSERVED from the byte-identical de-protected twin Super Fighters
+/// '99 -- these are exactly SF99's $0008-$002F (its rst $08 handler at $0061 and
+/// display routine at $00A2 are byte-identical to SFS's, so the dispatch targets
+/// resolve correctly). A hardware capture of the real cart's low-memory would
+/// confirm/replace them.
+const VF001Z_SFS_LOWMEM_START: u16 = 0x0008;
+const VF001Z_SFS_LOWMEM: [u8; 40] = [
+    0xC3, 0x61, 0x00, 0xFE, 0x00, 0xCA, 0x22, 0x00, 0xC3, 0x88, 0x00, 0x33, 0x00, 0xFE, 0x08, 0xCA,
+    0xC3, 0xA2, 0x00, 0x14, 0xCA, 0x55, 0x00, 0xC3, 0xF0, 0xFF, 0xE6, 0xF7, 0xE0, 0xFF, 0xC9, 0x00,
+    0xF0, 0xFF, 0xF6, 0x08, 0xE0, 0xFF, 0xC9, 0x35,
+];
+
 /// CRC32 (reflected IEEE) of the 48-byte Vast Fame secondary logo at $0184 on
 /// LiCheng / Niutoude boards. mGBA's `_detectUnlMBC` keys on these values and
 /// has shipped them with no licensed-cart false positives; a 48-byte CRC32
@@ -2878,6 +2904,18 @@ impl memory::Addressable for Cartridge {
                     return byte;
                 }
             }
+            // Super Fighters S only: the board serves an unpacked low-memory
+            // vector table over the raw ROM's packed decoy (see VF001Z_SFS_LOWMEM).
+            // Gated on the decoy signature at $0018 so Zook Z (which carries $00
+            // there) and every other cart fall straight through.
+            UnlMapper::Vf001Zook(_)
+                if (VF001Z_SFS_LOWMEM_START
+                    ..VF001Z_SFS_LOWMEM_START + VF001Z_SFS_LOWMEM.len() as u16)
+                    .contains(&addr)
+                    && self.rom_data.get(0x18..0x1B) == Some(&[0x91, 0x20, 0xFA]) =>
+            {
+                return VF001Z_SFS_LOWMEM[(addr - VF001Z_SFS_LOWMEM_START) as usize];
+            }
             // Zook Z challenge-response: the board answers through the cart-RAM
             // window. Unrecognised streams fall through to normal MBC5 RAM.
             UnlMapper::Vf001Zook(st)
@@ -5501,6 +5539,58 @@ mod tests {
             VF001Z_STREAM_MAX + 2,
             "the 32-byte window plus its two counters must be paid for by Zook Z alone"
         );
+    }
+
+    /// Super Fighters S is routed to the VF001-Zook board by its exact whole-ROM
+    /// CRC32; once there the board serves the appended challenge/response tables
+    /// AND its synthesised unpacked low-memory vectors over the packed decoy.
+    #[test]
+    fn super_fighters_s_routes_by_crc32_and_serves_lowmem_and_challenges() {
+        // Deterministic 2MB image whose whole-ROM CRC32 is VF001Z_SFS_CRC32: an
+        // MBC1 header, the packed rst-vector decoy `91 20 FA` at $0018, and a
+        // 4-byte CRC-forcing suffix. No copyrighted content whatsoever.
+        let mut rom = vec![0u8; 0x20_0000];
+        rom[CARTRIDGE_TYPE_OFFSET] = 0x01;
+        rom[0x18..0x1B].copy_from_slice(&[0x91, 0x20, 0xFA]);
+        rom[0x1F_FFFC..0x20_0000].copy_from_slice(&[0x94, 0x81, 0xA6, 0x6E]);
+        assert_eq!(crate::checksum::crc32(&rom), VF001Z_SFS_CRC32);
+
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::Vf001Zook(Box::default())
+        );
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+
+        // The board serves the unpacked vectors: rst $18 -> `jp $00A2` (the raw
+        // ROM has `91 20 FA` there), rst $10 relocated to `jp $0088`.
+        assert_eq!([cart.read(0x18), cart.read(0x19), cart.read(0x1A)], [0xC3, 0xA2, 0x00]);
+        assert_eq!([cart.read(0x10), cart.read(0x11), cart.read(0x12)], [0xC3, 0x88, 0x00]);
+        // $0000-$0007 (far-return) and $0030+ stay the raw ROM.
+        assert_eq!(cart.read(0x00), 0x00);
+        assert_eq!(cart.read(0x30), 0x00);
+
+        // An observed boot bank-select challenge answers with its bank.
+        for b in [0x36u8, 0x9F, 0x3B, 0xC0] {
+            cart.write(0x7081, b);
+        }
+        assert_eq!(cart.get_rom_bank(), 0x42);
+
+        // An observed register-0 stream answers through the cart-RAM window.
+        for b in [0xEFu8, 0xF1, 0x0C, 0xB8, 0xFF, 0x1F, 0xDE, 0x0F, 0xB6] {
+            cart.write(0x7080, b);
+        }
+        assert_eq!(cart.read(0xA080), 0x64);
+
+        // A one-byte perturbation changes the CRC: the cart no longer routes to
+        // the board and the low-memory overlay is not served.
+        let mut perturbed = rom.clone();
+        perturbed[0x8000] ^= 0x01;
+        assert_ne!(
+            Cartridge::detect_unl_mapper(&perturbed),
+            UnlMapper::Vf001Zook(Box::default())
+        );
+        let plain = Cartridge::from_bytes(&perturbed).unwrap();
+        assert_eq!(plain.read(0x18), 0x91, "raw decoy served without the SFS route");
     }
 
     #[test]
