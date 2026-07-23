@@ -2,6 +2,8 @@ pub mod controller;
 mod color_mix;
 mod fetcher;
 mod fifo;
+mod hdma;
+mod reads;
 mod stat_irq;
 
 pub use controller::{
