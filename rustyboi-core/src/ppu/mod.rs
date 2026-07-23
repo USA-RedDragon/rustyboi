@@ -2,6 +2,7 @@ pub mod controller;
 mod color_mix;
 mod fetcher;
 mod fifo;
+mod frame_out;
 mod hdma;
 mod reads;
 mod stat_irq;
