@@ -314,21 +314,6 @@ pub(crate) fn frame_buffer_mismatch(left: &[u32], right: &[u32]) -> Option<Frame
     collect_mismatch(left.iter().copied().zip(right.iter().copied()), RGB_MASK)
 }
 
-/// Like [`frame_buffer_mismatch`] but compares the FULL 0xRRGGBB with no palette
-/// mask — the raw display-colour comparison. Two frames that share a PPU palette
-/// entry but were rendered through different colour-correction curves (e.g.
-/// rustyboi's `Lcd` vs a reference's near-linear curve) differ here even though
-/// the PPU produced the same colour. Used by the docboy CGB differential's
-/// "without the invariance transform" control: it exposes the correction-curve
-/// palette noise that the masked ([`frame_buffer_mismatch`]) 15-bit compare
-/// cancels.
-pub(crate) fn frame_buffer_mismatch_exact(left: &[u32], right: &[u32]) -> Option<FrameMismatch> {
-    if left.len() != FRAMEBUFFER_SIZE || right.len() != FRAMEBUFFER_SIZE {
-        return frame_buffer_mismatch(left, right);
-    }
-    collect_mismatch(left.iter().copied().zip(right.iter().copied()), 0x00FF_FFFF)
-}
-
 /// Layout comparison that is invariant under a consistent 1:1 recoloring.
 /// Some reference screenshots were captured on an emulator whose palette differs
 /// from rustyboi's hardware-correct one — e.g. a DMG-compat cart rendered in

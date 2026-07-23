@@ -137,8 +137,9 @@ pub(crate) enum Oracle {
     /// iff every pixel's diff is <= 50 (see `frame::shootout_mismatch`). Multiple
     /// refs are an OR-match (the shootout's `pass_result` list). This mirrors the
     /// shootout's own `Emulator.runTest` + `Test.checkResult`, so the numbers are
-    /// apples-to-apples with docboy et al. Uses the Gambatte CGB color conversion
-    /// (the shootout compares full-RGB screenshots, not 5-bit-masked buckets).
+    /// apples-to-apples with the other emulators in the shootout. Uses the
+    /// Gambatte CGB color conversion (the shootout compares full-RGB screenshots,
+    /// not 5-bit-masked buckets).
     PngShootout { refs: Vec<PathBuf>, frames: usize },
 }
 

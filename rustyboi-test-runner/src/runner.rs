@@ -99,7 +99,6 @@ fn buttons_to_state(buttons: u8) -> ButtonState {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RunOptions {
     pub frames: usize,
-    pub scan_frames: usize,
     pub dump_dir: Option<PathBuf>,
     pub trace_rom: Option<String>,
     pub trace_limit: usize,
@@ -118,14 +117,6 @@ pub(crate) struct RunOptions {
     /// Base address for `--ss-dump` (default 0xC000; some tests store results
     /// in VRAM).
     pub ss_dump_base: Option<u16>,
-    /// Diagnostic / differential control: grade the c-sp PNG oracles in RAW
-    /// display-colour space — rustyboi's `Lcd` correction curve and an EXACT
-    /// (unmasked) pixel compare — instead of the default correction-invariant
-    /// 15-bit palette compare (`Linear` + 0xF8 mask). This is the "without the
-    /// invariance transform" control for the docboy CGB differential: it renders
-    /// visible the correction-curve palette noise that the palette compare
-    /// cancels. Off by default; never set by the suite gate.
-    pub csp_raw: bool,
 }
 
 /// Boot-ROM filename for a hardware model, or None when rustyboi has no distinct
@@ -461,12 +452,10 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
             case.oracle,
             Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::CspPngLayout { .. }
         );
-        // The c-sp / docboy PNG oracles grade the PPU's 15-bit palette output,
-        // recovered by the `Linear` curve + the 0xF8 compare mask (top 5 bits per
-        // channel == the RGB555 palette entry, exactly). `--csp-raw` instead
-        // grades in RAW display space (`Lcd` + exact compare) to expose the
-        // correction-curve noise the palette compare cancels.
-        let conversion = if is_csp_png && !options.csp_raw {
+        // The c-sp PNG oracles grade the PPU's 15-bit palette output, recovered
+        // by the `Linear` curve + the 0xF8 compare mask (top 5 bits per channel
+        // == the RGB555 palette entry, exactly).
+        let conversion = if is_csp_png {
             ColorCorrection::Linear
         } else {
             ColorCorrection::Lcd
@@ -616,10 +605,9 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
             let expected = frame::read_png_rgb(path)?;
 
             if let Some(mismatch) = frame::frame_buffer_mismatch(&actual, &expected) {
-                let scan_detail = scan_for_later_png_match(&mut gb, options, &expected)?;
                 let artifact_detail = dump_failure_frame(case, options, &actual, Some(&expected))?;
                 Err(format!(
-                    "screen did not match PNG {}: {}{scan_detail}{artifact_detail}",
+                    "screen did not match PNG {}: {}{artifact_detail}",
                     path.display(),
                     mismatch.describe()
                 ))
@@ -1046,29 +1034,14 @@ fn evaluate_csp_png(
     let expected = frame::read_png_rgb(refpng)
         .map_err(|e| format!("reference PNG {}: {e}", refpng.display()))?;
 
-    let mismatch = csp_frame_mismatch(&actual, &expected, recolor, options.csp_raw);
+    let mismatch = csp_frame_mismatch(&actual, &expected, recolor);
     if let Some(mismatch) = mismatch {
-        // Screen-ever-matches (docboy `FramebufferRunner` semantics): when
-        // `--scan-frames` is set, the captured frame can land one frame off the
-        // reference's completed frame. Scan forward and PASS if any subsequent
-        // frame renders the reference exactly. Only for the frame-completing
-        // (`!fixed`) path — a `png_fixed` ROM has turned the LCD off and never
-        // completes another frame. Default `--scan-frames 0` keeps the strict
-        // single-frame grade the suites gate on.
-        if !fixed
-            && options.scan_frames > 0
-            && scan_csp_for_later_match(gb, options, &expected, recolor).is_some()
-        {
-            return Ok(());
-        }
         if let Some(dir) = &options.dump_dir {
             let stem = refpng.file_stem().and_then(|s| s.to_str()).unwrap_or("case");
             let _ = frame::write_ppm(&dir.join(format!("{stem}.actual.ppm")), &actual);
             let _ = frame::write_ppm(&dir.join(format!("{stem}.expected.ppm")), &expected);
         }
-        let kind = if options.csp_raw {
-            "PNG (raw display, no invariance)"
-        } else if recolor {
+        let kind = if recolor {
             "layout (recolor-invariant)"
         } else {
             "PNG"
@@ -1433,76 +1406,19 @@ fn trace_snapshot(gb: &GB) -> TraceSnapshot {
     }
 }
 
-fn scan_for_later_png_match(
-    gb: &mut GB,
-    options: &RunOptions,
-    expected: &[u32],
-) -> Result<String, String> {
-    if options.scan_frames == 0 {
-        return Ok(String::new());
-    }
-
-    for extra_frame in 1..=options.scan_frames {
-        let (frame, _breakpoint_hit) = gb
-            .run_until_lcd_frame(false, MAX_CYCLES_UNTIL_LCD_FRAME)
-            .map_err(|error| format!("{error} while scanning extra frame {extra_frame}"))?;
-        let actual = frame::normalize_frame(gb, &frame);
-        if frame::frame_buffer_mismatch(&actual, expected).is_none() {
-            return Ok(format!(
-                "; matched after +{extra_frame} frame(s), at --frames {}",
-                options.frames + extra_frame
-            ));
-        }
-    }
-
-    Ok(format!("; no match in next {} frame(s)", options.scan_frames))
-}
-
-/// The comparison a c-sp / docboy PNG oracle uses for one frame, honouring the
-/// grading variant: `png_layout` (recolor-invariant bijection), `--csp-raw`
-/// (raw display RGB, exact), or the default correction-invariant 15-bit palette
-/// compare (`Linear` + 0xF8 mask).
+/// The comparison a c-sp PNG oracle uses for one frame, honouring the grading
+/// variant: `png_layout` (recolor-invariant bijection) or the default
+/// correction-invariant 15-bit palette compare (`Linear` + 0xF8 mask).
 fn csp_frame_mismatch(
     actual: &[u32],
     expected: &[u32],
     recolor: bool,
-    raw: bool,
 ) -> Option<frame::FrameMismatch> {
-    if raw {
-        frame::frame_buffer_mismatch_exact(actual, expected)
-    } else if recolor {
+    if recolor {
         frame::frame_buffer_mismatch_recolor(actual, expected)
     } else {
         frame::frame_buffer_mismatch(actual, expected)
     }
-}
-
-/// Screen-ever-matches scan for the c-sp PNG path: run up to `scan_frames` more
-/// LCD frames and return `Some(extra)` at the first that renders `expected`
-/// (docboy's `FramebufferRunner` "matches at some frame" semantics), else `None`.
-/// Uses the same comparison variant as the primary grade.
-fn scan_csp_for_later_match(
-    gb: &mut GB,
-    options: &RunOptions,
-    expected: &[u32],
-    recolor: bool,
-) -> Option<usize> {
-    for extra_frame in 1..=options.scan_frames {
-        // A ROM that turns the LCD off after rendering (common among the docboy
-        // PPU-off / stop tests) never completes another frame: the frame wait
-        // times out. During a forward scan that simply means "no later frame to
-        // match", so stop scanning and keep the primary mismatch — do not turn
-        // it into a harness error that would hide the real pixel diff.
-        let Ok((frame, _breakpoint_hit)) = gb.run_until_lcd_frame(false, MAX_CYCLES_UNTIL_LCD_FRAME)
-        else {
-            return None;
-        };
-        let actual = frame::normalize_frame(gb, &frame);
-        if csp_frame_mismatch(&actual, expected, recolor, options.csp_raw).is_none() {
-            return Some(extra_frame);
-        }
-    }
-    None
 }
 
 fn dump_failure_frame(

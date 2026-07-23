@@ -39,20 +39,6 @@ struct Args {
     #[arg(long)]
     fail_fast: bool,
 
-    /// After a PNG failure, scan this many additional frames and report if one
-    /// matches. On the c-sp / docboy PNG oracles this also implements docboy's
-    /// "screen-ever-matches" grading: a later matching frame counts as a PASS.
-    #[arg(long, default_value_t = 0)]
-    scan_frames: usize,
-
-    /// Grade the c-sp / docboy PNG oracles in RAW display-colour space
-    /// (rustyboi's `Lcd` correction curve + an exact, unmasked pixel compare)
-    /// instead of the default correction-invariant 15-bit palette compare
-    /// (`Linear` + 0xF8 mask). The "without the invariance transform" control for
-    /// the docboy CGB differential; exposes correction-curve palette noise.
-    #[arg(long)]
-    csp_raw: bool,
-
     /// Write failing actual/expected frames as PPM files.
     #[arg(long, value_name = "DIR")]
     dump_dir: Option<PathBuf>,
@@ -229,7 +215,6 @@ fn run() -> Result<u8, String> {
     };
     let run_options = runner::RunOptions {
         frames: args.frames,
-        scan_frames: args.scan_frames,
         dump_dir: args.dump_dir.clone(),
         trace_rom: args.trace_rom.clone(),
         trace_limit: args.trace_limit,
@@ -239,7 +224,6 @@ fn run() -> Result<u8, String> {
         bios_dir: args.bios_dir.clone(),
         ss_dump: args.ss_dump,
         ss_dump_base: args.ss_dump_base,
-        csp_raw: args.csp_raw,
     };
 
     run_cases(cases, &run_options, resolve_jobs(&args), args.fail_fast, &mut summary)?;
@@ -387,7 +371,6 @@ fn run_manifest(
     let mut summary = Summary::default();
     let run_options = runner::RunOptions {
         frames: args.frames,
-        scan_frames: args.scan_frames,
         dump_dir: args.dump_dir.clone(),
         trace_rom: args.trace_rom.clone(),
         trace_limit: args.trace_limit,
@@ -397,7 +380,6 @@ fn run_manifest(
         bios_dir: args.bios_dir.clone(),
         ss_dump: args.ss_dump,
         ss_dump_base: args.ss_dump_base,
-        csp_raw: args.csp_raw,
     };
 
     run_cases(cases, &run_options, resolve_jobs(args), args.fail_fast, &mut summary)?;
