@@ -14,3 +14,9 @@ brotli = { version = "=8.0.4", optional = true }
 [features]
 default = ["encode"]
 encode = ["dep:brotli"]
+
+# Dev-only: the byte-exact test (`tests/exact.rs`) drives the real core to prove
+# its LIVE mixed output equals the RBA2 encode->decode round-trip. Dev-deps are
+# not transitive, so this never reaches rustyboi-replay-web's wasm build.
+[dev-dependencies]
+rustyboi-core = { workspace = true }
