@@ -132,6 +132,7 @@ mod cpal_backend {
         }
 
         fn add_samples(&mut self, samples: &[(f32, f32)]) {
+            let Some(prod) = self.prod.as_mut() else { return };
             if samples.is_empty() {
                 return;
             }
@@ -141,6 +142,61 @@ mod cpal_backend {
                 self.scratch.push(left * VOLUME);
                 self.scratch.push(right * VOLUME);
             }
+            // A full ring (production outran the device) drops the excess,
+            // bounding latency.
+            prod.push_slice(&self.scratch);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ringbuf::{
+            traits::{Consumer, Split},
+            HeapCons, HeapRb,
+        };
+
+        /// Install a ring producer directly, bypassing `start()` (which opens a
+        /// real cpal device). Returns the consumer end so tests can inspect what
+        /// the callback would drain.
+        fn wire_ring(out: &mut Output) -> HeapCons<f32> {
+            let (prod, cons) = HeapRb::<f32>::new(RING_FRAMES * SAMPLES_PER_FRAME * 2).split();
+            out.prod = Some(prod);
+            cons
+        }
+
+        /// The regression guard: `add_samples` MUST enqueue into the ring. When
+        /// the `push_slice` was trimmed, `scratch` filled but the ring stayed
+        /// empty and the callback zero-filled forever (silent desktop audio).
+        #[test]
+        fn add_samples_feeds_the_ring() {
+            let mut out = Output::new().unwrap();
+            let mut cons = wire_ring(&mut out);
+
+            out.push_samples(&[(1.0, -1.0), (0.5, -0.5)]);
+
+            assert_eq!(out.queued_pairs(), 2, "samples must reach the ring");
+
+            let mut drained = [0.0f32; 4];
+            assert_eq!(cons.pop_slice(&mut drained), 4);
+            // Interleaved L/R, scaled by VOLUME.
+            assert_eq!(drained, [VOLUME, -VOLUME, 0.5 * VOLUME, -0.5 * VOLUME]);
+        }
+
+        #[test]
+        fn add_samples_is_a_noop_before_the_device_starts() {
+            // No ring wired yet: must not panic, must enqueue nothing.
+            let mut out = Output::new().unwrap();
+            out.push_samples(&[(1.0, -1.0)]);
+            assert_eq!(out.queued_pairs(), 0);
+        }
+
+        #[test]
+        fn empty_push_is_a_noop() {
+            let mut out = Output::new().unwrap();
+            let _cons = wire_ring(&mut out);
+            out.push_samples(&[]);
+            assert_eq!(out.queued_pairs(), 0);
         }
     }
 }
