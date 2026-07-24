@@ -159,7 +159,7 @@ const USAGE_RUN: &str = "sweep run     --roms DIR... [--list FILE] --out DIR [--
                          [--warmup N] [--jobs N] [--timeout SECS] [--no-screens] \
                          [--no-recordings] [--rec-frames N] [--videos] [--no-bios-meta] \
                          [--bios-dir DIR] [--hardware dmg,cgb,sgb,agb] [--only SUBSTR] \
-                         [--shard K/N] [--strip-names] [--dump-pcm] [--dump-chan]";
+                         [--shard K/N] [--strip-names] [--dump-pcm] [--dump-chan] [--no-audio]";
 const USAGE_COMPARE: &str = "sweep compare --base A.jsonl --cand B.jsonl [--min-ratio R] \
                              [--ignore-perf] [--out report.md]";
 const USAGE_GALLERY: &str = "sweep gallery --manifest M.jsonl --screens DIR [--videos DIR] \
@@ -259,6 +259,10 @@ struct RunCfg {
     sgb_firmware: Vec<(Hardware, Arc<Vec<u8>>)>,
     /// CRC32 -> No-Intro game name (auto-fetched DATs). Empty = file stems.
     names: std::collections::HashMap<u32, String>,
+    /// Whether the canonical `emulate` pass collects audio (the default). Cleared
+    /// by `--no-audio` to run the analytic wave-jump path for the WP5(2) wave
+    /// on/off video cross-check; when false, `audio_hash_all` is left blank.
+    collect_audio: bool,
 }
 
 /// Short lowercase tag for a hardware model — the media-filename suffix and the
@@ -417,7 +421,7 @@ const RUN_VALUE_FLAGS: &[&str] = &[
 /// parser ignoring everything it did not recognise.
 const RUN_SWITCH_FLAGS: &[&str] = &[
     "--no-screens", "--videos", "--no-recordings", "--no-bios-meta", "--strip-names",
-    "--dump-pcm", "--dump-chan", "--recordings", "--no-videos",
+    "--dump-pcm", "--dump-chan", "--recordings", "--no-videos", "--no-audio",
 ];
 
 fn cmd_run(args: &[String]) -> Result<bool, String> {
@@ -438,6 +442,15 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     let strip_names = args.iter().any(|a| a == "--strip-names");
     let dump_pcm = args.iter().any(|a| a == "--dump-pcm");
     let dump_chan = args.iter().any(|a| a == "--dump-chan");
+    // WP5(2) wave on/off cross-check: `--no-audio` forces the canonical manifest
+    // pass (`emulate`) to run with audio collection OFF, so the CPU-visible frame
+    // hashes reflect the analytic wave-jump path (what the 28 suites + bench run)
+    // instead of the observing wave fetch-loop (what the library baseline runs).
+    // Diffing this manifest's video `hash_all` columns against the audio-on
+    // baseline surfaces any CPU-visible fork between the two wave code paths
+    // (risk #10) BEFORE a regen bakes it in. Audio-hash columns are left blank in
+    // this mode (not measured).
+    let no_audio = args.iter().any(|a| a == "--no-audio");
     let rec_frames: usize = parse_num(args, "--rec-frames", 900)?;
     let only = arg(args, "--only");
     let shard = arg(args, "--shard");
@@ -574,6 +587,7 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
         sgb_firmware: load_sgb_firmwares(bios_dir.as_deref(), &hardware),
         hardware,
         names,
+        collect_audio: !no_audio,
     };
 
     let pool = {
@@ -900,12 +914,17 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
                 .into_iter()
                 .map(|(f, h)| (f, format!("{h:016x}")))
                 .collect();
-            row.audio_hash_all = format!("{:016x}", out.audio_hash_all);
-            row.audio_checkpoints = out
-                .audio_checkpoints
-                .into_iter()
-                .map(|(f, h)| (f, format!("{h:016x}")))
-                .collect();
+            // `--no-audio` (cfg.collect_audio = false) runs the analytic wave path
+            // for the WP5(2) video cross-check and measures no audio; leave the
+            // audio columns blank so a diff never mistakes them for real hashes.
+            if cfg.collect_audio {
+                row.audio_hash_all = format!("{:016x}", out.audio_hash_all);
+                row.audio_checkpoints = out
+                    .audio_checkpoints
+                    .into_iter()
+                    .map(|(f, h)| (f, format!("{h:016x}")))
+                    .collect();
+            }
             row.boot_ok = out.boot_ok;
             row.changed = out.changed;
             row.fps = Some(out.fps);
@@ -1012,10 +1031,15 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
 
     // Audio fingerprint: collect the final mixed stereo output (same tap as
     // `--dump-pcm`) so APU/mix/DAC regressions are gated alongside the frame
-    // hash. Always on in the regression path — the sink is drained every frame
-    // below so it never buffers the whole run.
+    // hash. Default-on in the regression path — the sink is drained every frame
+    // below so it never buffers the whole run. `--no-audio` (cfg.collect_audio =
+    // false) skips it to run the analytic wave-jump path for the WP5(2) video
+    // cross-check; the audio hash is then left unmeasured.
+    let collect = cfg.collect_audio;
     let sink = SampleSink::default();
-    gb.enable_audio(Box::new(sink.clone())).map_err(|e| format!("audio: {e}"))?;
+    if collect {
+        gb.enable_audio(Box::new(sink.clone())).map_err(|e| format!("audio: {e}"))?;
+    }
 
     // Checkpoints at warmup and every ~quarter of the measured window.
     let span = cfg.frames - cfg.warmup;
@@ -1040,7 +1064,7 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
             timer = Some(Instant::now());
         }
         gb.set_input_state(masher(f, seed));
-        let (frame, _bp) = gb.run_until_frame(true);
+        let (frame, _bp) = gb.run_until_frame(collect);
         let h = frame_hash(&gb, &frame);
         hash_all = (hash_all ^ h).wrapping_mul(FNV_PRIME);
         if checkpoint_at.contains(&(f + 1)) {
@@ -1051,18 +1075,22 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
         // whole-run fold — at the SAME checkpoint frames as video. An all-silent
         // (empty) frame still advances `audio_hash_all` deterministically via the
         // outer fold, so a regression that adds/removes samples is caught. Drained
-        // every frame so the sink never accumulates the whole run.
-        let mut buf = sink.0.lock().unwrap_or_else(|e| e.into_inner());
-        let mut ah: u64 = 0xcbf2_9ce4_8422_2325;
-        for (l, r) in buf.iter() {
-            for b in f32_to_s16le(*l) { ah ^= b as u64; ah = ah.wrapping_mul(FNV_PRIME); }
-            for b in f32_to_s16le(*r) { ah ^= b as u64; ah = ah.wrapping_mul(FNV_PRIME); }
-        }
-        buf.clear();
-        drop(buf);
-        audio_hash_all = (audio_hash_all ^ ah).wrapping_mul(FNV_PRIME);
-        if checkpoint_at.contains(&(f + 1)) {
-            audio_checkpoints.push((f + 1, audio_hash_all));
+        // every frame so the sink never accumulates the whole run. Skipped whole
+        // under `--no-audio` (no sink was attached): the audio hash stays at the
+        // seed and `run_one` reports it blank (not measured).
+        if collect {
+            let mut buf = sink.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut ah: u64 = 0xcbf2_9ce4_8422_2325;
+            for (l, r) in buf.iter() {
+                for b in f32_to_s16le(*l) { ah ^= b as u64; ah = ah.wrapping_mul(FNV_PRIME); }
+                for b in f32_to_s16le(*r) { ah ^= b as u64; ah = ah.wrapping_mul(FNV_PRIME); }
+            }
+            buf.clear();
+            drop(buf);
+            audio_hash_all = (audio_hash_all ^ ah).wrapping_mul(FNV_PRIME);
+            if checkpoint_at.contains(&(f + 1)) {
+                audio_checkpoints.push((f + 1, audio_hash_all));
+            }
         }
         match first_hash {
             None => first_hash = Some(h),
