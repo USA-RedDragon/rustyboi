@@ -1900,6 +1900,9 @@ impl Mmio {
     pub(crate) fn sync_apu_for_read(&mut self) {
         self.sync_apu_cc();
         self.audio.sync_wave_for_read();
+        // The wave/noise fetch advance emits transitions outside the chunk
+        // postlude; drain them (and any level change) into the grid.
+        self.audio.note_and_drain();
     }
 
     /// Resolve the APU length subsystem at the canonical CPU-access cc.
@@ -1911,6 +1914,9 @@ impl Mmio {
         self.sync_apu_cc();
         self.audio.sync_wave_for_read();
         self.audio.set_read_len_cc(read_abs_cc);
+        // Fetch advance + length-expiry at the access cc are outside the chunk
+        // postlude; drain them into the grid.
+        self.audio.note_and_drain();
     }
 
     /// Resolve the APU length subsystem at the canonical CPU WRITE access cc.
@@ -1933,6 +1939,9 @@ impl Mmio {
         self.audio.set_write_len_cc(write_cc);
         self.audio.write(addr, value);
         self.audio.restore_len_cc();
+        // The register write's level + mix changes (trigger, DAC off, envelope,
+        // NR50/51/52) land outside the chunk postlude; drain them into the grid.
+        self.audio.note_and_drain();
     }
 
     /// The canonical CPU-access cc the timer resolves register accesses on.
@@ -2041,7 +2050,7 @@ impl Mmio {
         self.audio.set_channel_tap(on);
     }
 
-    pub fn drain_channel_tap(&mut self) -> Vec<audio::ChannelSample> {
+    pub fn drain_channel_tap(&mut self) -> Vec<audio::SampleRecord> {
         self.audio.drain_channel_tap()
     }
 
@@ -2049,12 +2058,26 @@ impl Mmio {
         self.audio.mixes_digitally()
     }
 
-    pub(crate) fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
-        // Catch the lazy APU up to the current cc first so the mixer state the
-        // down-sampler reads is the instruction-end state (the same state the
-        // per-dot crank used to leave it in).
+    /// Bind the APU's transition emission to the audio-collect request (threaded
+    /// from `GB::step_instruction`), so headless suite runs (which never pull
+    /// samples) never accumulate `pending`, and observing runs start from truth.
+    pub(crate) fn set_apu_observing(&mut self, on: bool) {
+        self.audio.set_observing(on);
+    }
+
+    pub(crate) fn generate_audio_samples(&mut self) -> Vec<(f32, f32)> {
+        // Catch the lazy APU (and the synth grid) up to the current cc first, so
+        // the pull sees every transition through the instruction-end state.
         self.sync_apu_cc();
-        self.audio.generate_samples(cpu_cycles)
+        self.audio.generate_samples()
+    }
+
+    /// STOP-window audio: the master clock is frozen, so a normal sync/pull
+    /// would emit nothing. Advance the grid by the STOP wall-time (`apu_cycles`,
+    /// already speed-normalized) and pull held samples, WITHOUT syncing (there
+    /// is no new master time to sync to).
+    pub(crate) fn generate_stop_audio_samples(&mut self, apu_cycles: u64) -> Vec<(f32, f32)> {
+        self.audio.generate_stop_samples(apu_cycles)
     }
 
     /// CPU has left HALT. Clears the halted mirror so the

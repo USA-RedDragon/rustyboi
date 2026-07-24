@@ -195,10 +195,28 @@ pub(super) struct SquareWave {
     #[serde(default)]
     cgb: bool,
 
+    // --- Band-limited synthesis emission ---
+    // Output-level transitions (folded cc, output code), filled per duty tick
+    // while observing and drained into the controller's sample grid at each
+    // chunk postlude, so it never spans a cc fold. Not serialized: never spans
+    // an instruction boundary.
+    #[serde(skip)]
+    pending: Vec<(u32, u8)>,
+    // The last emitted output code, so a transition is pushed only on change.
+    // Serialized so a load resumes without a spurious first transition.
+    #[serde(default = "default_off_code")]
+    last_code: u8,
+    // Whether the sample stream is being pulled; gates the pending pushes.
+    #[serde(skip)]
+    observing: bool,
 }
 
 fn default_lf_div() -> u32 {
     1
+}
+
+fn default_off_code() -> u8 {
+    crate::audio::synth::DAC_OFF_CODE
 }
 
 impl SquareWave {
@@ -241,11 +259,56 @@ impl SquareWave {
             sweep_kill_counter: COUNTER_DISABLED,
             sweep_neg: false,
             cgb: false,
+            pending: Vec::new(),
+            last_code: crate::audio::synth::DAC_OFF_CODE,
+            observing: false,
         }
     }
 
     pub(super) fn set_cc(&mut self, cc: u32) {
         self.cc = cc;
+    }
+
+    /// Drain buffer for the controller's per-postlude sample-grid drain.
+    pub(super) fn pending_mut(&mut self) -> &mut Vec<(u32, u8)> {
+        &mut self.pending
+    }
+
+    /// Engage/disengage transition emission (bound to the audio-collect request).
+    pub(super) fn set_observing(&mut self, on: bool) {
+        self.observing = on;
+    }
+
+    /// The channel's discrete output code: `0..=15` for a live DAC nibble, or
+    /// [`DAC_OFF_CODE`](crate::audio::synth::DAC_OFF_CODE) for a non-AGB dead
+    /// DAC. Resolves (via `synth::resolve_level`) to exactly `channel_outputs`.
+    fn output_code(&self) -> u8 {
+        if !self.agb && !self.dac_on() {
+            crate::audio::synth::DAC_OFF_CODE
+        } else {
+            self.pcm_nibble()
+        }
+    }
+
+    /// Push a transition iff the output level changed. Cheap (one branch) when
+    /// not observing; the reseed on the observing rising edge re-establishes
+    /// `last_code`, so it need not track while idle.
+    pub(super) fn note_level(&mut self, cc: u32) {
+        if !self.observing {
+            return;
+        }
+        let code = self.output_code();
+        if code != self.last_code {
+            self.last_code = code;
+            self.pending.push((cc, code));
+        }
+    }
+
+    /// Force the current level to be emitted (observing rising edge), so the
+    /// renderer is driven from truth rather than a stale ring level.
+    pub(super) fn reseed_level(&mut self, cc: u32) {
+        self.last_code = 0xFF;
+        self.note_level(cc);
     }
 
     /// The `lf_div` (2 MHz sub-phase) used by the trigger delay formula.
@@ -444,6 +507,8 @@ impl SquareWave {
             // cc this tick landed on (batch span minus what remains).
             self.last_tick_cc = cc.wrapping_sub(cycles_left);
             self.last_tick_pre_zero = pre_zero;
+            // Emit the duty edge at its exact cc (dedup + observing-gated).
+            self.note_level(self.last_tick_cc);
         }
         self.just_reloaded = cycles_left == 0;
         self.sample_countdown -= cycles_left;
@@ -962,6 +1027,7 @@ impl SquareWave {
 
     /// The channel's analog output. The audible path and the CGB-observable
     /// PCM12 path are the same digital sample by construction.
+    #[cfg(test)]
     pub(super) fn get_output(&self) -> f32 {
         if !self.dac_on() {
             return 0.0;

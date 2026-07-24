@@ -17,6 +17,13 @@ crate-type = ["rlib"]
 # would otherwise pull the whole clap parser and its proc-macros.
 cli = ["dep:clap"]
 
+# Release-safe audit of the band-limited synth's fold/drain invariants: upgrades
+# the `debug_assert!`-guarded "pending drained before every cc fold" tripwires to
+# always-run panics. Needed because the suite gates and the library baseline
+# regen run RELEASE, where `debug_assert!` is compiled out; WP5 runs one
+# >9-emulated-minute audited sweep crossing the 0x6000_0000 epoch fold.
+synth-audit = []
+
 [dependencies]
 clap = { workspace = true, optional = true }
 rustyboi-mix = { workspace = true, features = ["serde"] }

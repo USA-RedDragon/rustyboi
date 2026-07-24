@@ -120,6 +120,18 @@ pub(super) struct Noise {
     // CGB-B-or-earlier APU revision gate (see `len_nr4_change`).
     #[serde(default)]
     cgb_le_b: bool,
+
+    // --- Band-limited synthesis emission (see square.rs) ---
+    #[serde(skip)]
+    pending: Vec<(u32, u8)>,
+    #[serde(default = "default_off_code")]
+    last_code: u8,
+    #[serde(skip)]
+    observing: bool,
+}
+
+fn default_off_code() -> u8 {
+    crate::audio::synth::DAC_OFF_CODE
 }
 
 impl Noise {
@@ -161,11 +173,46 @@ impl Noise {
             cgb_de: false,
             agb: false,
             cgb_le_b: false,
+            pending: Vec::new(),
+            last_code: crate::audio::synth::DAC_OFF_CODE,
+            observing: false,
         }
     }
 
     pub(super) fn set_cc(&mut self, cc: u32) {
         self.cc = cc;
+    }
+
+    pub(super) fn pending_mut(&mut self) -> &mut Vec<(u32, u8)> {
+        &mut self.pending
+    }
+
+    pub(super) fn set_observing(&mut self, on: bool) {
+        self.observing = on;
+    }
+
+    fn output_code(&self) -> u8 {
+        if !self.agb && !self.dac_on() {
+            crate::audio::synth::DAC_OFF_CODE
+        } else {
+            self.pcm_nibble()
+        }
+    }
+
+    pub(super) fn note_level(&mut self, cc: u32) {
+        if !self.observing {
+            return;
+        }
+        let code = self.output_code();
+        if code != self.last_code {
+            self.last_code = code;
+            self.pending.push((cc, code));
+        }
+    }
+
+    pub(super) fn reseed_level(&mut self, cc: u32) {
+        self.last_code = 0xFF;
+        self.note_level(cc);
     }
 
     pub(super) fn set_cgb(&mut self, cgb: bool) {
@@ -324,7 +371,10 @@ impl Noise {
                 // otherwise anchor the envelope race on.
                 let crossing_cc = self.cc.wrapping_sub(cycles).wrapping_add(head);
                 cycles -= head;
-                self.run_batch(head);
+                // The head window ENDS at the crossing, not at `self.cc` (the
+                // full-batch end); its LFSR steps must anchor there or the ch4
+                // delayed-start drumroll edges land in the wrong sample.
+                self.run_batch(head, crossing_cc);
                 let nr44 = self.nr44 | 0x80;
                 // The deferred re-application is the trigger *taking effect* — it
                 // must actually start the channel, never re-arm another 6-cycle
@@ -347,15 +397,20 @@ impl Noise {
                 self.deferred_reapply_cc = Some(crossing_cc);
                 self.write_nrx4(nr44);
                 self.deferred_reapply_cc = None;
+                // The deferred trigger's own reseed (LFSR/current_sample) is an
+                // output change at the crossing.
+                self.note_level(crossing_cc);
                 if cycles == 0 {
                     return;
                 }
             }
         }
-        self.run_batch(cycles);
+        self.run_batch(cycles, self.cc);
     }
 
-    fn run_batch(&mut self, cycles: u32) {
+    /// `end_cc` is the master cc at the END of this sub-batch's window; each
+    /// LFSR step lands at `end_cc - cycles_left` after its counter increment.
+    fn run_batch(&mut self, cycles: u32, end_cc: u32) {
         self.alignment = self.alignment.wrapping_add(cycles);
         if !(self.ripple_active || self.background_active) {
             return;
@@ -378,6 +433,8 @@ impl Noise {
             let new_bit = self.counter & mask != 0;
             if new_bit && !old_bit && self.enabled {
                 self.step_lfsr();
+                // The LFSR output bit changed the level; emit at the step cc.
+                self.note_level(end_cc.wrapping_sub(cycles_left));
             }
         }
         if cycles_left > 0 {
@@ -825,6 +882,7 @@ impl Noise {
 
     /// The channel's analog output. The audible path and the CGB-observable
     /// PCM34 path are the same digital sample by construction.
+    #[cfg(test)]
     pub(super) fn get_output(&self) -> f32 {
         if !self.dac_on() {
             return 0.0;

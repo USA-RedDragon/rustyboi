@@ -67,6 +67,18 @@ pub(super) struct Wave {
     cgb_b: bool,
     #[serde(default)]
     glitch_armed: bool,
+
+    // --- Band-limited synthesis emission (see square.rs) ---
+    #[serde(skip)]
+    pending: Vec<(u32, u8)>,
+    #[serde(default = "default_off_code")]
+    last_code: u8,
+    #[serde(skip)]
+    observing: bool,
+}
+
+fn default_off_code() -> u8 {
+    crate::audio::synth::DAC_OFF_CODE
 }
 
 impl Wave {
@@ -94,11 +106,46 @@ impl Wave {
             cgb_le_b: false,
             cgb_b: false,
             glitch_armed: false,
+            pending: Vec::new(),
+            last_code: crate::audio::synth::DAC_OFF_CODE,
+            observing: false,
         }
     }
 
     pub(super) fn set_cc(&mut self, cc: u32) {
         self.cc = cc;
+    }
+
+    pub(super) fn pending_mut(&mut self) -> &mut Vec<(u32, u8)> {
+        &mut self.pending
+    }
+
+    pub(super) fn set_observing(&mut self, on: bool) {
+        self.observing = on;
+    }
+
+    fn output_code(&self) -> u8 {
+        if !self.agb && !self.dac_on() {
+            crate::audio::synth::DAC_OFF_CODE
+        } else {
+            self.pcm_nibble()
+        }
+    }
+
+    pub(super) fn note_level(&mut self, cc: u32) {
+        if !self.observing {
+            return;
+        }
+        let code = self.output_code();
+        if code != self.last_code {
+            self.last_code = code;
+            self.pending.push((cc, code));
+        }
+    }
+
+    pub(super) fn reseed_level(&mut self, cc: u32) {
+        self.last_code = 0xFF;
+        self.note_level(cc);
     }
 
     /// Shift the last-read and next-fetch cc anchors back by the cc delta
@@ -186,6 +233,21 @@ impl Wave {
             return;
         }
         let period = self.period();
+        if self.observing {
+            // Step each fetch so every sample-buffer change is emitted at its
+            // exact cc. Byte-identical to the analytic jump below in
+            // wave_pos / sample_buf / last_read_time / wave_counter.
+            let mut wc = self.wave_counter;
+            while wc <= cc {
+                self.wave_pos = (self.wave_pos + 1) & 31;
+                self.sample_buf = self.wave_ram[(self.wave_pos >> 1) as usize];
+                self.last_read_time = wc;
+                self.note_level(wc);
+                wc += period;
+            }
+            self.wave_counter = wc;
+            return;
+        }
         // The pending fetch at `wave_counter`, plus every whole period elapsed
         // since, each step the 32-entry position once (32 nibble-pairs wrap).
         let elapsed = (cc - self.wave_counter) / period;
@@ -319,6 +381,7 @@ impl Wave {
     /// clear nor refresh this buffer, so the last sample ever read will be
     /// emitted again." The audible path and the CGB-observable PCM34 path are
     /// therefore the same latch, which is what hardware has.
+    #[cfg(test)]
     pub(super) fn get_output(&self) -> f32 {
         if !self.dac_on() {
             return 0.0;

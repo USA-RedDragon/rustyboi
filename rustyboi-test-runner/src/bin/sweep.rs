@@ -1444,14 +1444,20 @@ fn capture_media(
                 if let Some(enc) = &mut audio_rec
                     && f < cfg.rec_frames
                 {
-                    enc.push(&tapped);
+                    // WP2 keeps the RBA1 encoder, which takes the pre-BLEP level
+                    // tuple; WP4 upgrades this to RBA2 (per-sample phase planes).
+                    let legacy: Vec<_> = tapped
+                        .iter()
+                        .map(|r| (r.levels, r.nr50, r.nr51, r.enabled))
+                        .collect();
+                    enc.push(&legacy);
                 }
                 if let Some(w) = &mut chan_out {
-                    for (chs, nr50, nr51, en) in &tapped {
-                        for c in chs {
+                    for r in &tapped {
+                        for c in &r.levels {
                             let _ = w.write_all(&c.to_le_bytes());
                         }
-                        let _ = w.write_all(&[*nr50, *nr51, u8::from(*en), 0]);
+                        let _ = w.write_all(&[r.nr50, r.nr51, u8::from(r.enabled), 0]);
                     }
                 }
                 // Recording window over (and no dump in flight): stop tapping so
@@ -1791,7 +1797,12 @@ fn capture_bios(
             enc.push_rgb_scroll(&rgb, gb.read_memory(0xFF43), gb.read_memory(0xFF42));
         }
         if let Some(enc) = &mut audio_rec {
-            enc.push(&gb.drain_channel_tap());
+            let tapped = gb.drain_channel_tap();
+            let legacy: Vec<_> = tapped
+                .iter()
+                .map(|r| (r.levels, r.nr50, r.nr51, r.enabled))
+                .collect();
+            enc.push(&legacy);
         }
         if let Some(child) = &mut encoder
             && let Some(stdin) = child.stdin.as_mut()

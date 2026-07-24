@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use crate::audio::{analog, wave, square, noise};
+use crate::audio::synth::SynthBox;
 use crate::memory::Addressable;
+use rustyboi_mix::{BlepKernel, SampleRecord};
 
 pub(crate) const NR10: u16 = 0xFF10; // Channel 1 sweep register
 pub(crate) const NR11: u16 = 0xFF11; // Channel 1 sound length/wave pattern duty
@@ -47,15 +49,13 @@ pub struct Audio {
     // Audio enabled flag
     audio_enabled: bool,
 
-    // Sample generation timing
-    fractional_cycles: f32,
-
-    // Dots per 44.1 kHz host sample = cpu_hz / 44100. Host resampling only, not
-    // machine state (an SGB1's dot timeline is identical to a DMG's — only the
-    // wall-clock rate those dots are played back at differs), so it is skipped
-    // in the savestate and re-seeded from the model by `GB::set_region`.
-    #[serde(skip, default = "default_cycles_per_sample")]
-    cycles_per_sample: f32,
+    // The machine's real-time CPU clock (an SGB1's differs), fixing how many
+    // APU cycles fill one 44.1 kHz host sample via the synth grid. Host
+    // resampling only, not machine state (an SGB1's dot timeline is identical to
+    // a DMG's), so it is skipped in the savestate and re-seeded from the model
+    // by `GB::set_region` / `set_cpu_hz`.
+    #[serde(skip, default = "default_cpu_hz")]
+    cpu_hz: u32,
 
     // APU master clock — an absolute 2 MHz counter (mod 0x8000_0000) anchored
     // at boot. Driven from the timer's absolute `abs_cc`: each `sync_cc`
@@ -126,27 +126,20 @@ pub struct Audio {
     // CGB-D/E APU revision gate; false = the default CGB-C model.
     #[serde(default)]
     cgb_de: bool,
-    // Optional per-sample tap of the pre-mix channel outputs + mix registers,
-    // filled by `generate_samples` when engaged. Recording/measurement only;
-    // never serialized
-    #[serde(skip)]
-    channel_tap: Option<Vec<ChannelSample>>,
-    // The analog output stage (DAC-off fade + output high-pass). Serialized so
-    // a load / rewind step resumes the filter where it was instead of ringing
-    // out a restart transient; its model-derived charge factor is the one part
-    // that is re-seeded by `set_analog_model` rather than stored.
+    // The band-limited synthesis state: the absolute-cc sample grid, the open
+    // per-sample transition slots, and the shared `Renderer` (whose continuous
+    // analog state — rings, fade, high-pass capacitors — is the one serialized
+    // part, so a load / rewind step resumes mid-transition without a pop). The
+    // renderer's model-derived charge factor + AGB gate are re-seeded by
+    // `set_analog_model` rather than stored. Boxed to keep `Mmio` under the
+    // struct-size guard (the ring table + kernel live on the heap).
     #[serde(default)]
-    analog: analog::AnalogStage,
+    synth: Box<SynthBox>,
+    // The band-limited step kernel — deterministic and identical on every
+    // platform, so it is rebuilt on load rather than serialized.
+    #[serde(skip, default = "default_kernel")]
+    kernel: Box<BlepKernel>,
 }
-
-/// One tapped sample: pre-mix channel outputs [ch1..ch4] + the mix registers
-/// (nr50, nr51) + the master enable — everything [`Audio::mix_tap_sample`]
-/// consumes, so the stereo mix is exactly reconstructible from the tap alone.
-///
-/// The channel outputs are post-DAC but PRE-analog-stage: the DAC-off fade and
-/// the output high-pass are continuous and sit downstream of the tap, so a tap
-/// value is always one of the 16 DAC levels or 0.0 for an unpowered DAC.
-pub type ChannelSample = ([f32; 4], u8, u8, bool);
 
 fn default_ctl_lf_div() -> u32 {
     1
@@ -157,8 +150,12 @@ fn default_ctl_lf_div() -> u32 {
 /// at its historical path.
 pub use rustyboi_mix::HOST_SAMPLE_RATE;
 
-fn default_cycles_per_sample() -> f32 {
-    crate::gb::DMG_CPU_HZ as f32 / HOST_SAMPLE_RATE
+fn default_cpu_hz() -> u32 {
+    crate::gb::DMG_CPU_HZ
+}
+
+fn default_kernel() -> Box<BlepKernel> {
+    Box::new(BlepKernel::build())
 }
 
 impl Default for Audio {
@@ -179,8 +176,7 @@ impl Audio {
             nr52: 0,
             len_cc: 0,
             audio_enabled: false,
-            fractional_cycles: 0.0,
-            cycles_per_sample: default_cycles_per_sample(),
+            cpu_hz: default_cpu_hz(),
             cc: 0,
             last_update: 0,
             last_div_resets: 0,
@@ -193,26 +189,74 @@ impl Audio {
             div_divider: 0,
             skip_div_event: 0,
             cgb_de: false,
-            channel_tap: None,
-            analog: analog::AnalogStage::default(),
+            synth: Box::default(),
+            kernel: default_kernel(),
         }
     }
 
     /// Select the analog stage's model family (the DAC-off fade and output
-    /// high-pass share one RC per machine). Called from `GB::new` and re-applied
-    /// after a savestate load, exactly like the other hardware-identity setters.
+    /// high-pass share one RC per machine, and the AGB gate). Called from
+    /// `GB::new` and re-applied after a savestate load — the single point that
+    /// re-seeds the renderer's `#[serde(skip)]` model-derived state, exactly
+    /// like the other hardware-identity setters.
     pub(crate) fn set_analog_model(&mut self, model: analog::AnalogModel) {
-        self.analog.set_model(model);
+        self.synth.set_model(model);
+        // The channels' observing flags are `#[serde(skip)]`; re-sync them from
+        // the serialized synth flag so a machine saved mid-observe resumes with
+        // its channels emitting (this runs in the post-load reseed path).
+        let obs = self.synth.observing();
+        self.push_observing(obs);
     }
 
     /// Engage/disengage the per-sample channel tap (recording/measurement).
     pub fn set_channel_tap(&mut self, on: bool) {
-        self.channel_tap = on.then(Vec::new);
+        self.synth.set_tap(on);
     }
 
-    /// Take the tapped samples accumulated since the last drain.
-    pub fn drain_channel_tap(&mut self) -> Vec<ChannelSample> {
-        self.channel_tap.as_mut().map(std::mem::take).unwrap_or_default()
+    /// Take the tapped [`SampleRecord`]s accumulated since the last drain.
+    pub fn drain_channel_tap(&mut self) -> Vec<SampleRecord> {
+        self.synth.drain_tap()
+    }
+
+    /// Bind transition emission to the audio-collect request. On the rising
+    /// edge the grid is re-anchored here, the running mix is seeded from truth,
+    /// and every channel emits its current level as a seed transition so the
+    /// renderer is driven from truth rather than a stale ring level.
+    pub(crate) fn set_observing(&mut self, on: bool) {
+        if on == self.synth.observing {
+            return;
+        }
+        if on {
+            let fresh = self.synth.start_observing(
+                (self.nr50, self.nr51, self.audio_enabled),
+                self.cpu_hz,
+            );
+            self.push_observing(true);
+            if fresh {
+                // Emit each channel's current level as a seed transition so the
+                // renderer is driven from truth. (A serialized-observing resume
+                // is not fresh and continues from its restored levels.)
+                self.channel1.reseed_level(self.cc);
+                self.channel2.reseed_level(self.cc);
+                self.channel3.reseed_level(self.cc);
+                self.channel4.reseed_level(self.cc);
+                self.drain_pending();
+            }
+        } else {
+            self.audit_drained();
+            self.synth.stop_observing();
+            self.push_observing(false);
+        }
+    }
+
+    /// Push the observing flag into the channels (their copies are
+    /// `#[serde(skip)]`, so this also re-syncs them from the serialized synth
+    /// flag on load — see `set_analog_model`).
+    fn push_observing(&mut self, on: bool) {
+        self.channel1.set_observing(on);
+        self.channel2.set_observing(on);
+        self.channel3.set_observing(on);
+        self.channel4.set_observing(on);
     }
 
     /// DIV-APU event (a DIV-APU falling edge, the master clock
@@ -430,6 +474,10 @@ impl Audio {
             self.push_cc();
             self.fire_length_events(self.cc);
             self.step_channels(cgb, agb);
+            // The ds-change poll runs `step_channels` outside `advance_chunked`,
+            // so emit + drain here too — `pending` must not survive the sync.
+            self.note_all_levels();
+            self.drain_pending();
         }
     }
 
@@ -471,18 +519,27 @@ impl Audio {
             let pre_cc = self.cc;
             self.cc = ((self.cc as u64 + chunk) % Self::CC_MAX as u64) as u32;
             self.len_cc = self.cc;
+            // The monotonic synth grid advances by the same span but never folds.
+            self.synth.advance(chunk);
             // The 1 MHz sub-phase free-runs on elapsed 2 MHz cycle parity.
             self.lf_div ^= (chunk & 1) as u32;
             // Dispatch the DIV-APU (envelope) events crossed by this advance
             // (at most one — the chunker never crosses two boundaries).
             self.fs_walk(pre_cc, chunk);
             any = true;
-            // Rebase the epoch before the postlude broadcasts cc.
+            // Rebase the epoch before the postlude broadcasts cc. `pending` was
+            // drained at the previous postlude, so it never spans this fold.
+            self.audit_drained();
             self.epoch_fold();
             // Per-dot postlude at the chunk end.
             self.push_cc();
             self.fire_length_events(self.cc);
             self.step_channels(cgb, agb);
+            // Emit any non-duty level changes (envelope / length / sweep) at the
+            // chunk end, then drain every channel's transitions into the grid so
+            // `pending` never survives to the next fold.
+            self.note_all_levels();
+            self.drain_pending();
         }
         any
     }
@@ -527,12 +584,15 @@ impl Audio {
         let pre_cc = self.cc;
         self.cc = ((self.cc as u64 + cycles) % Self::CC_MAX as u64) as u32;
         self.len_cc = self.cc;
+        // The monotonic synth grid advances by the same span but never folds.
+        self.synth.advance(cycles);
         // The 1 MHz sub-phase free-runs on elapsed 2 MHz cycle parity.
         self.lf_div ^= (cycles & 1) as u32;
         // Dispatch the DIV-APU (envelope) events crossed by this advance.
         self.fs_walk(pre_cc, cycles);
         // Rebase the epoch here too: this path (the speed-change flush) does
         // not run the chunked postlude, but one sync can advance far.
+        self.audit_drained();
         self.epoch_fold();
         true
     }
@@ -541,6 +601,7 @@ impl Audio {
     /// resets while the length `cc>>13` boundaries are preserved. The duty unit is
     /// shifted by the resulting delta.
     fn div_reset_fold(&mut self, ds: bool) {
+        self.audit_drained();
         let div_offset = (self.last_update as u32) & (ds as u32);
         let cc = self.cc.wrapping_add(div_offset);
         let folded = (cc & 0xFFFF_F000)
@@ -624,6 +685,7 @@ impl Audio {
     /// Pan Docs (Audio_Registers); this cc-fold mechanism is a model construct,
     /// not in Pan Docs, TCAGBD, or GBCTR.
     fn psg_reset(&mut self, ds: bool) {
+        self.audit_drained();
         // Skip the fold before the APU master clock is anchored (boot instant,
         // `cc`/`last_update` still 0): there's no accumulated phase to fold, and
         // the fold formula would inject a spurious +0x1000 that offsets `cc>>13`
@@ -834,17 +896,16 @@ impl Audio {
         self.channel4.set_cgb(cgb);
     }
 
-    /// Set the machine's real-time CPU clock, which fixes how many dots make one
-    /// 44.1 kHz host sample. Affects only the downsample ratio in
-    /// `generate_samples` — no channel timer, length counter, or frame-sequencer
-    /// step reads it, so the dot-domain APU state stays byte-identical.
+    /// Set the machine's real-time CPU clock, which fixes how many APU cycles
+    /// make one 44.1 kHz host sample via the synth grid. Affects only the grid
+    /// slope — no channel timer, length counter, or frame-sequencer step reads
+    /// it, so the dot-domain APU state stays byte-identical. Re-anchors the grid
+    /// so `sample_of` is continuous across the slope change.
     pub fn set_cpu_hz(&mut self, hz: u32) {
-        self.cycles_per_sample = hz as f32 / HOST_SAMPLE_RATE;
-    }
-
-    /// Dots per host sample (`cpu_hz / 44100`).
-    pub fn cycles_per_sample(&self) -> f32 {
-        self.cycles_per_sample
+        if hz != self.cpu_hz {
+            self.synth.reanchor_for_cpu_hz(self.cpu_hz);
+            self.cpu_hz = hz;
+        }
     }
 
     /// Seed the CGB-D/E APU revision gate (model newer than CGB-C) into the
@@ -982,8 +1043,13 @@ impl Audio {
     /// discrete alphabet, which is what the tap (and the `.rba` per-plane
     /// palette encoder behind it) requires. The DAC-off fade and the output
     /// high-pass are continuous and therefore live strictly downstream.
+    ///
+    /// The live output path no longer reads this (it emits per-channel codes at
+    /// each transition and renders through the band-limited synth); it survives
+    /// as the oracle the synth's `resolve_level` is pinned against.
+    #[cfg(test)]
     fn channel_outputs(&self) -> [f32; 4] {
-        if self.analog.model().is_agb() {
+        if self.synth.model().is_agb() {
             // Pan Docs (Game Boy Advance audio): "the GBA APU has no DACs.
             // Instead, they are emulated digitally such that a disabled 'DAC'
             // behaves like an enabled DAC receiving 0 as its input." So the
@@ -1013,86 +1079,130 @@ impl Audio {
         ]
     }
 
-    /// Which channels currently have a powered DAC, in channel order.
-    fn channel_dacs_on(&self) -> [bool; 4] {
-        [
-            self.channel1.dac_on(),
-            self.channel2.dac_on(),
-            self.channel3.dac_on(),
-            self.channel4.dac_on(),
-        ]
-    }
-
-    /// Reconstruct the stereo mix of one tapped sample, through the same
-    /// [`rustyboi_mix::mix_stereo`] the `.rba` decoder calls — one definition,
-    /// so the two cannot disagree. Exposed for consumers holding tap data.
+    /// Reconstruct the stereo mix of one tapped [`SampleRecord`], through the
+    /// same [`rustyboi_mix::mix_stereo`] the `.rba` decoder calls — one
+    /// definition, so the two cannot disagree. `agb` selects the digital-mixing
+    /// NR51 semantics; it is a per-machine constant, so it stays a separate
+    /// argument rather than a field of the per-sample record.
     ///
     /// The result is PRE-analog-stage: it carries neither the DAC-off fade nor
-    /// the output high-pass, both of which are continuous, stateful, and
-    /// downstream of the tap.
-    /// `agb` selects the digital-mixing NR51 semantics; it is a property of the
-    /// machine, constant for a whole recording, which is why it is a separate
-    /// argument rather than a fifth field of [`ChannelSample`]. Widening the
-    /// per-sample tuple would widen the `.rba` per-plane palettes for a value
-    /// that never changes.
-    pub fn mix_tap_sample(sample: ChannelSample, agb: bool) -> (f32, f32) {
-        let (ch, nr50, nr51, enabled) = sample;
-        rustyboi_mix::mix_stereo(ch, nr50, nr51, enabled, agb)
+    /// the output high-pass, both of which are continuous and downstream.
+    pub fn mix_tap_sample(sample: SampleRecord, agb: bool) -> (f32, f32) {
+        rustyboi_mix::mix_stereo(sample.levels, sample.nr50, sample.nr51, sample.enabled, agb)
     }
 
     /// Whether this machine mixes digitally (AGB). Callers holding tap data
     /// need it to reconstruct the mix; see [`Audio::mix_tap_sample`].
     pub fn mixes_digitally(&self) -> bool {
-        self.analog.model().is_agb()
+        self.synth.model().is_agb()
     }
 
-
-    pub(crate) fn generate_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
-        let mut samples = Vec::new();
-
-        // Channels are caught up lazily via `sync_cc` (the caller syncs the
-        // APU to the current cc first), so here we only down-sample the live
-        // mixer output. Re-advancing here would double-advance the channel
-        // timers and corrupt their phase.
-        // The divisor is the machine's own clock (an SGB1's is the host SNES's
-        // / 5), so a fixed 70224-dot frame yields fewer host samples and every
-        // tone comes out at `cpu_hz / period` — pitched up 2.4% on an NTSC SGB1.
-        let cycles_per_sample = self.cycles_per_sample;
-
-        self.fractional_cycles += cpu_cycles as f32;
-
-        while self.fractional_cycles >= cycles_per_sample {
-            samples.push(self.analog_sample());
-            self.fractional_cycles -= cycles_per_sample;
+    /// Pull every output sample whose window has closed. No cycles argument: the
+    /// caller synced the APU (and thus `synth_cc`) first, and the grid — not a
+    /// per-call accumulator — decides how many samples are due, so an SGB1's
+    /// slower grid yields fewer samples for the same dots (pitched up 2.4%).
+    pub(crate) fn generate_samples(&mut self) -> Vec<(f32, f32)> {
+        let mut out = Vec::new();
+        while self.synth.pull_target(self.cpu_hz) > self.synth.next_sample() {
+            out.push(self.synth.finalize(&self.kernel));
         }
-
-        samples
+        out
     }
 
-    /// One host sample, taken all the way through the analog stage: the DACs'
-    /// discrete levels are tapped, then faded (for any DAC that has gone
-    /// unpowered), mixed, and high-passed.
-    ///
-    /// The tap is deliberately taken BEFORE the fade and the high-pass. Both
-    /// are continuous, so tapping downstream of them would hand the `.rba`
-    /// per-plane encoder an unbounded value alphabet — its palette is a `u16`,
-    /// and building one over a fade ramp would both overflow it and make
-    /// encoding quadratic.
-    ///
-    /// On an SGB this is still the whole output: the SGB's own effects come
-    /// from the SNES APU, which is decoded but not synthesised
-    /// ([`crate::sgb::SgbSound`]); adding them later means summing into this
-    /// stream here or at a downstream sink, with no change to the channels.
-    fn analog_sample(&mut self) -> (f32, f32) {
-        let raw = self.channel_outputs();
-        if let Some(tap) = &mut self.channel_tap {
-            tap.push((raw, self.nr50, self.nr51, self.audio_enabled));
+    /// STOP-window cadence: the master clock is frozen, so no transitions occur,
+    /// but the host stream must keep flowing. Advance the grid by the STOP
+    /// wall-time (`apu_cycles`) and pull — with no drained transitions the pull
+    /// emits held records, which the analog stage decays to true silence rather
+    /// than hard-cutting. Using the SAME grid math as the running path keeps the
+    /// per-frame sample count identical (a separate accumulator would drift ±1).
+    pub(crate) fn generate_stop_samples(&mut self, apu_cycles: u64) -> Vec<(f32, f32)> {
+        self.synth.advance(apu_cycles);
+        self.generate_samples()
+    }
+
+    /// Catch every channel's non-duty level change (envelope / length / sweep /
+    /// register write) at the current cc. The per-tick duty/LFSR/fetch edges are
+    /// emitted inside the channels; this catches everything else. Dedup +
+    /// observing gating live in each channel's `note_level`.
+    fn note_all_levels(&mut self) {
+        let cc = self.cc;
+        self.channel1.note_level(cc);
+        self.channel2.note_level(cc);
+        self.channel3.note_level(cc);
+        self.channel4.note_level(cc);
+    }
+
+    /// Record a mix-register change (NR50/NR51/NR52-enable) into the grid at the
+    /// current sample, deduped so a redundant write records nothing.
+    fn note_mix_regs(&mut self) {
+        if !self.synth.observing {
+            return;
         }
-        let faded = self.analog.fade(raw, self.channel_dacs_on());
-        let agb = self.analog.model().is_agb();
-        let (left, right) =
-            rustyboi_mix::mix_stereo(faded, self.nr50, self.nr51, self.audio_enabled, agb);
-        self.analog.high_pass(left, right)
+        let mix = (self.nr50, self.nr51, self.audio_enabled);
+        if self.synth.mix_changed(mix) {
+            let scc = self.synth.synth_cc();
+            let hz = self.cpu_hz;
+            self.synth.record_mix(scc, hz, mix);
+        }
+    }
+
+    /// The full write-/read-path emission step: catch level + mix changes, then
+    /// drain. Called from the MMIO register-access overlays (`write_apu`,
+    /// `sync_apu_read_cc`, `sync_apu_for_read`), which advance fetch positions /
+    /// fire length expiries outside the chunk postlude.
+    pub(crate) fn note_and_drain(&mut self) {
+        self.note_all_levels();
+        self.note_mix_regs();
+        self.drain_pending();
+    }
+
+    /// Drain every channel's `pending` transitions into the grid's per-sample
+    /// slots, mapping each folded-cc timestamp into the unfolded `synth_cc`
+    /// domain via the current `(cc, synth_cc)` correspondence. Empties `pending`
+    /// so it never survives to the next cc fold.
+    fn drain_pending(&mut self) {
+        let cc = self.cc;
+        let scc = self.synth.synth_cc();
+        let agb = self.synth.model().is_agb();
+        let hz = self.cpu_hz;
+        Self::drain_channel(self.channel1.pending_mut(), 0, cc, scc, agb, hz, &mut self.synth);
+        Self::drain_channel(self.channel2.pending_mut(), 1, cc, scc, agb, hz, &mut self.synth);
+        Self::drain_channel(self.channel3.pending_mut(), 2, cc, scc, agb, hz, &mut self.synth);
+        Self::drain_channel(self.channel4.pending_mut(), 3, cc, scc, agb, hz, &mut self.synth);
+    }
+
+    fn drain_channel(
+        pending: &mut Vec<(u32, u8)>,
+        ch: usize,
+        cc: u32,
+        scc: u64,
+        agb: bool,
+        cpu_hz: u32,
+        synth: &mut SynthBox,
+    ) {
+        for &(fc, code) in pending.iter() {
+            // fc is in the (folded) `cc` domain; its distance back from the
+            // current cc is fold-invariant, so the unfolded synth cc is exact.
+            let e = scc.wrapping_sub(cc.wrapping_sub(fc) as u64);
+            let level = crate::audio::synth::resolve_level(code, ch, agb);
+            synth.record_transition(e, ch, cpu_hz, level);
+        }
+        pending.clear();
+    }
+
+    /// Release-safe tripwire: `pending` MUST be empty at every cc-fold entry
+    /// (the drain runs at every chunk postlude and write-path emission). Upgrades
+    /// to an always-run panic under `synth-audit`, because the suite gates and
+    /// the baseline regen run RELEASE, where `debug_assert!` is compiled out.
+    fn audit_drained(&mut self) {
+        #[cfg(any(debug_assertions, feature = "synth-audit"))]
+        {
+            let drained = self.channel1.pending_mut().is_empty()
+                && self.channel2.pending_mut().is_empty()
+                && self.channel3.pending_mut().is_empty()
+                && self.channel4.pending_mut().is_empty();
+            assert!(drained, "synth `pending` leaked across a cc fold");
+        }
     }
 }
 
@@ -1600,6 +1710,86 @@ mod tests {
         (audio, 0x400)
     }
 
+    /// The observing wave fetch-loop and the non-observing analytic jump must
+    /// leave byte-identical wave state. Both paths run over a sweep of periods
+    /// (including the pathological freq 2047 = one fetch per cc), and the
+    /// CPU-visible wave nibble (PCM34 low) must agree at every step — the
+    /// fetch-loop conversion changes only WHEN transitions are emitted, never
+    /// the digital state the rest of the machine sees.
+    #[test]
+    fn wave_fetch_loop_matches_the_analytic_jump() {
+        fn run(freq: u16, observing: bool) -> Vec<u8> {
+            let (mut audio, mut abs) = powered_apu();
+            if observing {
+                audio.set_observing(true);
+            }
+            // A non-uniform wave pattern so the sample index is observable.
+            for i in 0..16u16 {
+                audio.write(WAV_START + i, (i as u8).wrapping_mul(0x13).wrapping_add(7));
+            }
+            audio.write(NR30, 0x80); // DAC on
+            audio.write(NR32, 0x20); // volume 100%
+            audio.write(NR33, (freq & 0xFF) as u8);
+            audio.write(NR34, 0x80 | ((freq >> 8) & 0x07) as u8); // trigger
+            let mut out = Vec::new();
+            for _ in 0..3000 {
+                abs += 7; // an odd stride so the sample grid lands on varied cc
+                sync(&mut audio, abs);
+                out.push(audio.pcm34() & 0x0F);
+            }
+            out
+        }
+        for freq in [0u16, 128, 700, 1024, 1500, 2000, 2044, 2047] {
+            assert_eq!(
+                run(freq, true),
+                run(freq, false),
+                "the observing fetch loop diverged from the analytic jump at freq {freq}"
+            );
+        }
+    }
+
+    /// The DMG deferred-trigger drumroll (Pokémon R/B/Y GameFreak intro) is the
+    /// sensitive case for the noise emission split: `run_cycles` calls
+    /// `run_batch(head, crossing_cc)` while `self.cc` is already the full-batch
+    /// end, so the head-window LFSR steps must anchor on the explicit crossing
+    /// cc. This drives repeated retriggers with the tap engaged and asserts (a)
+    /// the fold/drain audit holds throughout (no panic), (b) the channel makes
+    /// audible, VARYING output rather than freezing, and (c) the CPU-visible
+    /// LFSR nibble is byte-identical to a non-observing run (the emission split
+    /// never perturbs digital state).
+    #[test]
+    fn dmg_noise_drumroll_emits_without_corrupting_state() {
+        fn run(observing: bool, tap: bool) -> (Vec<u8>, usize) {
+            let (mut audio, mut abs) = dmg_noise_apu(1, 3);
+            if observing {
+                audio.set_observing(true);
+            }
+            if tap {
+                audio.set_channel_tap(true);
+            }
+            let mut nibbles = Vec::new();
+            for i in 0..2400u32 {
+                abs += 5;
+                sync(&mut audio, abs);
+                audio.generate_samples();
+                if i % 30 == 0 {
+                    audio.write(NR44, 0x80); // drumroll retrigger
+                }
+                nibbles.push(audio.pcm34() >> 4);
+            }
+            let tap_len = audio.drain_channel_tap().len();
+            (nibbles, tap_len)
+        }
+        let (obs_nibbles, tap_len) = run(true, true);
+        let (plain_nibbles, _) = run(false, false);
+        assert_eq!(
+            obs_nibbles, plain_nibbles,
+            "the noise emission split perturbed the CPU-visible LFSR state"
+        );
+        assert!(tap_len > 100, "the drumroll produced too few tap samples ({tap_len})");
+        assert!(distinct(&obs_nibbles) >= 2, "the noise channel froze instead of running");
+    }
+
     /// The DAC's polarity, observed through the real channel path rather than
     /// through `dac_analog` alone. Pan Docs: "the digital range $0 to $F is
     /// linearly translated to the analog range -1 to 1 … the slope is negative:
@@ -1736,6 +1926,7 @@ mod tests {
     fn tapped_channel_values_stay_a_small_discrete_alphabet() {
         let (mut audio, mut abs) = powered_apu();
         audio.set_channel_tap(true);
+        audio.set_observing(true);
         for i in 0..16u16 {
             audio.write(WAV_START + i, 0x1Fu8.wrapping_mul(i as u8 + 1));
         }
@@ -1761,7 +1952,7 @@ mod tests {
         for step in 0..600 {
             abs += 128;
             sync(&mut audio, abs);
-            audio.generate_samples(64);
+            audio.generate_samples();
             match step {
                 200 => audio.write(NR12, 0x00),
                 300 => audio.write(NR30, 0x00),
@@ -1772,11 +1963,14 @@ mod tests {
         }
 
         let tap = audio.drain_channel_tap();
-        // 600 * 64 cycles / (4194304/44100) cycles per sample.
         assert!(tap.len() > 350, "tap collected only {} samples", tap.len());
         let mut distinct: Vec<f32> = Vec::new();
-        for (chs, ..) in &tap {
-            for &v in chs {
+        // The level lanes keep the 17-value alphabet; the phase lanes obey the
+        // collapse contract: a sentinel exactly when the level is unchanged from
+        // the previous sample, otherwise a valid sub-sample position (0..63).
+        let mut prev = [0.0f32; 4]; // the renderer's initial (pre-seed) levels
+        for rec in &tap {
+            for (ch, (&v, &phase)) in rec.levels.iter().zip(&rec.phases).enumerate() {
                 assert!(
                     allowed.contains(&v),
                     "tapped {v} is not a DAC level -- the fade or the high-pass \
@@ -1785,7 +1979,17 @@ mod tests {
                 if !distinct.contains(&v) {
                     distinct.push(v);
                 }
+                let sentinel = phase == rustyboi_mix::NO_TRANSITION;
+                assert_eq!(
+                    sentinel,
+                    v == prev[ch],
+                    "ch{ch}: phase sentinel must hold exactly when the level is \
+                     unchanged (phase {phase}, {v} vs prev {})",
+                    prev[ch]
+                );
+                assert!(sentinel || phase < 64, "phase out of range");
             }
+            prev = rec.levels;
         }
         assert!(
             distinct.len() <= 17,
@@ -1818,6 +2022,9 @@ mod tests {
         audio.write(NR51, 0xFF);
         audio.write(NR50, 0x77);
         audio.write(NR12, 0xF0);
+        // Engage the synth so the channel level is emitted and rendered (the
+        // pull is silent otherwise, as headless suite runs are).
+        audio.set_observing(true);
         (audio, 100)
     }
 
@@ -1828,7 +2035,7 @@ mod tests {
         while out.len() < n {
             *abs += 128;
             sync(audio, *abs);
-            out.extend(audio.generate_samples(128).into_iter().map(|(l, _)| l));
+            out.extend(audio.generate_samples().into_iter().map(|(l, _)| l));
         }
         out.truncate(n);
         out
@@ -1860,10 +2067,17 @@ mod tests {
         let (mut dmg, mut dmg_abs) = dc_biased_apu(analog::AnalogModel::Dmg);
         let dmg_out = emit_samples(&mut dmg, &mut dmg_abs, 4000);
 
-        // The bias really is the +0.25 the rest of the test reasons about: the
-        // first sample is taken before the capacitor has charged at all.
-        assert!((cgb_out[0] - 0.25).abs() < 1e-6, "DC bias was {}", cgb_out[0]);
-        assert!((dmg_out[0] - 0.25).abs() < 1e-6, "DC bias was {}", dmg_out[0]);
+        // The +0.25 bias is now injected as a BAND-LIMITED step (BLEP group
+        // delay), so it is not present at sample 0; it rises to the rail within
+        // the TAPS-sample kernel span. Its presence is confirmed by the peak
+        // over that warm-in window, and the DMG high-pass (slow) has barely
+        // touched it there.
+        let peak = |s: &[f32]| s[..64].iter().copied().fold(0.0f32, f32::max);
+        assert!(
+            peak(&dmg_out) > 0.2,
+            "the +0.25 DC bias never reached the rail (peak {})",
+            peak(&dmg_out)
+        );
 
         let mean = |s: &[f32]| s.iter().sum::<f32>() / s.len() as f32;
         let cgb_mean = mean(&cgb_out);
@@ -2059,10 +2273,17 @@ mod tests {
         // Every channel at the negative rail, nothing routed anywhere, full
         // master volume. On an analog mixer that is silence by construction.
         let ch = [-1.0f32; 4];
-        let (l, r) = Audio::mix_tap_sample((ch, 0x77, 0x00, true), false);
+        let rec = |nr51| SampleRecord {
+            levels: ch,
+            phases: [rustyboi_mix::NO_TRANSITION; 4],
+            nr50: 0x77,
+            nr51,
+            enabled: true,
+        };
+        let (l, r) = Audio::mix_tap_sample(rec(0x00), false);
         assert_eq!((l, r), (0.0, 0.0), "an analog mixer sums nothing when NR51 routes nothing");
 
-        let (l, r) = Audio::mix_tap_sample((ch, 0x77, 0x00, true), true);
+        let (l, r) = Audio::mix_tap_sample(rec(0x00), true);
         // ch1, ch2, ch4 contribute digital 0 (+1.0); ch3 contributes digital 7.
         // NR50 = 0x77 is master volume 7, i.e. a factor of (7+1)/8 == 1, so the
         // only scaling left is the mixer's /4 four-channel normalize.
@@ -2074,65 +2295,19 @@ mod tests {
         // Per-side, not per-channel: routing ONLY ch1 left must move the left
         // side away from the right, and must replace ch1's unrouted level with
         // its real one rather than adding to it.
-        let (l, r) = Audio::mix_tap_sample((ch, 0x77, 0x10, true), true);
+        let (l, r) = Audio::mix_tap_sample(rec(0x10), true);
         let want_l = (-1.0f32 + 1.0 + (7.5 - 7.0) / 7.5 + 1.0) / 4.0;
         assert_eq!(l, want_l, "a routed channel must REPLACE its unrouted level");
         assert_eq!(r, want, "the right side must be untouched by a left-only route");
     }
 
-    /// Item 5: the DAC-off fade is the discharge of a real per-channel coupling
-    /// capacitor, and AGB has no per-channel DACs to discharge. SameBoy gates
-    /// its equivalent on `<= GB_MODEL_CGB_E`.
-    ///
-    /// The observable is the step: on CGB the channel coasts down from where
-    /// its DAC left it, so the first post-off sample is still near the old
-    /// level; on AGB it must be exactly at the new level immediately.
-    #[test]
-    fn agb_does_not_fade_a_dead_dac() {
-        fn first_level_after_dac_off(model: analog::AnalogModel) -> f32 {
-            let (mut audio, mut abs) = powered_apu_on(model);
-            audio.write(NR21, 0x80);
-            audio.write(NR22, 0xF0);
-            audio.write(NR23, 0x00);
-            audio.write(NR24, 0x83);
-            // Run the channel THROUGH the fade so its node is charged to a real
-            // level, spinning until the square sits at the negative rail.
-            let mut charged = false;
-            for _ in 0..4000 {
-                abs += 8;
-                sync(&mut audio, abs);
-                let raw = audio.channel_outputs();
-                let dacs = audio.channel_dacs_on();
-                if audio.analog.fade(raw, dacs)[1] == -1.0 {
-                    charged = true;
-                    break;
-                }
-            }
-            assert!(charged, "premise: channel 2 never reached the negative rail");
-
-            audio.write(NR22, 0x00); // DAC off
-            abs += 8;
-            sync(&mut audio, abs);
-            let raw = audio.channel_outputs();
-            let dacs = audio.channel_dacs_on();
-            audio.analog.fade(raw, dacs)[1]
-        }
-
-        let cgb = first_level_after_dac_off(analog::AnalogModel::CgbMgb);
-        assert!(
-            cgb < -0.9,
-            "on CGB the dead DAC's node must still be coasting near the rail \
-             it was left at, not stepped ({cgb})"
-        );
-
-        let agb = first_level_after_dac_off(analog::AnalogModel::Agb);
-        assert_eq!(
-            agb,
-            1.0,
-            "on AGB there is no capacitor to discharge: the channel must step \
-             straight to digital 0's level with no fade"
-        );
-    }
+    // Item 5 (AGB has no per-channel DACs to discharge, so a dead DAC steps
+    // rather than fades) now lives with the analog stage in `rustyboi_mix`,
+    // which owns the fade: see `render::tests::
+    // agb_scatters_even_a_transition_to_level_zero` (the AGB step) and
+    // `a_dac_off_record_fades_monotonically_through_render` (the non-AGB coast).
+    // The core can no longer reach the renderer's fade directly, and the digital
+    // half of the AGB output stage is still pinned by the three tests above.
 
     /// NR52 power-cycle length state (re-homed from the trimmed sub-1 of
     /// `apu/power_cycle_len_no_trigger`). The power-OFF handler zeroes every

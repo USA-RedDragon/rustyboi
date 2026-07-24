@@ -1169,7 +1169,7 @@ impl GB {
     }
 
     /// Take tapped channel samples accumulated since the last drain.
-    pub fn drain_channel_tap(&mut self) -> Vec<audio::ChannelSample> {
+    pub fn drain_channel_tap(&mut self) -> Vec<audio::SampleRecord> {
         self.mmio.drain_channel_tap()
     }
 
@@ -1200,6 +1200,11 @@ impl GB {
             // Breakpoint hit - don't execute instruction and return (empty audio, breakpoint hit)
             return (true, 0);
         }
+
+        // Bind APU transition emission to the audio-collect request BEFORE the
+        // instruction runs its syncs, so channel emission is gated correctly and
+        // an observing rising edge seeds the grid from truth.
+        self.mmio.set_apu_observing(collect_audio);
 
         // Plain-STOP low-power mode (Pan Docs "Reducing Power Consumption"):
         // the main oscillator is stopped, so the CPU and every clocked
@@ -1275,9 +1280,18 @@ impl GB {
         if !collect_audio {
             return;
         }
-        // In double speed mode, audio runs at normal speed, so we need to adjust the cycle count
-        let audio_cycles = if is_double_speed { cycles / 2 } else { cycles };
-        let audio_samples = self.mmio.generate_audio_samples(audio_cycles);
+        let audio_samples = if self.cpu.stopped {
+            // STOP freezes the master clock, so the grid does not advance from a
+            // sync. Advance it by the STOP wall-time instead (the same `>>(1+ds)`
+            // APU-cycle conversion the running path applies), so the per-frame
+            // sample count matches a running machine exactly.
+            let apu_cycles = (cycles >> (1 + is_double_speed as u32)) as u64;
+            self.mmio.generate_stop_audio_samples(apu_cycles)
+        } else {
+            // `synth_cc` is already speed-normalized (it advances at `>>(1+ds)`),
+            // so the grid pull needs no double-speed halving.
+            self.mmio.generate_audio_samples()
+        };
 
         // Send audio samples directly to output as they're generated
         if !audio_samples.is_empty()
@@ -3327,23 +3341,52 @@ mod clock_tests {
 
     /// A fixed number of dots must yield FEWER host samples on an SGB1 — that
     /// deficit is exactly what pitches its audio up and what the frame cadence
-    /// must compensate for. Measured through the public sample path, not the
-    /// stored ratio, so it pins observable behaviour.
-    fn samples_over_one_frame(hw: Hardware, region: Region) -> usize {
+    /// must compensate for. Measured through the public sample path (advance the
+    /// master clock, then pull off the absolute-cc grid), not the stored ratio,
+    /// so it pins observable behaviour.
+    fn samples_over_frames(hw: Hardware, region: Region, frames: usize) -> usize {
+        use crate::audio::AudioOutput;
+        use std::sync::{Arc, Mutex};
+        struct Count(Arc<Mutex<usize>>);
+        impl AudioOutput for Count {
+            fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+                Ok(())
+            }
+            fn add_samples(&mut self, s: &[(f32, f32)]) {
+                *self.0.lock().unwrap() += s.len();
+            }
+        }
         let mut gb = GB::new(hw);
         gb.set_region(region);
-        // One frame of dots, fed in one go: the dot count is model-independent.
-        gb.mmio.generate_audio_samples(70_224).len()
+        gb.skip_bios();
+        let n = Arc::new(Mutex::new(0usize));
+        gb.enable_audio(Box::new(Count(n.clone()))).unwrap();
+        // Two warmup frames past the boot alignment, then measure `frames`.
+        for _ in 0..2 {
+            gb.run_until_frame(true);
+        }
+        *n.lock().unwrap() = 0;
+        for _ in 0..frames {
+            gb.run_until_frame(true);
+        }
+        *n.lock().unwrap()
     }
 
     #[test]
     fn a_frame_of_dots_yields_fewer_samples_on_an_sgb1() {
-        let dmg = samples_over_one_frame(Hardware::DMG, Region::Ntsc);
-        let sgb_ntsc = samples_over_one_frame(Hardware::SGB, Region::Ntsc);
-        let sgb_pal = samples_over_one_frame(Hardware::SGB, Region::Pal);
+        // The grid is exact (44100 samples/s), so a fixed dot span yields a
+        // deterministic count up to ±1 sample of phase per measured window.
+        const F: usize = 60;
+        let dmg = samples_over_frames(Hardware::DMG, Region::Ntsc, F);
+        let sgb_ntsc = samples_over_frames(Hardware::SGB, Region::Ntsc, F);
+        let sgb_pal = samples_over_frames(Hardware::SGB, Region::Pal, F);
 
-        // 70224 dots / (4194304/44100) = 738.4 pairs at DMG rate.
-        assert_eq!(dmg, 738);
+        // 70224 dots / (4194304/44100) = 738.4 pairs/frame at DMG rate.
+        let expect_dmg = (70_224.0 * F as f64 / (4_194_304.0 / 44_100.0)) as i64;
+        assert!(
+            (dmg as i64 - expect_dmg).abs() <= 4,
+            "DMG {F}-frame count {dmg} not ~{expect_dmg}"
+        );
         assert!(sgb_ntsc < dmg, "NTSC SGB1 {sgb_ntsc} should be < DMG {dmg}");
         assert!(sgb_pal < dmg, "PAL SGB1 {sgb_pal} should be < DMG {dmg}");
         assert!(sgb_ntsc < sgb_pal, "NTSC SGB1 is the faster clock");
@@ -3351,8 +3394,10 @@ mod clock_tests {
         // Every other model is region-independent and DMG-rate — the SGB2's
         // own crystal is the entire reason it exists.
         for hw in [Hardware::DMG, Hardware::SGB2, Hardware::CGB, Hardware::AGB] {
-            assert_eq!(samples_over_one_frame(hw, Region::Ntsc), dmg, "{hw:?} NTSC");
-            assert_eq!(samples_over_one_frame(hw, Region::Pal), dmg, "{hw:?} PAL");
+            let ntsc = samples_over_frames(hw, Region::Ntsc, F);
+            let pal = samples_over_frames(hw, Region::Pal, F);
+            assert!((ntsc as i64 - dmg as i64).abs() <= 4, "{hw:?} NTSC {ntsc} vs DMG {dmg}");
+            assert!((pal as i64 - dmg as i64).abs() <= 4, "{hw:?} PAL {pal} vs DMG {dmg}");
         }
     }
 

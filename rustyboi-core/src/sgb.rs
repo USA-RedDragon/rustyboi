@@ -88,7 +88,7 @@ mod cmd {
 /// platform pre-ring `add_samples`. Nothing GB-side would change: the GB APU,
 /// the dot timeline and the savestate format are unaffected. The SGB1-vs-SGB2
 /// clock difference is already modelled and is orthogonal — it only rescales the
-/// GB APU's `cycles_per_sample`, while the SNES APU has its own crystal.
+/// GB APU's sample grid (`cpu_hz`), while the SNES APU has its own crystal.
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub(crate) struct SgbSound {
     /// Sound Effect A code (port 1, decrescendo). See Pan Docs' Effect A table.

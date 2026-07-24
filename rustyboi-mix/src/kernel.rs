@@ -49,6 +49,7 @@ pub const PHASES: usize = 64;
 
 /// The precomputed phase-indexed step-residual table. Deterministic: the same
 /// bytes on every platform (pinned by the golden-hash test below).
+#[derive(Clone)]
 pub struct BlepKernel {
     pub(crate) residual: [[f32; TAPS]; PHASES],
 }

@@ -5,10 +5,15 @@ mod length;
 mod noise;
 mod output;
 mod square;
+mod synth;
 mod wave;
 
 pub(crate) use analog::AnalogModel;
-pub use controller::{Audio, ChannelSample, HOST_SAMPLE_RATE, NR52};
+pub use controller::{Audio, HOST_SAMPLE_RATE, NR52};
+
+/// The per-sample tap/record type: the one [`rustyboi_mix::SampleRecord`] the
+/// core emits and the `.rba` replay decoder consumes — never a parallel tuple.
+pub use rustyboi_mix::SampleRecord;
 
 /// The stereo mixer and DAC transfer function, which this crate shares verbatim
 /// with the `.rba` replay decoder — see [`rustyboi_mix`] for why they live in a

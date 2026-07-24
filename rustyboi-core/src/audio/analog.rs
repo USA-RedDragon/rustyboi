@@ -8,7 +8,12 @@
 //! The `Hardware`-coverage test below stays here because it enumerates the
 //! core's `Hardware` enum, which the leaf crate cannot see.
 
-pub(crate) use rustyboi_mix::{AnalogModel, AnalogStage, dac_analog};
+pub(crate) use rustyboi_mix::AnalogModel;
+// The DAC transfer is only referenced by the test-only `channel_outputs`
+// oracle and the channels' test-only `get_output`; the live path resolves
+// levels through `synth::resolve_level` instead.
+#[cfg(test)]
+pub(crate) use rustyboi_mix::dac_analog;
 
 #[cfg(test)]
 mod tests {
