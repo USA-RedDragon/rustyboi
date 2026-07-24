@@ -1162,8 +1162,8 @@ impl GB {
         self.mmio.has_sgb_firmware()
     }
 
-    /// Engage the per-sample channel tap ([ch1..4], nr50, nr51, enabled) —
-    /// recording/measurement companion to `enable_audio`.
+    /// Engage the per-sample channel tap ([ch1..4] level+phase, nr50, nr51,
+    /// enabled) — recording/measurement companion to `enable_audio`.
     pub fn set_channel_tap(&mut self, on: bool) {
         self.mmio.set_channel_tap(on);
     }
@@ -1178,6 +1178,14 @@ impl GB {
     /// differs. See `audio::Audio::mix_tap_sample`.
     pub fn mixes_digitally(&self) -> bool {
         self.mmio.mixes_digitally()
+    }
+
+    /// The machine's analog output family, so a recorder can tag tap data with
+    /// the exact fade/high-pass the decoder must reapply. Distinguishes the DMG
+    /// and CGB/MGB high-pass (which `mixes_digitally` alone cannot) as well as
+    /// AGB's digital mix — see [`Hardware::analog_model`].
+    pub fn analog_model(&self) -> rustyboi_mix::AnalogModel {
+        self.hardware.analog_model()
     }
 
     // Audio management methods
