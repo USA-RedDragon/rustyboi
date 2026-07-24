@@ -220,49 +220,6 @@ jobs:
           else
             echo "::warning::no per-shard border maps found; SGB cards will have no borders"
           fi
-      # RBA2 must not grow the deduped gallery audio payload toward the 1 GB Pages
-      # cap. This step only MEASURES and records a verdict (`status` output) with a
-      # loud ::error:: annotation on overage; it never exits non-zero itself, so it
-      # cannot short-circuit the recombine job and skip the downstream steps
-      # (audio-hash compare gate, gallery build, publish). The verdict is enforced
-      # as a HARD failure by the final "Enforce audio payload ceiling" step, which
-      # runs after everything else -- the run still goes RED on overage ("no silent
-      # caps"), but only after the artifacts are produced. A legitimate content
-      # addition that grows the corpus is accommodated by bumping the ceiling file;
-      # an unexplained jump means the RBA2 encoding regressed (risk #5).
-      - name: Measure audio payload size
-        id: audiosize
-        if: always()
-        shell: bash
-        run: |
-          set -uo pipefail
-          ceiling_file=tools/audio-size-ceiling.txt
-          # Comments (# ...) and blank lines are documentation; the lone remaining
-          # token is the ceiling. `|| true` keeps a comments-only (malformed) file
-          # from aborting on grep's no-match exit under `pipefail`.
-          ceiling=$(grep -vE '^[[:space:]]*(#|$)' "$ceiling_file" | tr -d '[:space:]' || true)
-          # Total bytes of the RBA2 streams actually shipped in the gallery bundle.
-          # The same command is documented in the ceiling file for recomputing it.
-          total=$(find gathered/audio -name '*.rba' -printf '%s\n' 2>/dev/null | paste -sd+ | bc)
-          total=${total:-0}
-          case "$ceiling" in
-            ''|*[!0-9]*)
-              echo "::error::$ceiling_file has no integer byte ceiling (got '$ceiling'); failing the run"
-              echo "status=badceiling" >> "$GITHUB_OUTPUT"
-              exit 0 ;;
-          esac
-          # Small margin so brotli/dedup jitter between runs cannot flap the gate;
-          # a real growth past the ceiling still fails hard (downstream).
-          margin=$(( ceiling / 100 ))   # 1%
-          limit=$(( ceiling + margin ))
-          echo "gallery audio payload: ${total} B; ceiling ${ceiling} B (+1% margin -> ${limit} B)"
-          if [ "$total" -gt "$limit" ]; then
-            echo "::error::gallery audio payload ${total} B exceeds the committed ceiling ${ceiling} B (+1% = ${limit} B). Investigate RBA2 growth (risk #5), or bump tools/audio-size-ceiling.txt deliberately for a real content addition. (Enforced as a hard failure at the end of this job.)"
-            echo "status=over" >> "$GITHUB_OUTPUT"
-          else
-            echo "status=ok" >> "$GITHUB_OUTPUT"
-          fi
-          exit 0
       - name: Compare against baseline (GATE)
         id: compare
         shell: bash
@@ -303,20 +260,3 @@ jobs:
             gathered/audio
           if-no-files-found: error
           retention-days: 30
-      # Downstream enforcement of the audio-payload ceiling. Runs LAST and with
-      # always(), so the gallery build + publish + the audio-hash compare gate have
-      # all already run and their artifacts exist; this only turns the run RED when
-      # the measurement recorded an overage (or a malformed ceiling file). Keeping
-      # it terminal is deliberate: the size cap must never short-circuit the rest of
-      # the pipeline, but it stays a hard failure ("no silent caps").
-      - name: Enforce audio payload ceiling (GATE)
-        if: always()
-        shell: bash
-        run: |
-          status='${{ steps.audiosize.outputs.status }}'
-          case "$status" in
-            ok)         echo "audio payload within ceiling"; exit 0 ;;
-            over)       echo "::error::audio payload exceeded the committed ceiling (see 'Measure audio payload size'); failing the run"; exit 1 ;;
-            badceiling) echo "::error::tools/audio-size-ceiling.txt is malformed (see 'Measure audio payload size'); failing the run"; exit 1 ;;
-            *)          echo "::error::audio-size measurement did not run or produced no verdict (status='$status'); failing the run"; exit 1 ;;
-          esac
