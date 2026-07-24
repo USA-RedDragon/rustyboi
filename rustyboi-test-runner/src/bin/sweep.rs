@@ -225,8 +225,9 @@ struct RunCfg {
     /// Where raw f32le interleaved PCM dumps land (`--dump-pcm`): audio-codec
     /// measurement only, drains audio in the media pass like the mp4 path does.
     pcm_dir: Option<PathBuf>,
-    /// Where per-sample channel-tap dumps land (`--dump-chan`): 20-byte records
-    /// of [ch1..ch4]f32le + nr50 + nr51 + enabled + pad. Measurement only.
+    /// Where per-sample channel-tap dumps land (`--dump-chan`): 24-byte records
+    /// of [ch1..ch4]f32le + [ch1..ch4]phase u8 + nr50 + nr51 + enabled + pad.
+    /// Measurement only.
     chan_dir: Option<PathBuf>,
     /// Where content-addressed `.rba` audio recordings land (rides with
     /// `recordings_dir`). Model-identical audio dedups to one file by hash.
@@ -1296,20 +1297,6 @@ fn write_border(cfg: &RunCfg, sha: &str, layers: &ppu::SgbBorderLayers) {
     cfg.border_map.lock().unwrap_or_else(|e| e.into_inner()).insert(sha.to_string(), assets);
 }
 
-/// Transitional bridge for the encoder model. WP4 threads the machine's real
-/// `AnalogModel` (which distinguishes the DMG vs CGB high-pass); until then this
-/// preserves only the digital-vs-analog mixing distinction the old `.rba`
-/// header carried, which is all NR51 reconstruction needs. The per-sample tap
-/// now carries real phases (WP2), so the recorded stream is already
-/// phase-accurate; only the DMG/CGB high-pass choice remains approximate.
-fn bridge_model(mixes_digitally: bool) -> rustyboi_replay::AnalogModel {
-    if mixes_digitally {
-        rustyboi_replay::AnalogModel::Agb
-    } else {
-        rustyboi_replay::AnalogModel::Dmg
-    }
-}
-
 /// Emulate `hardware` purely to produce media: a poster, and — when
 /// `cfg.videos_dir` is set — an HEVC+AAC mp4 of the whole run. This never
 /// contributes to the manifest; it may drain audio (which the canonical
@@ -1389,10 +1376,11 @@ fn capture_media(
     if chan_out.is_some() || audio_rec.is_some() {
         gb.set_channel_tap(true);
     }
-    // The mixing mode is a property of the machine, so it rides in the .rba
-    // header rather than per sample; the decoder needs it to reproduce NR51.
+    // The analog family is a property of the machine, so it rides in the .rba
+    // header rather than per sample; the decoder replays the exact fade/high-pass
+    // (and the AGB digital-mix NR51 rule) from it.
     if let Some(enc) = audio_rec.as_mut() {
-        enc.set_model(bridge_model(gb.mixes_digitally()));
+        enc.set_model(gb.analog_model());
     }
 
     // Native `.rbr` recording of the first `rec_frames` frames (a short gallery
@@ -1465,6 +1453,7 @@ fn capture_media(
                         for c in &r.levels {
                             let _ = w.write_all(&c.to_le_bytes());
                         }
+                        let _ = w.write_all(&r.phases);
                         let _ = w.write_all(&[r.nr50, r.nr51, u8::from(r.enabled), 0]);
                     }
                 }
@@ -1785,7 +1774,7 @@ fn capture_bios(
         gb.set_channel_tap(true);
     }
     if let Some(enc) = audio_rec.as_mut() {
-        enc.set_model(bridge_model(gb.mixes_digitally()));
+        enc.set_model(gb.analog_model());
     }
 
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
