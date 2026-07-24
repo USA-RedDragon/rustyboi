@@ -10,6 +10,16 @@ edition = "2024"
 name = "rustyboi_test_runner_lib"
 crate-type = ["rlib"]
 
+[features]
+# Forward rustyboi-core's release-safe synth fold/drain audit to the sweep binary.
+# The `pending`-drained-before-every-cc-fold invariant is protected by
+# `debug_assert!`, which the release baseline/suite gates compile out; building
+# `sweep` with `--features synth-audit` upgrades it to an always-run panic so a
+# long observing run (WP5(3), which crosses the 0x6000_0000 epoch fold) actually
+# exercises it. Off by default — it costs a per-fold branch and must not enter the
+# shipped gates.
+synth-audit = ["rustyboi-core/synth-audit"]
+
 [dependencies]
 clap = { workspace = true }
 flate2 = "=1.1.9"
