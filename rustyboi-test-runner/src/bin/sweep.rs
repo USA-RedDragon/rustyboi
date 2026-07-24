@@ -1296,6 +1296,20 @@ fn write_border(cfg: &RunCfg, sha: &str, layers: &ppu::SgbBorderLayers) {
     cfg.border_map.lock().unwrap_or_else(|e| e.into_inner()).insert(sha.to_string(), assets);
 }
 
+/// Transitional bridge for the encoder model. WP4 threads the machine's real
+/// `AnalogModel` (which distinguishes the DMG vs CGB high-pass); until then this
+/// preserves only the digital-vs-analog mixing distinction the old `.rba`
+/// header carried, which is all NR51 reconstruction needs. The per-sample tap
+/// now carries real phases (WP2), so the recorded stream is already
+/// phase-accurate; only the DMG/CGB high-pass choice remains approximate.
+fn bridge_model(mixes_digitally: bool) -> rustyboi_replay::AnalogModel {
+    if mixes_digitally {
+        rustyboi_replay::AnalogModel::Agb
+    } else {
+        rustyboi_replay::AnalogModel::Dmg
+    }
+}
+
 /// Emulate `hardware` purely to produce media: a poster, and — when
 /// `cfg.videos_dir` is set — an HEVC+AAC mp4 of the whole run. This never
 /// contributes to the manifest; it may drain audio (which the canonical
@@ -1378,7 +1392,7 @@ fn capture_media(
     // The mixing mode is a property of the machine, so it rides in the .rba
     // header rather than per sample; the decoder needs it to reproduce NR51.
     if let Some(enc) = audio_rec.as_mut() {
-        enc.set_agb(gb.mixes_digitally());
+        enc.set_model(bridge_model(gb.mixes_digitally()));
     }
 
     // Native `.rbr` recording of the first `rec_frames` frames (a short gallery
@@ -1444,13 +1458,7 @@ fn capture_media(
                 if let Some(enc) = &mut audio_rec
                     && f < cfg.rec_frames
                 {
-                    // WP2 keeps the RBA1 encoder, which takes the pre-BLEP level
-                    // tuple; WP4 upgrades this to RBA2 (per-sample phase planes).
-                    let legacy: Vec<_> = tapped
-                        .iter()
-                        .map(|r| (r.levels, r.nr50, r.nr51, r.enabled))
-                        .collect();
-                    enc.push(&legacy);
+                    enc.push(&tapped);
                 }
                 if let Some(w) = &mut chan_out {
                     for r in &tapped {
@@ -1777,7 +1785,7 @@ fn capture_bios(
         gb.set_channel_tap(true);
     }
     if let Some(enc) = audio_rec.as_mut() {
-        enc.set_agb(gb.mixes_digitally());
+        enc.set_model(bridge_model(gb.mixes_digitally()));
     }
 
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -1797,12 +1805,7 @@ fn capture_bios(
             enc.push_rgb_scroll(&rgb, gb.read_memory(0xFF43), gb.read_memory(0xFF42));
         }
         if let Some(enc) = &mut audio_rec {
-            let tapped = gb.drain_channel_tap();
-            let legacy: Vec<_> = tapped
-                .iter()
-                .map(|r| (r.levels, r.nr50, r.nr51, r.enabled))
-                .collect();
-            enc.push(&legacy);
+            enc.push(&gb.drain_channel_tap());
         }
         if let Some(child) = &mut encoder
             && let Some(stdin) = child.stdin.as_mut()
