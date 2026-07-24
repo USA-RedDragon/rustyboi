@@ -1,36 +1,49 @@
-//! The APU's stereo mixer and DAC transfer function — the single definition
-//! shared by the emulator core and the `.rba` replay decoder.
+//! The APU's shared output stage — DAC transfer, stereo mixer, band-limited
+//! step (BLEP) kernel, and the analog chain — the single definition shared by
+//! the emulator core and the `.rba` replay decoder.
 //!
 //! This crate exists because two consumers need byte-identical audio from
-//! opposite sides of a recording. `rustyboi-core` mixes live; `rustyboi-replay`
-//! rebuilds the same mix from a recorded channel tap, client-side, in the
-//! compat gallery's wasm player. Those were once two hand-maintained clones of
-//! the same arithmetic, pinned against each other by a test; they are now one
-//! function, and there is nothing left to drift.
+//! opposite sides of a recording. `rustyboi-core` renders live;
+//! `rustyboi-replay` rebuilds the same output from recorded per-sample channel
+//! records, client-side, in the compat gallery's wasm player. Those were once
+//! two hand-maintained clones of the same arithmetic, pinned against each
+//! other by a test; they are now one implementation, and there is nothing left
+//! to drift.
 //!
 //! Replay cannot simply depend on the core: the core pulls `clap`, `zip`
 //! (deflate64 + lzma), `bincode`, and `serde` with no feature gates, and all of
 //! that would land in the wasm bundle. Hence a leaf crate whose dependency
 //! policy is `libm` only, plus an optional non-default `serde` feature the
-//! core enables for savestates — `libm` because the charge factors need
-//! deterministic transcendentals, and the platform math (`f32::powf`) is not
-//! bit-identical across targets.
+//! core enables for savestates — `libm` because the kernel build and the
+//! charge factors need deterministic transcendentals, and the platform math
+//! (`f32::powf`, `f64::sin`) is not bit-identical across targets.
 //!
 //! # The boundary
 //!
-//! What lives here is the mixer, the DACs, and the analog stage built on top
-//! of them ([`AnalogStage`]: the per-channel DAC-off fade and the model-gated
-//! output high-pass). The analog stage is continuous and stateful, so it sits
-//! downstream of the recording boundary: the `.rba` per-plane encoder builds a
-//! `u16` palette of distinct values, which a fade ramp would both overflow and
-//! make quadratic to encode. Every value crossing that boundary is one of the
-//! 16 DAC levels or `0.0`.
+//! What lives here is everything between a channel's discrete post-DAC level
+//! and the host's PCM stream:
+//!
+//!   * [`dac_analog`] and [`mix_stereo`] — the DAC transfer and the
+//!     NR50/NR51 stereo mix (discrete, stateless);
+//!   * [`BlepKernel`] and [`Renderer`] — band-limited step synthesis from
+//!     per-sample [`SampleRecord`]s (the collapse contract lives on that
+//!     type's module);
+//!   * [`AnalogStage`] — the per-channel DAC-off fade and the model-gated
+//!     output high-pass (continuous, stateful).
+//!
+//! Every value crossing the record boundary is one of the 16 DAC levels or
+//! `0.0`: a recording's `u16` palette encodes discrete levels plus a phase
+//! symbol, never a fade ramp or filter state. The continuous state (rings,
+//! fade, capacitors) lives inside [`Renderer`], which both the core and the
+//! decoder run — byte-exactness of live output vs decoded replay is
+//! structural, not tested-into-existence (but tested anyway).
 //!
 //! # f32 operation order is load-bearing
 //!
-//! Both consumers must agree bit-for-bit on real PCM, so the arithmetic below
-//! is written for reproducibility rather than for brevity. Do not reassociate
-//! the accumulate/scale/normalize sequence, and do not reduce [`dac_analog`]'s
+//! Both consumers must agree bit-for-bit on real PCM, so the arithmetic in
+//! this crate is written for reproducibility rather than for brevity. Do not
+//! reassociate the accumulate/scale/normalize sequence (nor the renderer's
+//! scatter/fade/mix/high-pass chain), and do not reduce [`dac_analog`]'s
 //! calls in [`agb_unrouted_levels`] to literals — writing them as the formula
 //! is what makes the levels correct by construction rather than by
 //! coincidence.
@@ -39,8 +52,12 @@
 #![forbid(unsafe_code)]
 
 mod analog;
+mod kernel;
+mod render;
 
 pub use analog::{AnalogModel, AnalogStage};
+pub use kernel::{BlepKernel, PHASES, TAPS};
+pub use render::{ChannelSynth, NO_TRANSITION, Renderer, SampleRecord};
 
 /// The host output rate every backend consumes. Fixed: the machine's clock
 /// changes how many dots fill one sample, never the samples-per-second.
