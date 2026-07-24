@@ -10,28 +10,21 @@
 //!
 //! Replay cannot simply depend on the core: the core pulls `clap`, `zip`
 //! (deflate64 + lzma), `bincode`, and `serde` with no feature gates, and all of
-//! that would land in the wasm bundle. Hence a leaf crate with no dependencies
-//! at all, which is also what makes `no_std` free here — the whole crate is f32
-//! arithmetic over integer register values, so nothing wants `libm`.
+//! that would land in the wasm bundle. Hence a leaf crate whose dependency
+//! policy is `libm` only, plus an optional non-default `serde` feature the
+//! core enables for savestates — `libm` because the charge factors need
+//! deterministic transcendentals, and the platform math (`f32::powf`) is not
+//! bit-identical across targets.
 //!
 //! # The boundary
 //!
-//! What lives here is the mixer and the DACs, and nothing downstream of them.
-//! The core applies two further stages after this one — the per-channel DAC-off
-//! fade and the model-gated output high-pass — and both deliberately stay in
-//! the core:
-//!
-//!   * They are continuous, and the tap that feeds a recording is upstream of
-//!     them by construction. The `.rba` per-plane encoder builds a `u16`
-//!     palette of distinct values, which a fade ramp would both overflow and
-//!     make quadratic to encode. Every value crossing this boundary is one of
-//!     the 16 DAC levels or `0.0`.
-//!   * The high-pass is stateful, and the replay decoder seeks freely. Filter
-//!     state at an arbitrary seek target is not reconstructible without
-//!     decoding everything before it.
-//!
-//! So this crate is the pre-analog-stage boundary exactly, which is also the
-//! whole of what an `.rba` encodes.
+//! What lives here is the mixer, the DACs, and the analog stage built on top
+//! of them ([`AnalogStage`]: the per-channel DAC-off fade and the model-gated
+//! output high-pass). The analog stage is continuous and stateful, so it sits
+//! downstream of the recording boundary: the `.rba` per-plane encoder builds a
+//! `u16` palette of distinct values, which a fade ramp would both overflow and
+//! make quadratic to encode. Every value crossing that boundary is one of the
+//! 16 DAC levels or `0.0`.
 //!
 //! # f32 operation order is load-bearing
 //!
@@ -44,6 +37,14 @@
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
+
+mod analog;
+
+pub use analog::{AnalogModel, AnalogStage};
+
+/// The host output rate every backend consumes. Fixed: the machine's clock
+/// changes how many dots fill one sample, never the samples-per-second.
+pub const HOST_SAMPLE_RATE: f32 = 44100.0;
 
 /// Digital `0..=15` to the DAC's analog output. Negative slope: digital 0 is
 /// analog +1, digital 15 is analog -1, and the (unreachable) digital 7.5 is 0.

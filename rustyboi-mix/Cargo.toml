@@ -6,4 +6,13 @@ edition = "2024"
 [lib]
 name = "rustyboi_mix"
 
+[features]
+# Serialization of the renderer's continuous state (rings, fade, capacitors)
+# for the core's savestates. MUST stay non-default: the workspace dep line pins
+# `default-features = false` so feature unification can never leak serde into
+# the rustyboi-replay-web wasm decoder.
+serde = ["dep:serde"]
+
 [dependencies]
+libm = { workspace = true }
+serde = { workspace = true, optional = true }

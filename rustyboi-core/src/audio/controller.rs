@@ -152,9 +152,10 @@ fn default_ctl_lf_div() -> u32 {
     1
 }
 
-/// The host output rate every backend consumes. Fixed: the machine's clock
-/// changes how many dots fill one sample, never the samples-per-second.
-pub const HOST_SAMPLE_RATE: f32 = 44100.0;
+/// The host output rate every backend consumes. Defined in [`rustyboi_mix`]
+/// (the analog stage derives its charge exponents from it there), re-exported
+/// at its historical path.
+pub use rustyboi_mix::HOST_SAMPLE_RATE;
 
 fn default_cycles_per_sample() -> f32 {
     crate::gb::DMG_CPU_HZ as f32 / HOST_SAMPLE_RATE

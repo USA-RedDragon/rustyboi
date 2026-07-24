@@ -3141,6 +3141,10 @@ version = "0.1.0"
 [[package]]
 name = "rustyboi-mix"
 version = "0.1.0"
+dependencies = [
+ "libm",
+ "serde",
+]
 
 [[package]]
 name = "rustyboi-platform"
