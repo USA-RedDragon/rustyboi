@@ -25,7 +25,7 @@
 //! boundary belongs to the next sample at phase 0. The SAME mapping serves both
 //! the event collapse and the sample pull, so the two can never disagree.
 
-use rustyboi_mix::{dac_analog, BlepKernel, Renderer, SampleRecord, AnalogModel, NO_TRANSITION};
+use rustyboi_mix::{dac_analog, BlepKernel, Renderer, SampleRecord, AnalogModel, NO_TRANSITION, PHASES};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
@@ -58,19 +58,63 @@ pub(crate) fn resolve_level(code: u8, ch: usize, agb: bool) -> f32 {
     }
 }
 
-/// One output sample under construction: the LAST transition per channel
-/// (last-wins collapse of every intra-sample edge) plus an optional
-/// mix-register change effective from this sample's boundary onward.
+/// The nearest of the 16 live-DAC levels [`dac_analog`]`(0..=15)` to `avg`,
+/// the quantization target for the above-Nyquist box-filter collapse.
+///
+/// NEVER returns `0.0`: [`Renderer`] derives a channel's DAC-on state from
+/// `level != 0.0`, and every `dac_analog(d)` for integer `d` is nonzero (the
+/// transfer crosses 0 only at the unreachable `d = 7.5`), so a DAC-on channel's
+/// box-filtered average always resolves to a DAC-on level and is never misread
+/// as DAC-off. Ties break to the lower `d` (the higher level), deterministically,
+/// because the scan keeps a strictly-closer candidate only.
+fn nearest_dac_alphabet(avg: f32) -> f32 {
+    let mut best = dac_analog(0);
+    let mut best_dist = (best - avg).abs();
+    for d in 1..=15u8 {
+        let l = dac_analog(d);
+        let dist = (l - avg).abs();
+        if dist < best_dist {
+            best = l;
+            best_dist = dist;
+        }
+    }
+    best
+}
+
+/// One output sample under construction: a fixed-size box-filter accumulator per
+/// channel plus an optional mix-register change effective from this sample's
+/// boundary onward.
+///
+/// A channel toggling at most once in the window (`edge_count <= 1`) takes the
+/// exact band-limited BLEP path — the single edge's `(first_phase, last_level)`.
+/// A channel toggling faster than the sample grid (`edge_count >= 2`, i.e. an
+/// EDGE rate above Nyquist — only reachable ultrasonically, e.g. a square whose
+/// fundamental exceeds 22 kHz) would ALIAS under a last-edge collapse, so
+/// `finalize` instead emits the window's time-weighted average level.
+/// `area_internal` accumulates the `cur_level`-INDEPENDENT part of that area at
+/// record time — the segments strictly between the first and last edge — because
+/// the leading (carry-in from the running `cur_level`) and trailing segments are
+/// only knowable at `finalize`, once this slot's `cur_level` is settled.
 #[derive(Clone, Copy, Serialize, Deserialize)]
 struct Slot {
-    phase: [u8; 4],
-    level: [f32; 4],
+    first_phase: [u8; 4],
+    last_phase: [u8; 4],
+    last_level: [f32; 4],
+    area_internal: [f32; 4],
+    edge_count: [u16; 4],
     mix: Option<(u8, u8, bool)>,
 }
 
 impl Default for Slot {
     fn default() -> Self {
-        Slot { phase: [NO_TRANSITION; 4], level: [0.0; 4], mix: None }
+        Slot {
+            first_phase: [0; 4],
+            last_phase: [0; 4],
+            last_level: [0.0; 4],
+            area_internal: [0.0; 4],
+            edge_count: [0; 4],
+            mix: None,
+        }
     }
 }
 
@@ -181,13 +225,28 @@ impl SynthBox {
         &mut self.slots[idx]
     }
 
-    /// Record one drained channel transition into its target sample slot
-    /// (last-wins: transitions arrive in cc order, so a later one overwrites).
+    /// Record one drained channel transition into its target sample slot,
+    /// accumulating the box-filter state. Transitions arrive in cc order, so
+    /// within a slot each edge's `phase` is >= the previous edge's, and the
+    /// segment between them (`last_level` held over `phase - last_phase`) folds
+    /// into `area_internal`. The first edge only seeds the anchors — its leading
+    /// and trailing segments depend on the (still-unsettled) `cur_level` and the
+    /// window end, and are added in `finalize`.
     pub(crate) fn record_transition(&mut self, e: u64, ch: usize, cpu_hz: u32, level: f32) {
         let (sample, phase) = self.sample_and_phase(e, cpu_hz);
         let slot = self.slot_mut(sample);
-        slot.phase[ch] = phase;
-        slot.level[ch] = level;
+        if slot.edge_count[ch] == 0 {
+            slot.first_phase[ch] = phase;
+            slot.last_phase[ch] = phase;
+            slot.last_level[ch] = level;
+            slot.edge_count[ch] = 1;
+        } else {
+            slot.area_internal[ch] +=
+                slot.last_level[ch] * (phase as f32 - slot.last_phase[ch] as f32);
+            slot.last_phase[ch] = phase;
+            slot.last_level[ch] = level;
+            slot.edge_count[ch] = slot.edge_count[ch].saturating_add(1);
+        }
     }
 
     /// Record a mix-register change effective from the sample containing `e`.
@@ -218,8 +277,20 @@ impl SynthBox {
     }
 
     /// Finalize and render the next open sample: apply its mix change, collapse
-    /// its per-channel transitions (net-zero flips → sentinel), push the record
-    /// to the tap if engaged, and step the renderer.
+    /// its per-channel transitions, push the record to the tap if engaged, and
+    /// step the renderer.
+    ///
+    /// The collapse forks on the window's edge count. `<= 1` edge is at most a
+    /// sub-Nyquist transition and takes the exact BLEP path (transition to the
+    /// edge's level at its phase iff it changes the running level). `>= 2` edges
+    /// is an above-Nyquist edge rate that a last-edge collapse would ALIAS, so it
+    /// instead emits the window's time-weighted average level, quantized to the
+    /// DAC alphabet: a symmetric ultrasonic square averages to ~DC (the output
+    /// high-pass removes it → silence), and a constant-duty tone — even one
+    /// sweeping frequency — averages to a *constant* DC (also removed → no
+    /// chirp), rather than the fabricated audible alias the last edge would give.
+    /// The averaged step is scattered at `first_phase` (an arbitrary but fixed
+    /// choice; its exact sub-sample position is immaterial once band-limited).
     pub(crate) fn finalize(&mut self, kernel: &BlepKernel) -> (f32, f32) {
         let slot = self.slots.pop_front().unwrap_or_default();
         if let Some(m) = slot.mix {
@@ -227,11 +298,36 @@ impl SynthBox {
         }
         let mut phases = [NO_TRANSITION; 4];
         for (ch, phase) in phases.iter_mut().enumerate() {
-            // A held sample (no edge) or a net-zero intra-sample flip keeps the
-            // sentinel and the previous level; a real change updates both.
-            if slot.phase[ch] != NO_TRANSITION && slot.level[ch] != self.cur_level[ch] {
-                *phase = slot.phase[ch];
-                self.cur_level[ch] = slot.level[ch];
+            match slot.edge_count[ch] {
+                // Held sample: no edge, keep the sentinel and the previous level.
+                0 => {}
+                // Exact BLEP path (unchanged): one edge, step to its level iff it
+                // actually changes the running level (a net-zero flip is held).
+                1 => {
+                    if slot.last_level[ch] != self.cur_level[ch] {
+                        *phase = slot.first_phase[ch];
+                        self.cur_level[ch] = slot.last_level[ch];
+                    }
+                }
+                // Above-Nyquist edge rate: box-filter the window to its
+                // time-weighted average and quantize to the DAC alphabet. The
+                // area is the carry-in leading segment (`cur_level` over
+                // `[0, first_phase)`), the internal segments accumulated at
+                // record time, and the trailing segment (`last_level` over
+                // `[last_phase, PHASES)`), all over the `PHASES`-wide window. A
+                // subsequent equal-average sample resolves to the same `q` and
+                // collapses to the sentinel → held constant DC → HPF-silenced.
+                _ => {
+                    let w = PHASES as f32;
+                    let leading = self.cur_level[ch] * slot.first_phase[ch] as f32;
+                    let trailing = slot.last_level[ch] * (w - slot.last_phase[ch] as f32);
+                    let avg = (leading + slot.area_internal[ch] + trailing) / w;
+                    let q = nearest_dac_alphabet(avg);
+                    if q != self.cur_level[ch] {
+                        *phase = slot.first_phase[ch];
+                        self.cur_level[ch] = q;
+                    }
+                }
             }
         }
         let rec = SampleRecord {
