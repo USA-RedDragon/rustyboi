@@ -871,6 +871,49 @@ pub enum UnlMapper {
     Chongwu(ChongwuState),
 }
 
+impl UnlMapper {
+    /// Human-readable name of the unlicensed board, for display (the gallery
+    /// mapper column, the debug snapshot). `None` for `UnlMapper::None`, where
+    /// the cart is served by a plain licensed mapper and `Cartridge::mapper_name`
+    /// falls through to the decoded `CartridgeType`. When this returns `Some`,
+    /// the cart is unlicensed and the board name is what should be shown instead
+    /// of the (often header-lying) base type — e.g. an MBC5-header VfAdder shows
+    /// "VF adder", not "MBC5". The three `Force*` header-liars are electrically a
+    /// plain MBC but carry a lying header, so they read "<mbc> (unl)".
+    pub fn label(&self) -> Option<&'static str> {
+        Some(match self {
+            UnlMapper::None => return None,
+            UnlMapper::WisdomTree => "Wisdom Tree",
+            UnlMapper::Rocket => "Rocket Games",
+            UnlMapper::SachenMmc1 => "Sachen MMC1",
+            UnlMapper::SachenMmc2 => "Sachen MMC2",
+            UnlMapper::NtOld1 => "NT-old (MBC1)",
+            UnlMapper::NtOld2 => "NT-old (MBC3)",
+            UnlMapper::ForceMbc1 => "MBC1 (unl)",
+            UnlMapper::ForceMbc5 => "MBC5 (unl)",
+            UnlMapper::ForceMbc3 => "MBC3 (unl)",
+            UnlMapper::M161 => "M161",
+            UnlMapper::Vf001(_) => "VF001 (Vast Fame)",
+            UnlMapper::LiCheng => "Li Cheng",
+            UnlMapper::Bbd(_) => "BBD",
+            UnlMapper::Ggb81(_) => "GGB81",
+            UnlMapper::Sintax(_) => "Sintax",
+            UnlMapper::Hitek(_) => "HiteK",
+            UnlMapper::Vf001Gen(_) => "VF001-gen (Vast Fame)",
+            UnlMapper::Vf8k(_) => "VF001-8K (Vast Fame)",
+            UnlMapper::NewGbHk => "New GB HK",
+            UnlMapper::Vf001Zook(_) => "VF001-Zook (Vast Fame)",
+            UnlMapper::PokeJadeDia(_) => "PKJD (Telefang)",
+            UnlMapper::Gowin(_) => "Gowin",
+            UnlMapper::ActionReplayV4(_) => "Action Replay V4",
+            UnlMapper::XploderGb(_) => "Xploder GB",
+            UnlMapper::VfAdder(_) => "VF adder (Vast Fame)",
+            UnlMapper::NtNew(_) => "NT-new (split window)",
+            UnlMapper::Chongwu(_) => "Chongwu (Li Cheng)",
+        })
+    }
+}
+
 /// Protection-port state of `UnlMapper::Chongwu`, carried inside the enum variant
 /// (not as a `Cartridge` field) so every other cart's bincode savestate layout
 /// stays byte-identical. Power-on is closed, i.e. a plain MBC5; the latch only
@@ -2441,6 +2484,13 @@ impl Cartridge {
     /// `"HuC1"`. Reflects content-detected unlicensed boards (Sachen, NT, …),
     /// not just the header type byte.
     pub fn mapper_name(&self) -> &'static str {
+        // An unlicensed cart reports its board (e.g. "Sintax", "VF adder"),
+        // not the base/header type it electrically presents as -- which for the
+        // header-liars is an outright lie. Licensed carts (`unl_mapper == None`)
+        // fall through to the decoded `CartridgeType`.
+        if let Some(name) = self.unl_mapper.label() {
+            return name;
+        }
         use CartridgeType::*;
         match self.get_cartridge_type() {
             // $00 and $08 both decode to NoMBC{battery:false}; the raw type byte
@@ -5155,6 +5205,25 @@ mod tests {
     fn fix_header_checksum(rom: &mut [u8]) {
         let sum = rom[0x0134..0x014D].iter().fold(0u8, |a, &b| a.wrapping_sub(b).wrapping_sub(1));
         rom[0x014D] = sum;
+    }
+
+    #[test]
+    fn unlicensed_carts_report_their_board_not_the_base_type() {
+        // The enum label maps every non-None variant to a name and only None
+        // falls through.
+        assert_eq!(UnlMapper::None.label(), None);
+        assert_eq!(UnlMapper::VfAdder(VfAdderState::default()).label(), Some("VF adder (Vast Fame)"));
+        assert_eq!(UnlMapper::ForceMbc5.label(), Some("MBC5 (unl)"));
+
+        // End to end: a BBD-detected cart reports "BBD", not its MBC5 base type;
+        // a plain licensed MBC1 still reports "MBC1".
+        let bbd = Cartridge::from_bytes(&make_bbd_rom()).unwrap();
+        assert!(matches!(bbd.unl_mapper(), UnlMapper::Bbd(_)));
+        assert_eq!(bbd.mapper_name(), "BBD");
+
+        let licensed = Cartridge::from_bytes(&make_rom(MBC1, 0x02)).unwrap();
+        assert_eq!(licensed.unl_mapper(), &UnlMapper::None);
+        assert_eq!(licensed.mapper_name(), "MBC1");
     }
 
     #[test]
