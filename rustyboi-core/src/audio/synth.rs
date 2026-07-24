@@ -36,6 +36,14 @@ const SAMPLE_RATE_X2: u128 = 88_200;
 
 const _: () = assert!(SAMPLE_RATE_X2 == 2 * 44_100);
 
+/// Hard cap on how far past the pull frontier [`SynthBox::slot_mut`] will open
+/// a slot — ~4.5 s of host samples (~270 frames). The pull finalizes every
+/// closed sample after each instruction, so the real open window is one or two
+/// samples; nothing legitimate reaches even one frame ahead. This is purely a
+/// backstop against a mis-mapped (underflowed) transition timestamp, capping
+/// the slot `VecDeque` at ~11 MB instead of an unbounded (OOM) allocation.
+pub(crate) const MAX_SLOT_HORIZON: usize = 200_000;
+
 /// A channel's discrete output level as a small code the channel emits and the
 /// controller resolves: `0..=15` is a live DAC nibble, `16` is the DAC-off
 /// marker (only produced by non-AGB machines, where it renders to `0.0`).
@@ -232,6 +240,22 @@ impl SynthBox {
     fn slot_mut(&mut self, sample: u64) -> &mut Slot {
         let sample = sample.max(self.next_sample);
         let idx = (sample - self.next_sample) as usize;
+        // Defensive bound. The pull finalizes every closed sample after each
+        // instruction, so a live transition sits at most one or two samples
+        // past `next_sample`; a target this far ahead is never real audio but a
+        // cc-mapping underflow (an `e` that wrapped below `a_cc` maps to a
+        // ~1e17 index — the pre-fix multi-GB OOM). The root cause is clamped at
+        // the drain site; this is the last-resort cap so the slot buffer can
+        // never balloon. Loud under audit/debug, silently clamped in release.
+        if idx > MAX_SLOT_HORIZON {
+            #[cfg(any(debug_assertions, feature = "synth-audit"))]
+            panic!(
+                "synth slot index {idx} beyond horizon {MAX_SLOT_HORIZON} \
+                 (sample {sample}, next_sample {}, synth_cc {}, a_cc {})",
+                self.next_sample, self.synth_cc, self.a_cc
+            );
+        }
+        let idx = idx.min(MAX_SLOT_HORIZON);
         while self.slots.len() <= idx {
             self.slots.push_back(Slot::default());
         }
@@ -287,6 +311,15 @@ impl SynthBox {
 
     pub(crate) fn next_sample(&self) -> u64 {
         self.next_sample
+    }
+
+    /// Current depth of the open-sample slot buffer. Bounded by
+    /// [`MAX_SLOT_HORIZON`] in [`SynthBox::slot_mut`]; read only by the
+    /// pull-time audit tripwire and the cc-mapping regression test, so it is
+    /// compiled only when one of those exists.
+    #[cfg(any(test, debug_assertions, feature = "synth-audit"))]
+    pub(crate) fn slots_len(&self) -> usize {
+        self.slots.len()
     }
 
     /// Finalize and render the next open sample: apply its mix change, collapse

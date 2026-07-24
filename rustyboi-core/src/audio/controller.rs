@@ -1107,6 +1107,15 @@ impl Audio {
         // across this pull (the channels don't advance in the sample path), and
         // the per-instruction pull cadence makes it effectively per-boundary.
         let ultrasonic = self.ultrasonic_levels();
+        // Always-on (release) tripwire under `synth-audit`: the slot buffer must
+        // never grow past its bound — a regression of the cc-mapping clamp would
+        // trip this on the baseline regen rather than OOM in the field.
+        #[cfg(any(debug_assertions, feature = "synth-audit"))]
+        assert!(
+            self.synth.slots_len() <= crate::audio::synth::MAX_SLOT_HORIZON + 1,
+            "synth slot buffer {} exceeded horizon at pull",
+            self.synth.slots_len()
+        );
         while self.synth.pull_target(self.cpu_hz) > self.synth.next_sample() {
             out.push(self.synth.finalize(&self.kernel, &ultrasonic));
         }
@@ -1201,7 +1210,19 @@ impl Audio {
         for &(fc, code) in pending.iter() {
             // fc is in the (folded) `cc` domain; its distance back from the
             // current cc is fold-invariant, so the unfolded synth cc is exact.
-            let e = scc.wrapping_sub(cc.wrapping_sub(fc) as u64);
+            // A register-access overlay resolves the channel at a per-access cc
+            // that can lead this drain's per-dot `cc` by a few hundred cc, so an
+            // `fc` slightly AHEAD of `cc` is legitimate; `cc.wrapping_sub(fc)`
+            // then wraps to ~2^32, and `scc - that` underflows to a timestamp
+            // ~2^32 cc in the "past" that maps ~1e17 samples into the future
+            // (the OOM). Such an edge belongs at the current boundary, so clamp
+            // the look-back to 0 (map it to `scc` = now) — mirroring the
+            // channels' own backward-overlay guards (e.g. `square::update_pos`
+            // bails when `cycles_left >= 0x8000_0000`). In-range edges (fc <= cc)
+            // are untouched, so real audio is byte-identical.
+            let back = cc.wrapping_sub(fc);
+            let back = if back >= 0x8000_0000 { 0 } else { back };
+            let e = scc.wrapping_sub(back as u64);
             let level = crate::audio::synth::resolve_level(code, ch, agb);
             synth.record_transition(e, ch, cpu_hz, level);
         }
@@ -1457,6 +1478,62 @@ mod tests {
             }
         }
         n
+    }
+
+    /// Root-cause regression for the audio-ON slot-buffer OOM.
+    ///
+    /// A register-access overlay advances a channel at a per-access cc that can
+    /// lead a later drain's per-dot `cc` by a few hundred cc, so a `pending`
+    /// edge whose folded cc sits slightly AHEAD of the drain `cc` is legitimate.
+    /// `Audio::drain_channel` maps it with `scc - (cc - fc)`; when `fc > cc` the
+    /// `u32` look-back wraps to ~2^32, `scc - ~2^32` underflows, and the edge
+    /// lands ~1e17 samples in the future — `slot_mut` then tries to push ~1e17
+    /// slots (the multi-GB OOM). It escaped every gate because all 28 hardware
+    /// suites run audio OFF (no transitions recorded, so the slot path is never
+    /// exercised); only a broad audio-ON sweep hits it. Observed in the wild on
+    /// Konami GB Collection Vol.1 (Europe), square channel 2, fc 310 cc ahead of
+    /// cc — encoded clean-room below. The fix clamps the wrapped look-back to 0
+    /// (map the edge to "now"), so the slot buffer stays bounded.
+    #[test]
+    fn ahead_of_now_transition_maps_to_now_and_stays_bounded() {
+        let mut audio = Audio::new();
+        audio.set_boot_cgb(true);
+        sync(&mut audio, 0);
+        sync(&mut audio, 0x400);
+        audio.write(NR52, 0x80); // power on
+        audio.write(NR22, 0xF0); // ch2 volume 15
+        audio.write(NR23, 0x00);
+        audio.write(NR24, 0x87); // trigger ch2 (length disabled)
+        // Observing anchors the synth grid and starts recording transitions.
+        audio.set_observing(true);
+        // Advance well past the grid origin, then flush every closed sample so
+        // the slot buffer is (near) empty — the live path pulls after each
+        // instruction, so this is its steady state.
+        sync(&mut audio, 0x8000);
+        let _ = audio.generate_samples();
+        let base = audio.synth.slots_len();
+
+        // Inject a transition whose folded cc leads the current drain cc by 310
+        // (the observed overlay lead) directly into channel 2's `pending`.
+        let cc = audio.cc;
+        audio.channel2.pending_mut().clear();
+        audio.channel2.pending_mut().push((cc.wrapping_add(310), 9));
+        audio.drain_pending();
+
+        // The ahead-of-now edge must land at ~now, never ~1e17 samples ahead:
+        // the buffer grows by a handful of slots, nowhere near the horizon.
+        // (Pre-fix this ballooned to the horizon / OOM; under debug_assertions
+        // `slot_mut` now panics instead, which would also fail this test.)
+        let grown = audio.synth.slots_len();
+        assert!(
+            grown <= base + 4,
+            "ahead-of-now transition ballooned the slot buffer to {grown} \
+             (base {base}); the cc-mapping underflow regressed",
+        );
+        assert!(
+            grown < crate::audio::synth::MAX_SLOT_HORIZON,
+            "slot buffer {grown} reached the defensive horizon — root-cause clamp missing",
+        );
     }
 
     /// The APU master clock `cc` is kept mod 2^31 and wraps every ~17 emulated
