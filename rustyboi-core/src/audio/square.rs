@@ -1015,6 +1015,29 @@ impl SquareWave {
         }
     }
 
+    /// The channel's DC average output level when its fundamental is strictly
+    /// above Nyquist, for the synth's period-based ultrasonic gate; `None`
+    /// otherwise (only a running, DAC-on tone is gated — a silent or non-tonal
+    /// channel stays on the normal collapse). A square spends `duty_fraction` of
+    /// its period at `dac_analog(volume)` and the rest at the digital-0 low
+    /// level, so its DC average is their duty-weighted mean. Not AGB-negated:
+    /// only CH3 inverts on AGB (see `synth::resolve_level`).
+    pub(super) fn ultrasonic_dc(&self, cpu_hz: u32) -> Option<f32> {
+        if !self.is_active() {
+            return None;
+        }
+        // One full duty cycle is 8 duty ticks of `to_period` APU cycles each.
+        let full_period = 8 * to_period(self.freq());
+        if !crate::audio::synth::is_ultrasonic(full_period, cpu_hz) {
+            return None;
+        }
+        // Duty {0,1,2,3} = {12.5, 25, 50, 75}% high (see DUTIES).
+        let highs = [1u32, 2, 4, 6][self.duty() as usize];
+        let hi = rustyboi_mix::dac_analog(self.volume & 0x0F);
+        let lo = rustyboi_mix::dac_analog(0);
+        Some((highs as f32 * hi + (8 - highs) as f32 * lo) / 8.0)
+    }
+
     /// Whether the channel's DAC is powered, i.e. `NRx2 & $F8 != 0` (Pan Docs,
     /// DACs). Deliberately read straight off the register rather than off
     /// `master`: `master` is also cleared by the sweep-overflow and NR10

@@ -81,6 +81,19 @@ fn nearest_dac_alphabet(avg: f32) -> f32 {
     best
 }
 
+/// Whether a tonal channel whose full waveform period is `full_period_cc` APU
+/// cycles has a fundamental strictly ABOVE Nyquist at clock `cpu_hz` — i.e.
+/// fewer than 2 output samples span one period.
+///
+/// `samples_per_period = full_period_cc * SAMPLE_RATE_X2 / cpu_hz`; a period
+/// under 2 samples means a fundamental over `HOST_SAMPLE_RATE / 2` = 22.05 kHz.
+/// The comparison is strict, so a fundamental EXACTLY at Nyquist (2 samples per
+/// period) is not gated — nothing at or below the audible range is ever caught.
+/// `cpu_hz`-relative, so it tracks SGB1's slower grid without a separate rule.
+pub(crate) fn is_ultrasonic(full_period_cc: u32, cpu_hz: u32) -> bool {
+    full_period_cc as u128 * SAMPLE_RATE_X2 < 2 * cpu_hz as u128
+}
+
 /// One output sample under construction: a fixed-size box-filter accumulator per
 /// channel plus an optional mix-register change effective from this sample's
 /// boundary onward.
@@ -280,24 +293,47 @@ impl SynthBox {
     /// its per-channel transitions, push the record to the tap if engaged, and
     /// step the renderer.
     ///
-    /// The collapse forks on the window's edge count. `<= 1` edge is at most a
-    /// sub-Nyquist transition and takes the exact BLEP path (transition to the
-    /// edge's level at its phase iff it changes the running level). `>= 2` edges
-    /// is an above-Nyquist edge rate that a last-edge collapse would ALIAS, so it
-    /// instead emits the window's time-weighted average level, quantized to the
-    /// DAC alphabet: a symmetric ultrasonic square averages to ~DC (the output
-    /// high-pass removes it → silence), and a constant-duty tone — even one
-    /// sweeping frequency — averages to a *constant* DC (also removed → no
-    /// chirp), rather than the fabricated audible alias the last edge would give.
-    /// The averaged step is scattered at `first_phase` (an arbitrary but fixed
-    /// choice; its exact sub-sample position is immaterial once band-limited).
-    pub(crate) fn finalize(&mut self, kernel: &BlepKernel) -> (f32, f32) {
+    /// `ultrasonic[ch]` is `Some(dc)` when that channel is a running, DAC-on
+    /// TONE whose fundamental is above Nyquist (a period-based test on the
+    /// channel's CURRENT register state — see [`is_ultrasonic`] and the channels'
+    /// `ultrasonic_dc`). Such a channel's audible-band output IS its DC average:
+    /// this branch emits that DC (quantized to the DAC alphabet), SUPERSEDING
+    /// both the box filter and the BLEP path, because at ~1 edge per window the
+    /// box filter attenuates only ~7 dB and the BLEP path aliases the last edge
+    /// into an audible tone. The DC is constant while duty/volume hold (even mid
+    /// frequency-sweep), so consecutive samples collapse to the sentinel → held
+    /// constant DC → HPF-silenced. The step into the DC is band-limited (at
+    /// `first_phase`, or 0 for a no-edge window), so crossing Nyquist never
+    /// clicks. CH4 noise is never flagged (no single fundamental).
+    ///
+    /// When a channel is NOT flagged the collapse forks on the window's edge
+    /// count. `<= 1` edge is at most a sub-Nyquist transition and takes the exact
+    /// BLEP path (transition to the edge's level at its phase iff it changes the
+    /// running level). `>= 2` edges is an above-Nyquist edge rate a last-edge
+    /// collapse would ALIAS, so it emits the window's time-weighted average level
+    /// (box filter); this remains the path for CH4 and for the transient window
+    /// where the period test and the recorded edges briefly disagree.
+    pub(crate) fn finalize(
+        &mut self,
+        kernel: &BlepKernel,
+        ultrasonic: &[Option<f32>; 4],
+    ) -> (f32, f32) {
         let slot = self.slots.pop_front().unwrap_or_default();
         if let Some(m) = slot.mix {
             self.cur_mix = m;
         }
         let mut phases = [NO_TRANSITION; 4];
         for (ch, phase) in phases.iter_mut().enumerate() {
+            // Period-based ultrasonic gate: fundamental above Nyquist → emit the
+            // channel's DC, ignoring the window's (aliasing) edge structure.
+            if let Some(dc) = ultrasonic[ch] {
+                let q = nearest_dac_alphabet(dc);
+                if q != self.cur_level[ch] {
+                    *phase = if slot.edge_count[ch] > 0 { slot.first_phase[ch] } else { 0 };
+                    self.cur_level[ch] = q;
+                }
+                continue;
+            }
             match slot.edge_count[ch] {
                 // Held sample: no edge, keep the sentinel and the previous level.
                 0 => {}

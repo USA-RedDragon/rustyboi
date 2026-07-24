@@ -217,6 +217,96 @@ fn ch2_square_is_spectrally_clean() {
     );
 }
 
+/// A 50 %-duty square GLIDING through the ultrasonic band — every freq visited
+/// has a fundamental strictly above Nyquist — must be silent in the audible
+/// band. On real (continuous-time) hardware the tone sits above 22 kHz and the
+/// line-out carries nothing a 44.1 kHz stream can represent, so the faithful
+/// rendering is silence.
+///
+/// This is the ~1-edge-per-window case (fundamental 22-44 kHz, freq 2043-2047):
+/// a square's edge rate is 2·f, so it stays at ~1 edge per 44.1 kHz window and
+/// WP6's `edge_count >= 2` box filter never fires (a single-edge window
+/// box-averages to only ~7 dB of attenuation — its first null is at 44.1 kHz).
+/// The exact-BLEP path then renders each ultrasonic fundamental as a distinct
+/// AUDIBLE alias (~-31.6 dBFS), so a glide chirps across the band. WP6b's
+/// period-based ultrasonic gate instead emits the duty DC (constant across the
+/// glide since duty/volume are fixed), which the output high-pass removes.
+/// NR13/NR23 is glided while the channel runs (no re-trigger).
+fn square_glide_rom(ch: u8) -> Vec<u8> {
+    let (nr1, nr2, nr3, nr4) = if ch == 1 {
+        (0x11u8, 0x12u8, 0x13u8, 0x14u8)
+    } else {
+        (0x16, 0x17, 0x18, 0x19)
+    };
+    vec![
+        0x3E, 0x80, 0xE0, 0x26, // APU on
+        0x3E, 0xFF, 0xE0, 0x25, // NR51 route all
+        0x3E, 0x77, 0xE0, 0x24, // NR50 full volume
+        0x3E, 0x80, 0xE0, nr1, //  duty 2 (50%)
+        0x3E, 0xF0, 0xE0, nr2, //  vol 15, DAC on
+        0x3E, 0xFF, 0xE0, nr3, //  freq low $FF
+        0x3E, 0x87, 0xE0, nr4, //  trigger, freq high 7 -> freq 2047
+        0x0E, 0xFF, //             LD C,$FF                ; running freq-low value
+        // outer: write the current freq low (NO re-trigger -> a true glide)
+        0x79, 0xE0, nr3, //        LD A,C ; LDH (NRx3),A
+        0x16, 0x04, //             LD D,$04                ; dwell per freq
+        // delayD:
+        0x06, 0x00, //             LD B,$00
+        // delayB:
+        0x05, 0x20, 0xFD, //       DEC B ; JR NZ,delayB    (-3 -> delayB)
+        0x15, 0x20, 0xF8, //       DEC D ; JR NZ,delayD    (-8 -> delayD)
+        0x0D, //                   DEC C                   ; next (higher freq)
+        0x79, 0xFE, 0xFB, //       LD A,C ; CP $FB         ; floor at freq low 0xFB (freq 2043)
+        0x30, 0x02, //             JR NC,cont              ; C >= $FB: keep gliding
+        0x0E, 0xFF, //             LD C,$FF                ; else wrap to freq 2047
+        // cont:
+        0x18, 0xE9, //             JR outer                (-23 -> outer)
+    ]
+}
+
+/// Capture a square glide and return `(rms, worst 1-18 kHz bin, dBFS)`.
+fn assay_square_glide(ch: u8) -> (f64, f64) {
+    let x = capture(&square_glide_rom(ch), 8192, 32768);
+    let rms = (total_energy(&x) / x.len() as f64).sqrt();
+    let bin_hz = FS / x.len() as f64;
+    let full_scale = x.len() as f64 / 2.0; // |X|^2 energy of a 1.0-amplitude tone
+    let mut worst_bin = 0.0f64;
+    let mut f = 1000.0;
+    while f <= 18_000.0 {
+        worst_bin = worst_bin.max(bin_energy(&x, (f / bin_hz).round() as u64));
+        f += 71.0; // coprime-ish step so probes don't all miss a comb
+    }
+    (rms, 10.0 * (worst_bin / full_scale).max(1e-30).log10())
+}
+
+#[test]
+fn ch1_square_glide_through_ultrasonic_is_silent() {
+    // freq 2043..2047 -> fundamentals 26.2..131 kHz, all above Nyquist and above
+    // the 18 kHz top of the assertion band, so nothing real belongs in 1-18 kHz.
+    // Pre-WP6b the BLEP path aliases each fundamental into the band (~-31.6 dBFS
+    // chirp); the gate silences it.
+    let (rms, peak_db) = assay_square_glide(1);
+    eprintln!("CH1 square glide: rms = {rms:.4} worst 1-18kHz peak = {peak_db:.1} dBFS");
+    assert!(rms < 0.02, "CH1 ultrasonic square glide produced audible energy (rms {rms:.4})");
+    assert!(
+        peak_db < -55.0,
+        "CH1 ultrasonic square glide leaked an in-band tonal alias ({peak_db:.1} dBFS, \
+         want < -55); the pre-WP6b BLEP alias was ~-31.6 dBFS"
+    );
+}
+
+#[test]
+fn ch2_square_glide_through_ultrasonic_is_silent() {
+    // Same glide on CH2 -> proves the gate is not CH1-specific (channel wiring).
+    let (rms, peak_db) = assay_square_glide(2);
+    eprintln!("CH2 square glide: rms = {rms:.4} worst 1-18kHz peak = {peak_db:.1} dBFS");
+    assert!(rms < 0.02, "CH2 ultrasonic square glide produced audible energy (rms {rms:.4})");
+    assert!(
+        peak_db < -55.0,
+        "CH2 ultrasonic square glide leaked an in-band tonal alias ({peak_db:.1} dBFS, want < -55)"
+    );
+}
+
 // --- CH3 wave --------------------------------------------------------------
 
 /// Program: write `wave` (32 nibbles, MS-nibble first per byte) to wave RAM

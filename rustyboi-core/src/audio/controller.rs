@@ -1103,10 +1103,28 @@ impl Audio {
     /// slower grid yields fewer samples for the same dots (pitched up 2.4%).
     pub(crate) fn generate_samples(&mut self) -> Vec<(f32, f32)> {
         let mut out = Vec::new();
+        // Snapshot each tonal channel's above-Nyquist state once — invariant
+        // across this pull (the channels don't advance in the sample path), and
+        // the per-instruction pull cadence makes it effectively per-boundary.
+        let ultrasonic = self.ultrasonic_levels();
         while self.synth.pull_target(self.cpu_hz) > self.synth.next_sample() {
-            out.push(self.synth.finalize(&self.kernel));
+            out.push(self.synth.finalize(&self.kernel, &ultrasonic));
         }
         out
+    }
+
+    /// Each tonal channel's DC level when its fundamental is above Nyquist, for
+    /// the synth's period-based ultrasonic gate; `None` leaves the channel on the
+    /// unchanged BLEP/box collapse. CH4 noise has no single fundamental (its
+    /// high-shift color is the box filter's job) and is never gated here.
+    fn ultrasonic_levels(&self) -> [Option<f32>; 4] {
+        let hz = self.cpu_hz;
+        [
+            self.channel1.ultrasonic_dc(hz),
+            self.channel2.ultrasonic_dc(hz),
+            self.channel3.ultrasonic_dc(hz),
+            None,
+        ]
     }
 
     /// STOP-window cadence: the master clock is frozen, so no transitions occur,

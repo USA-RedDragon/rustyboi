@@ -368,6 +368,34 @@ impl Wave {
         }
     }
 
+    /// CH3's DC average output level when its table-playback fundamental is
+    /// strictly above Nyquist, for the synth's period-based ultrasonic gate;
+    /// `None` otherwise (only a running channel is gated). The DC is the mean of
+    /// `dac_analog(nibble >> shift)` over all 32 wave-RAM nibbles, AGB-negated to
+    /// match `synth::resolve_level(_, 2, agb)`. Because `dac_analog` is affine
+    /// and `-dac_analog(d) == dac_analog(15 - d)`, this mean and its negation both
+    /// quantize within the 16-level alphabet — no RBA2 palette growth.
+    pub(super) fn ultrasonic_dc(&self, cpu_hz: u32) -> Option<f32> {
+        if !self.master {
+            return None;
+        }
+        // One full table cycle is 32 nibble fetches of `period` APU cycles each.
+        let full_period = 32 * self.period();
+        if !crate::audio::synth::is_ultrasonic(full_period, cpu_hz) {
+            return None;
+        }
+        let output_level = self.get_output_level();
+        let mut sum = 0.0f32;
+        for &byte in self.wave_ram.iter() {
+            for nib in [byte >> 4, byte & 0x0F] {
+                let played = if output_level == 0 { 0 } else { (nib >> (output_level - 1)) & 0x0F };
+                sum += rustyboi_mix::dac_analog(played);
+            }
+        }
+        let dc = sum / 32.0;
+        Some(if self.agb { -dc } else { dc })
+    }
+
     /// Whether the channel's DAC is powered. CH3 is the exception to the
     /// `NRx2 & $F8` rule: its DAC is bit 7 of NR30 (Pan Docs, DACs).
     pub(super) fn dac_on(&self) -> bool {
