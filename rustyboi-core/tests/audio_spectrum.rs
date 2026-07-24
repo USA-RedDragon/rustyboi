@@ -289,27 +289,27 @@ fn ch3_wave_pattern_is_spectrally_clean() {
     assert!(floor_db < -80.0, "CH3 inter-harmonic floor {floor_db:.1} dB too high");
 }
 
-/// The realistic "parked channel" case: CH3 left running on a FLAT waveform
-/// (constant nibble) must be silent. The collapse contract's dedup emits no
-/// transitions for a constant output, so the renderer holds and the high-pass
-/// removes the DC — true silence, no aliasing.
+/// The "parked channel" case, both ways it can be parked, must be silent.
 ///
-/// LIMITATION, documented here and asserted below: a channel driven at an
-/// ultrasonic EDGE RATE — freq 2047 + an alternating table is a ~1 MHz square
-/// whose edges are far denser than the 44.1 kHz sample grid — CANNOT be
-/// band-limited by the ≤1-transition/sample collapse. That collapse is itself a
-/// sub-sampling step, so dense-edge content aliases into the band exactly as
-/// point-sampling did (measured ~10 kHz here). This is the SAME accepted trade
-/// the risk register books for CH4's above-Nyquist shift rates: hardware puts
-/// this content above 20 kHz where it is inaudible, and the size-bounded
-/// contract cannot represent it. The band-limiting win is real for every
-/// sub-Nyquist-edge program (CH1/CH2/CH3-wave all render at <0.01% spurious);
-/// dense-edge ultrasonic parking is the documented exception, not a screech
-/// regression on real content. (The plan's "parking → silent" expectation
-/// assumed the intra-sample flips net to zero; on the fixed 44.1 kHz grid they
-/// do not align, so they do not.)
+/// (a) A FLAT waveform (constant nibble): no fetch changes the level, so the
+/// collapse emits no transitions, the renderer holds, and the high-pass removes
+/// the DC — trivially silent.
+///
+/// (b) A channel driven at an ultrasonic EDGE RATE — freq 2047 + an alternating
+/// table is a ~1 MHz square whose edges are far denser than the 44.1 kHz sample
+/// grid. This is the case WP6 fixes. A last-edge collapse keeps whichever rail
+/// the final intra-sample edge landed on, which beats against the sample grid
+/// into a full-scale ~10 kHz AUDIBLE alias (this test measured rms 0.2262 on the
+/// pre-WP6 core). The box-filter collapse instead emits the window's
+/// time-weighted average: a symmetric ultrasonic square averages to ~DC, which
+/// quantizes to the DAC level nearest 0 and, held constant, is removed by the
+/// output high-pass. What remains is only the residual of the quantization
+/// dithering as the tiny per-window average ripples across the mid-code
+/// boundary — a ~16x-smaller artifact (rms ~0.014), not a fabricated screech.
+/// Hardware puts this fundamental above 20 kHz where it is inaudible; near-DC
+/// silence is the faithful rendering.
 #[test]
-fn ch3_parked_flat_channel_is_silent() {
+fn ch3_parked_channel_is_silent() {
     // A constant nibble 8 -> a flat DC waveform: no fetches change the level.
     let table = [0x88u8; 16];
     let x = capture(&wave_rom(0x600, table), 8192, 16384);
@@ -321,14 +321,99 @@ fn ch3_parked_flat_channel_is_silent() {
          the dedup emitted spurious transitions"
     );
 
-    // The dense-edge ultrasonic case aliases (documented limitation): assert the
-    // energy is BOUNDED (finite, not blown up past full-scale) so it is at worst
-    // a bounded artifact, and record it.
+    // The dense-edge ultrasonic case: the box-filter collapse (WP6) must render
+    // it as near-silence, NOT the pre-WP6 rms-0.2262 full-scale ~10 kHz alias.
+    // Measured post-WP6: rms ~0.014 (the residual mid-code quantization dither);
+    // the bound proves the alias is gone with margin over the measurement.
     let table = [0xF0u8; 16];
     let y = capture(&wave_rom(2047, table), 8192, 16384);
     let rms_us = (total_energy(&y) / y.len() as f64).sqrt();
-    eprintln!("CH3 ultrasonic-edge parking (documented alias): rms = {rms_us:.4}");
-    assert!(rms_us < 0.3, "ultrasonic-edge alias exceeded full-scale bound");
+    eprintln!("CH3 ultrasonic-edge parking (box-filtered): rms = {rms_us:.4}");
+    assert!(
+        rms_us < 0.03,
+        "CH3 ultrasonic parking must be near-silent after the box-filter collapse \
+         (rms {rms_us:.4}, want < 0.03); the pre-WP6 last-edge alias was ~0.226"
+    );
+}
+
+/// A square frequency GLIDING through the ultrasonic band must produce no
+/// audible chirp. A CH3 alternating-nibble table is a square whose EDGE rate is
+/// the fetch rate; over freq 2032..2047 (fetch period 16..1 cc) that is >= 3
+/// edges per 44.1 kHz window throughout — squarely inside WP6's ">= 2 edges,
+/// above-Nyquist" box-filter regime, with the fundamental (65..1049 kHz) always
+/// far above the 18 kHz top of the assertion band. The freq register (NR33) is
+/// glided while the channel runs (no re-trigger). Any energy in 1..18 kHz is a
+/// fabricated alias, not real signal.
+///
+/// A last-edge collapse aliases each ultrasonic fundamental to a different
+/// AUDIBLE frequency, so a glide becomes an audible chirp sweeping across the
+/// band. The box-filter collapse averages every symmetric square to the same
+/// ~DC regardless of frequency, so the glide stays near-silent: no moving tonal
+/// spur, no broadband screech. We assert both a low total RMS and no strong
+/// tonal peak anywhere the chirp would pass through.
+#[test]
+fn square_glide_through_ultrasonic_has_no_chirp() {
+    // Prologue: APU on, route/volume, then load an alternating (0xF0) wave table
+    // while CH3's DAC is off, DAC on, output 100%, trigger at freq 2047.
+    let mut code: Vec<u8> = vec![
+        0x3E, 0x80, 0xE0, 0x26, // NR52 = $80: APU on
+        0x3E, 0xFF, 0xE0, 0x25, // NR51 = $FF: route all
+        0x3E, 0x77, 0xE0, 0x24, // NR50 = $77: full volume
+        0x3E, 0x00, 0xE0, 0x1A, // NR30 = 0: DAC off, wave RAM writable
+        0x3E, 0xF0, //            LD A,$F0: an alternating F/0 nibble table
+    ];
+    for i in 0..16u8 {
+        code.extend_from_slice(&[0xE0, 0x30 + i]); // LDH ($30+i),A
+    }
+    // The glide loop is position-independent (all jumps are relative and internal),
+    // so its offsets do not depend on the prologue length above.
+    code.extend_from_slice(&[
+        0x3E, 0x80, 0xE0, 0x1A, // NR30 = $80: DAC on
+        0x3E, 0x20, 0xE0, 0x1C, // NR32 = $20: output level 100%
+        0x3E, 0xFF, 0xE0, 0x1D, // NR33 = $FF: freq low
+        0x3E, 0x87, 0xE0, 0x1E, // NR34 = $87: trigger, freq high $07 (freq 2047)
+        0x0E, 0xFF, //            LD C,$FF               ; running freq-low value
+        // outer: write the current freq low (NO re-trigger -> a true glide)
+        0x79, 0xE0, 0x1D, //      LD A,C ; LDH (NR33),A
+        0x16, 0x04, //            LD D,$04               ; dwell per freq
+        // delayD:
+        0x06, 0x00, //            LD B,$00
+        // delayB:
+        0x05, 0x20, 0xFD, //      DEC B ; JR NZ,delayB   (-3 -> delayB)
+        0x15, 0x20, 0xF8, //      DEC D ; JR NZ,delayD   (-8 -> delayD)
+        0x0D, //                  DEC C                  ; next (higher) freq
+        0x79, 0xFE, 0xF0, //      LD A,C ; CP $F0        ; floor at freq low 0xF0
+        0x30, 0x02, //            JR NC,cont             ; C >= $F0: keep gliding
+        0x0E, 0xFF, //            LD C,$FF               ; else wrap to freq 2047
+        // cont:
+        0x18, 0xE9, //            JR outer               (-23 -> outer)
+    ]);
+    let x = capture(&code, 8192, 32768);
+    let total = total_energy(&x);
+    let rms = (total / x.len() as f64).sqrt();
+
+    // No tonal peak in 1..18 kHz: probe ~240 bins across the band and take the
+    // worst, relative to full scale (Parseval energy of a unit-amplitude bin).
+    let bin_hz = FS / x.len() as f64;
+    let full_scale = x.len() as f64 / 2.0; // |X|^2 energy of a 1.0-amplitude tone
+    let mut worst_bin = 0.0f64;
+    let mut f = 1000.0;
+    while f <= 18_000.0 {
+        worst_bin = worst_bin.max(bin_energy(&x, (f / bin_hz).round() as u64));
+        f += 71.0; // coprime-ish step so probes don't all miss a comb
+    }
+    let peak_db = 10.0 * (worst_bin / full_scale).max(1e-30).log10();
+    eprintln!("square glide: rms = {rms:.4} worst 1-18kHz peak = {peak_db:.1} dBFS");
+    // Near-silence overall (measured rms ~0.028 — mostly the quantization dither
+    // of the lower-frequency, less-dense end of the glide; the pre-WP6 last-edge
+    // collapse chirps here at rms ~0.2).
+    assert!(rms < 0.04, "ultrasonic glide produced audible energy (rms {rms:.4})");
+    // And specifically no fabricated tone: every in-band bin is deep down.
+    assert!(
+        peak_db < -45.0,
+        "ultrasonic glide produced an in-band tonal spur ({peak_db:.1} dBFS); a \
+         fabricated chirp alias is leaking into 1-18 kHz"
+    );
 }
 
 // --- CH4 noise -------------------------------------------------------------
@@ -426,19 +511,21 @@ fn ch4_high_shift_rate_has_no_tonal_spur() {
     let rms = (total / n as f64).sqrt();
     eprintln!("CH4 high-shift: rms = {rms:.4} peak/mean bin ratio = {peak_ratio:.1}");
     // Bounded total power: the channel is audible hiss, neither silenced nor
-    // blown up by an aliased fold.
+    // blown up by an aliased fold. WP6's box-filter collapse averages each
+    // above-Nyquist window instead of keeping its last shift, which strips the
+    // ultrasonic energy the ≤1-transition collapse left in — total power drops
+    // (measured rms ~0.058, down from ~0.206) while staying real audible hiss.
     assert!(
         (0.02..0.5).contains(&rms),
         "CH4 high-shift total power out of range (rms {rms:.4})"
     );
-    // The accepted color approximation (risk register): a noise channel whose
-    // LFSR steps faster than the sample grid keeps a final-level color error,
-    // NOT a clean band-limit. But the ≤1-transition collapse still substantially
-    // suppresses the tonal fold the point-sampler produced (measured 116.6 on
-    // the old core; asserted improved here). Noise is broadband, so its residual
-    // aliasing is hiss-colored rather than a screech tone.
+    // With the box filter this is a genuine band-limit (a window mean quantized
+    // to the DAC alphabet), not the final-level color approximation the pre-WP6
+    // collapse left. The tonal fold the point-sampler produced (peak/mean 116.6)
+    // is now strongly suppressed (measured ~36.7): noise stays broadband hiss
+    // with no screech tone.
     assert!(
-        peak_ratio < 90.0,
+        peak_ratio < 60.0,
         "CH4 high-shift tonal spur not suppressed vs the point-sampler's 116.6 \
          (peak/mean bin {peak_ratio:.1})"
     );
