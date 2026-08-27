@@ -308,7 +308,7 @@ pub(crate) fn extract_border(rom: &[u8]) -> Result<SgbBorder, String> {
         .ok_or("SGB firmware too short for its CGRAM image")?;
     // Mask bit 15 exactly like the PCT_TRN path: SNES CGRAM is 15-bit.
     let pals = cgram
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]) & 0x7FFF)
         .collect();
 
@@ -436,7 +436,7 @@ mod tests {
 
             let entries: Vec<u16> = b
                 .map
-                .chunks_exact(2)
+                .as_chunks::<2>().0.iter()
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect();
             let hi = entries.iter().map(|e| e & 0x3FF).max().unwrap();
