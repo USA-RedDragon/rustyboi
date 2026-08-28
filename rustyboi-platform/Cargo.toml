@@ -28,7 +28,7 @@ ringbuf = "=0.5.1"
 serde_json = { workspace = true }
 winit = { workspace = true }
 winit_input_helper = "=0.17.0"
-ureq = { version = "=3.3.0", default-features = false, features = ["rustls", "gzip"] }
+ureq = { version = "=3.4.0", default-features = false, features = ["rustls", "gzip"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 gilrs = "=0.11.2"
