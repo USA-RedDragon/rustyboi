@@ -22,7 +22,7 @@ synth-audit = ["rustyboi-core/synth-audit"]
 
 [dependencies]
 clap = { workspace = true }
-flate2 = "=1.1.9"
+flate2 = "=1.1.10"
 image-webp = "=0.2.4"
 rayon = "=1.12.0"
 rustyboi-core = { workspace = true }
