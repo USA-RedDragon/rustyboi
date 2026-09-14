@@ -224,7 +224,7 @@ dependencies {
     implementation("androidx.games:games-activity:4.4.2")
     // GameActivity transitively extends AppCompatActivity, so its supertypes
     // must be on the compile classpath.
-    implementation("androidx.appcompat:appcompat:1.7.1")
+    implementation("androidx.appcompat:appcompat:1.8.0")
     implementation("androidx.core:core-ktx:1.19.0")
     // DocumentFile gives us a recursive listFiles() API over SAF tree URIs,
     // used by the ROM library scanner in RustyboiActivity.
