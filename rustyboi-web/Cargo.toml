@@ -37,7 +37,7 @@ console_error_panic_hook = "=0.1.7"
 serde_json = { workspace = true }
 
 [dependencies.web-sys]
-version = "=0.3.103"
+version = "=0.3.105"
 features = [
     # Main-thread rendering: the egui/wgpu driver draws into this canvas.
     "HtmlCanvasElement",
