@@ -447,7 +447,7 @@ jobs:
       - name: Generate combined coverage (unit tests + ROM suites)
         run: make coverage
       - name: Upload to Codecov
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -473,7 +473,7 @@ jobs:
           ./gradlew --no-daemon
           :romscan:test :romscan:jacocoTestReport
       - name: Upload to Codecov
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
         with:
           files: android/romscan/build/reports/jacoco/test/jacocoTestReport.xml
           flags: android
@@ -511,7 +511,7 @@ jobs:
           export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
           make coverage-web
       - name: Upload to Codecov
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
         with:
           files: rustyboi-web.lcov
           flags: web
