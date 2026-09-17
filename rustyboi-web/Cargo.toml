@@ -87,7 +87,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 ] }
 
 [dev-dependencies]
-wasm-bindgen-test = "=0.3.76"
+wasm-bindgen-test = "=0.3.78"
 
 # WASM code-coverage runtime. `wasm-bindgen-test` pulls minicov itself under the
 # same cfg to provide `__wbgtest_cov_dump`, but the coverage build also
