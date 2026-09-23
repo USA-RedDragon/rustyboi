@@ -24,7 +24,7 @@ log = "=0.4.33"
 wgpu = { workspace = true }
 pollster = { workspace = true }
 cpal = "=0.18.1"
-ringbuf = "=0.5.1"
+ringbuf = "=0.5.2"
 serde_json = { workspace = true }
 winit = { workspace = true }
 winit_input_helper = "=0.17.0"
