@@ -43,7 +43,7 @@ windows-sys = { version = "=0.61.2", features = ["Win32_Media"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 winit = { workspace = true }
-objc2 = "=0.6.4"
+objc2 = "=0.6.5"
 objc2-foundation = { version = "=0.3.2", features = ["NSArray", "NSString", "NSURL", "NSData", "NSObject"] }
 objc2-ui-kit = { version = "=0.3.2", features = ["UIApplication", "UIWindow", "UIView", "UIViewController", "UIResponder", "UIDocumentPickerViewController", "objc2-uniform-type-identifiers"] }
 objc2-uniform-type-identifiers = { version = "=0.3.2", features = ["UTType", "UTCoreTypes"] }
