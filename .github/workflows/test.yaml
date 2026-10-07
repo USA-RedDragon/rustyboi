@@ -32,7 +32,7 @@ jobs:
         shell: bash
         run: make roms
       - name: Upload ROMs
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: first-party-roms
           path: test-roms/build
@@ -62,7 +62,7 @@ jobs:
         uses: ./.github/actions/pgo-restore
       - name: Build runner ${{ matrix.name }}
         run: make runner TARGETS=${{ matrix.name }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runner-${{ matrix.name }}
           path: target/runner/${{ matrix.name }}/
