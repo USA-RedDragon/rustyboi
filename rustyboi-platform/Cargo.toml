@@ -20,7 +20,7 @@ rustyboi-core = { workspace = true, features = ["cli"] }
 rustyboi-frontend = { workspace = true }
 rustyboi-session = { workspace = true }
 clap = { workspace = true }
-log = "=0.4.33"
+log = "=0.4.34"
 wgpu = { workspace = true }
 pollster = { workspace = true }
 cpal = "=0.18.1"
