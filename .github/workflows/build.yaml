@@ -18,7 +18,7 @@ concurrency:
 jobs:
   setup:
     name: enumerate targets
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       libretro: ${{ steps.gen.outputs.libretro }}
       native: ${{ steps.gen.outputs.native }}
@@ -35,7 +35,7 @@ jobs:
   libretro:
     name: 'libretro / ${{ matrix.name }}'
     needs: setup
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -59,7 +59,7 @@ jobs:
   native:
     name: 'native / ${{ matrix.name }}'
     needs: setup
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -82,7 +82,7 @@ jobs:
 
   android:
     name: 'android / ${{ matrix.abi }}'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -113,7 +113,7 @@ jobs:
   android-bundle:
     name: android / aab
     needs: android
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/free-disk-space
@@ -147,7 +147,7 @@ jobs:
 
   web:
     name: web
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/free-disk-space
@@ -167,7 +167,7 @@ jobs:
 
   ios:
     name: ios
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/free-disk-space
@@ -187,7 +187,7 @@ jobs:
   build-success:
     name: Build success check
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [libretro, native, android-bundle, web, ios]
     steps:
       - shell: bash

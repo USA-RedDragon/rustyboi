@@ -19,7 +19,7 @@ jobs:
   # place the toolchain is trivial) and fan them out.
   build-roms:
     name: 'build first-party ROMs'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install RGBDS
@@ -42,7 +42,7 @@ jobs:
   # waits while it generates and degrades loudly if it failed.
   build-runner:
     name: 'runner / ${{ matrix.name }}'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -193,7 +193,7 @@ jobs:
   # else in CI runs.
   unit-tests:
     name: 'unit tests / workspace'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 40
     env:
       BIOS_URL: ${{ secrets.BIOS_URL }}
@@ -279,7 +279,7 @@ jobs:
   test-success:
     name: Test success check
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [test, unit-tests, frontend-render]
     steps:
       - name: Check all matrix jobs succeeded
@@ -300,7 +300,7 @@ jobs:
 
   progress:
     name: 'suite progress -> README'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [build-roms, build-runner]
     timeout-minutes: 40
     permissions:
@@ -395,7 +395,7 @@ jobs:
   # target/pgo (coverage instrumentation and -Cprofile-use don't mix here).
   coverage:
     name: 'host / coverage'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: build-roms
     timeout-minutes: 90
     env:
@@ -454,7 +454,7 @@ jobs:
 
   android-coverage:
     name: 'android / coverage'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -485,7 +485,7 @@ jobs:
   # the `web` job relies on. Uploaded under the Codecov `web` flag.
   web-coverage:
     name: 'web / coverage'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/free-disk-space
