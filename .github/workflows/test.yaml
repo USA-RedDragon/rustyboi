@@ -462,7 +462,7 @@ jobs:
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '25'
       - name: Run RomScan unit tests + JaCoCo
         working-directory: android
         # The ROM-scan helpers live in the pure-JVM :romscan module (only
