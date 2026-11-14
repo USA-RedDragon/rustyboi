@@ -553,7 +553,10 @@ fn corpus(root: &Path) -> Vec<PathBuf> {
         };
         for e in rd.flatten() {
             let p = e.path();
-            if p.is_dir() {
+            // DirEntry::file_type does not follow symlinks: a checkout may
+            // carry a link back to its own root.
+            let Ok(t) = e.file_type() else { continue };
+            if t.is_dir() {
                 dirs.push(p);
             } else if p
                 .extension()
