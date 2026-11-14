@@ -4003,3 +4003,115 @@ mod dmg_compat_boot_duration_tests {
         }
     }
 }
+
+/// Drive the machine from an external CPU (for example recompiled code).
+/// The instruction boundary (STOP, HALT, DMA stalls, interrupt dispatch, the
+/// opcode fetch) and the epilogue stay rustyboi's own; only the opcode body
+/// runs outside and issues its bus accesses through `ext_*`, in the order and
+/// M-cycle placement of the matching function in `cpu::opcodes`. The ext path
+/// generates no audio and ignores breakpoints. `tests/ext_lockstep.rs` checks
+/// it against `step_instruction`.
+impl GB {
+    /// Instruction boundary. `Some(op)`: the opcode fetch was charged and pc
+    /// advanced past it; run its body, then `ext_end`. `None`: the boundary
+    /// consumed this step (STOP, HALT idle, DMA stall, interrupt service).
+    pub fn ext_begin(&mut self, st: &mut cpu::bus::ExtBusState) -> Option<u8> {
+        self.mmio.set_apu_observing(false);
+        if self.cpu.stopped {
+            if self.mmio.read(crate::input::JOYP) & 0x0F != 0x0F {
+                self.cpu.stopped = false;
+                let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
+                bus.tick_remaining(8);
+                bus.flush_all_lag();
+            }
+            return None;
+        }
+        self.ppu.step_scheduled_stat_events(&mut self.mmio);
+        let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
+        match self.cpu.begin(&mut bus) {
+            cpu::sm83::Begin::Done(c) => {
+                bus.tick_remaining(c);
+                if self.cpu.stopped {
+                    bus.flush_all_lag();
+                }
+                None
+            }
+            cpu::sm83::Begin::Execute(op) => {
+                bus.suspend(st);
+                Some(op)
+            }
+        }
+    }
+
+    #[inline]
+    pub fn ext_read(&mut self, st: &mut cpu::bus::ExtBusState, addr: u16) -> u8 {
+        let mut bus = cpu::Bus::resume(&mut self.mmio, &mut self.ppu, st);
+        let v = bus.read(addr);
+        bus.suspend(st);
+        v
+    }
+
+    #[inline]
+    pub fn ext_write(&mut self, st: &mut cpu::bus::ExtBusState, addr: u16, value: u8) {
+        let mut bus = cpu::Bus::resume(&mut self.mmio, &mut self.ppu, st);
+        bus.write(addr, value);
+        bus.suspend(st);
+    }
+
+    /// An internal M-cycle placed mid-instruction (CALL, RST, PUSH, RET cc).
+    #[inline]
+    pub fn ext_internal(&mut self, st: &mut cpu::bus::ExtBusState) {
+        let mut bus = cpu::Bus::resume(&mut self.mmio, &mut self.ppu, st);
+        bus.internal_cycle();
+        bus.suspend(st);
+    }
+
+    /// 16-bit IDU op on a register holding `pre` (DMG OAM bug trigger).
+    #[inline]
+    pub fn ext_idu(&mut self, st: &mut cpu::bus::ExtBusState, pre: u16) {
+        let mut bus = cpu::Bus::resume(&mut self.mmio, &mut self.ppu, st);
+        bus.oam_bug_idu(pre);
+        bus.suspend(st);
+    }
+
+    /// End of an externally run body; `total` is the instruction's length in
+    /// cc (fetch included), exactly what rustyboi's opcode fn would return.
+    pub fn ext_end(&mut self, st: &mut cpu::bus::ExtBusState, total: u32) {
+        let mut bus = cpu::Bus::resume(&mut self.mmio, &mut self.ppu, st);
+        self.cpu.finish(&mut bus);
+        bus.tick_remaining(total);
+        if self.cpu.stopped {
+            bus.flush_all_lag();
+        }
+        *st = Default::default();
+    }
+
+    /// Interpreter fallback for the opcode `ext_begin` returned.
+    pub fn ext_exec_native(&mut self, st: &mut cpu::bus::ExtBusState, op: u8) -> u32 {
+        let mut bus = cpu::Bus::resume(&mut self.mmio, &mut self.ppu, st);
+        let c = self.cpu.execute(op, &mut bus);
+        self.cpu.finish(&mut bus);
+        bus.tick_remaining(c);
+        if self.cpu.stopped {
+            bus.flush_all_lag();
+        }
+        *st = Default::default();
+        c
+    }
+
+    /// Advance the devices `dots` master cc with no CPU bus activity.
+    pub fn ext_advance(&mut self, dots: u64) {
+        let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
+        bus.ext_advance(dots);
+    }
+
+    /// The CPU's true position (resolved cc plus any carried lag).
+    pub fn ext_now(&self) -> u64 {
+        self.mmio.master_cc() + self.mmio.cpu_lag() as u64
+    }
+
+    /// The CPU registers, for an external CPU to load and store around a body.
+    pub fn cpu_registers_mut(&mut self) -> &mut cpu::registers::Registers {
+        &mut self.cpu.registers
+    }
+}

@@ -51,7 +51,36 @@ pub(crate) struct Bus<'a> {
     foreign: u32,
 }
 
+/// The per-instruction `Bus` counters, kept by an external CPU between its
+/// bus calls so one instruction's accounting spans many calls (`GB::ext_*`).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct ExtBusState {
+    pub(crate) ticked: u32,
+    pub(crate) lag: u32,
+    pub(crate) foreign: u32,
+}
+
 impl<'a> Bus<'a> {
+    /// Rebuild a `Bus` mid-instruction from saved counters.
+    #[inline]
+    pub(crate) fn resume(mmio: &'a mut Mmio, ppu: &'a mut Ppu, st: &ExtBusState) -> Self {
+        Bus { mmio, ppu, ticked: st.ticked, lag: st.lag, foreign: st.foreign }
+    }
+
+    /// Save the counters; the `Bus` is dropped.
+    #[inline]
+    pub(crate) fn suspend(self, st: &mut ExtBusState) {
+        st.ticked = self.ticked;
+        st.lag = self.lag;
+        st.foreign = self.foreign;
+    }
+
+    /// Advance the world `dots` master cc with no CPU access.
+    pub(crate) fn ext_advance(&mut self, dots: u64) {
+        self.flush_lag();
+        let target = self.mmio.master_cc().wrapping_add(dots);
+        self.run_to(target);
+    }
 
     pub fn new(mmio: &'a mut Mmio, ppu: &'a mut Ppu) -> Self {
         let lag = mmio.take_cpu_lag();
