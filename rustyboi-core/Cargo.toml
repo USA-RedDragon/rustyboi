@@ -2,6 +2,7 @@
 name = "rustyboi-core"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
