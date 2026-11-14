@@ -9,10 +9,11 @@ use crate::sgb_system_palette;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-// Every `fs` consumer is either `#[cfg(not(target_arch = "wasm32"))]`
-// (`from_state_file`) or test-only, so on wasm32 the import would be unused.
-#[cfg(any(not(target_arch = "wasm32"), test))]
+// Every `fs` consumer is either `from_state_file` (not on wasm32, savestate
+// feature only) or test-only; elsewhere the import would be unused.
+#[cfg(any(all(not(target_arch = "wasm32"), feature = "savestate"), test))]
 use std::fs;
+#[cfg(feature = "savestate")]
 use std::io;
 
 /// TV region of the host the machine is plugged into. Only the SGB1 cares: it
@@ -1804,6 +1805,7 @@ impl GB {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "savestate")]
     pub fn from_state_file(path: &str) -> Result<Self, io::Error> {
         let saved_state = fs::read(path)?;
         Self::from_state_bytes(&saved_state)
@@ -1813,6 +1815,7 @@ impl GB {
     /// deserialize: cartridge-flag cache, sub-module hardware-revision flags (which
     /// otherwise revert to default-CGB), and the CPU-mirror flags. The ROM image
     /// itself is re-attached separately by the frontend via `reattach_rom`.
+    #[cfg(feature = "savestate")]
     fn post_load_fixup(&mut self) {
         self.mmio.resync_cart_flags();
         // The `hardware` identity survives serialization; re-apply the setters
@@ -1859,6 +1862,7 @@ impl GB {
     /// moves freely and old states are simply invalid. A stale buffer therefore
     /// fails as an opaque bincode error, or — if it happens to decode — yields a
     /// wrong machine. Add a magic/version header before the first release.
+    #[cfg(feature = "savestate")]
     pub fn to_state_bytes(&mut self) -> Result<Vec<u8>, io::Error> {
         // Canonicalize: resolve any carried cross-instruction lag so the
         // serialized machine state is schedule-independent (the carry decision
@@ -1877,6 +1881,7 @@ impl GB {
     ///
     /// Unversioned (see `to_state_bytes`): a buffer from a different layout is
     /// rejected only insofar as bincode happens to notice.
+    #[cfg(feature = "savestate")]
     pub fn from_state_bytes(bytes: &[u8]) -> Result<Self, io::Error> {
         let mut gb: GB = bincode::deserialize(bytes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;

@@ -2090,6 +2090,7 @@ impl Mmio {
     /// serialized sources (`cpu.halted` / `cpu.stop_unhalt_cycles`). Both are
     /// `#[serde(skip)]` here, so without this a state saved mid-HALT or mid-STOP
     /// resumes with the mirror cleared. Pure re-seed of derived state.
+    #[cfg(feature = "savestate")]
     pub(crate) fn sync_cpu_mirror_flags(&mut self, cpu_halted: bool, in_stop_window: bool) {
         self.cpu_halted = cpu_halted;
         self.in_stop_window = in_stop_window;

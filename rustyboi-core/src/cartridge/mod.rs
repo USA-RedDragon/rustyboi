@@ -13,9 +13,10 @@ use std::cell::Cell;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "zip")]
 use zip::ZipArchive;
 
 mod header;
@@ -1847,8 +1848,14 @@ impl Cartridge {
     /// with a Game Boy extension, else the largest non-directory member.
     /// `load` reads the file in and comes through here too, so the path and
     /// byte entry points cannot drift apart.
+    #[cfg(not(feature = "zip"))]
+    fn extract_rom_from_zip_bytes(_data: &[u8]) -> Result<Vec<u8>, io::Error> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "built without zip support"))
+    }
+
+    #[cfg(feature = "zip")]
     fn extract_rom_from_zip_bytes(data: &[u8]) -> Result<Vec<u8>, io::Error> {
-        use std::io::Cursor;
+        use std::io::{Cursor, Read};
 
         let cursor = Cursor::new(data);
         let mut archive = ZipArchive::new(cursor)?;

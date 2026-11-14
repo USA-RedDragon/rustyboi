@@ -24,14 +24,20 @@ cli = ["dep:clap"]
 # >9-emulated-minute audited sweep crossing the 0x6000_0000 epoch fold.
 synth-audit = []
 
+# ROM-in-zip loading and bincode savestates. On by default; an embedder that
+# drives the core from its own CPU (see `GB::ext_begin`) can drop both deps.
+default = ["zip", "savestate"]
+zip = ["dep:zip"]
+savestate = ["dep:bincode"]
+
 [dependencies]
 clap = { workspace = true, optional = true }
 rustyboi-mix = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
 serde_bytes = "=0.11.19"
 libm = { workspace = true }
-bincode = { workspace = true }
-zip = { workspace = true, features = ["deflate64", "lzma"] }
+bincode = { workspace = true, optional = true }
+zip = { workspace = true, features = ["deflate64", "lzma"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "=1.1.0"
@@ -42,3 +48,5 @@ web-time = "=1.1.0"
 # in `gb.rs`. Test-only, so it costs the embedding consumers nothing.
 [dev-dependencies]
 clap = { workspace = true }
+bincode = { workspace = true }
+zip = { workspace = true, features = ["deflate64", "lzma"] }
