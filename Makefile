@@ -433,7 +433,7 @@ coverage-web: ## Web (wasm) coverage via headless browser -> rustyboi-web.lcov (
 	# wasm target. The map itself (function names, regions, hashes) is
 	# target-independent, so it still matches the wasm run's counters.
 	objs=()
-	for ll in "$$TD"/wasm32-unknown-unknown/debug/deps/rustyboi_web*.ll; do \
+	for ll in $$(find "$$TD/wasm32-unknown-unknown/debug" -name 'rustyboi_web*.ll' -not -name '*.covobj*'); do \
 	  [ -e "$$ll" ] || continue; \
 	  o="$${ll%.ll}.covobj.o"; "$$NBIN/llc" -mtriple="$$HOST" -filetype=obj "$$ll" -o "$$o"; objs+=(-object "$$o"); \
 	done
