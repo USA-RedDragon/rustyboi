@@ -12,6 +12,14 @@ const INTERRUPT_PRIORITY: [registers::InterruptFlag; 5] = [
     registers::InterruptFlag::Joypad,
 ];
 
+/// Outcome of the instruction-boundary prologue (`SM83::begin`).
+pub(crate) enum Begin {
+    /// The boundary consumed these cycles itself (stall, halt, interrupt).
+    Done(u32),
+    /// The opcode fetch was charged; run this opcode's body, then `finish`.
+    Execute(u8),
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct SM83 {
     pub registers: registers::Registers,
@@ -63,6 +71,9 @@ pub(crate) struct SM83 {
     /// ordering from test-ROM refs.
     #[serde(default)]
     pub(crate) hdma_dma_due_defer_service: bool,
+    // Set by `begin` when the dma-due write-cc bias is live; `finish` clears it.
+    #[serde(skip, default)]
+    pub(crate) ext_bias_armed: bool,
 }
 
 impl Default for SM83 {
@@ -85,6 +96,7 @@ impl SM83 {
             m2_halt_stall_charged: false,
             cgb_lcd_halt_stall_charged: false,
             hdma_dma_due_defer_service: false,
+            ext_bias_armed: false,
         }
     }
 
@@ -97,6 +109,29 @@ impl SM83 {
     }
 
     pub fn step(&mut self, mmio: &mut crate::cpu::Bus) -> u32 {
+        match self.begin(mmio) {
+            Begin::Done(c) => c,
+            Begin::Execute(op) => {
+                let c = self.execute(op, mmio);
+                self.finish(mmio);
+                c
+            }
+        }
+    }
+
+    /// Instruction epilogue: the tail of `step` after the opcode body, also
+    /// used when the body ran outside rustyboi (`GB::ext_end`).
+    pub(crate) fn finish(&mut self, mmio: &mut crate::cpu::Bus) {
+        if std::mem::take(&mut self.ext_bias_armed) {
+            mmio.mmio.set_hdma_dma_due_write_cc_bias(0);
+        }
+        self.apply_ime_delay();
+        mmio.set_hdma_resume_lockstep_window(false);
+    }
+
+    /// Instruction-boundary prologue of `step` (STOP window, DMA stall, HALT,
+    /// interrupt dispatch, opcode prefetch).
+    pub(crate) fn begin(&mut self, mmio: &mut crate::cpu::Bus) -> Begin {
         // While stalled after a CGB STOP-speed-switch, advance peripherals in
         // small slices without fetching instructions. CPU fetch is suspended for
         // 0x20000 + 4 T-cycles after STOP completes; the per-cycle peripheral loop
@@ -143,7 +178,7 @@ impl SM83 {
                         mmio.stop_window_exit_reflag_edge(in_period_unhalt, edge);
                     }
                 }
-                return slice;
+                return Begin::Done(slice);
             }
         }
 
@@ -151,10 +186,9 @@ impl SM83 {
         // peripherals keep ticking for the transfer duration.
         let dma_stall = mmio.take_dma_stall();
         if dma_stall > 0 {
-            return dma_stall;
+            return Begin::Done(dma_stall);
         }
 
-        let mut cycles = 0;
 
         // Check for pending interrupts
         let mut pending_interrupt = self.get_pending_interrupt(mmio);
@@ -195,7 +229,7 @@ impl SM83 {
                     if let Some(h) = mmio.mmio.halt_entry_cc()
                         && mmio.master_cc_dbg().wrapping_sub(h) < 8
                     {
-                        return 4;
+                        return Begin::Done(4);
                     }
                     let r = mmio.mmio.if_raise_cc_of(f);
                     if r != u64::MAX {
@@ -280,7 +314,7 @@ impl SM83 {
                             && mmio.master_cc_dbg().wrapping_sub(e) <= w
                         {
                             self.m2_halt_stall_charged = true;
-                            return 4;
+                            return Begin::Done(4);
                         }
                     }
                 }
@@ -312,7 +346,7 @@ impl SM83 {
                     if mmio.mmio.is_cgb() {
                         mmio.mmio.set_m2_halt_stall_charged_cgb(true);
                     }
-                    return 4;
+                    return Begin::Done(4);
                 }
                 // HALT-exit +4 (CGB, LYC/m1 LCD wake): a CGB console spends one
                 // extra real M-cycle leaving HALT on a STAT(LYC/m1) wake where DMG
@@ -357,7 +391,7 @@ impl SM83 {
                     if !m0_prox && !m2_prox && !hdma_wakeup && !lcdc_racer {
                         self.cgb_lcd_halt_stall_charged = true;
                         mmio.mmio.set_m2_halt_stall_charged_cgb(true);
-                        return 4;
+                        return Begin::Done(4);
                     }
                 }
                 // HALT-exit +4 (serial-woken, DMG+CGB): a serial-woken HALT resumes
@@ -380,7 +414,7 @@ impl SM83 {
                     if mmio.mmio.is_cgb() {
                         mmio.mmio.set_m2_halt_stall_charged_cgb(true);
                     }
-                    return 4;
+                    return Begin::Done(4);
                 }
                 self.halted = false;
                 just_unhalted = true;
@@ -623,7 +657,7 @@ impl SM83 {
                 // resolves dot-by-dot inside the caller's tick, so peripheral
                 // behavior is byte-identical; only the poll cadence of this
                 // no-op loop coarsens, and the batch never contains a wake.
-                return mmio.halted_idle_dots();
+                return Begin::Done(mmio.halted_idle_dots());
             }
         }
 
@@ -695,15 +729,12 @@ impl SM83 {
             if std::mem::take(&mut self.halt_bug_prefetch) {
                 mmio.tick_opcode_fetch_mcycle();
             }
-            cycles += self.execute(op, mmio);
-            mmio.mmio.set_hdma_dma_due_write_cc_bias(0);
-            self.apply_ime_delay();
-            mmio.set_hdma_resume_lockstep_window(false);
-            return cycles;
+            self.ext_bias_armed = true;
+            return Begin::Execute(op);
         }
 
         if self.registers.ime && serviceable.is_some() {
-            return self.service_interrupt(mmio, just_unhalted);
+            return Begin::Done(self.service_interrupt(mmio, just_unhalted));
         }
 
         // No interrupt is serviced this step after the unhalt (IME off, or the
@@ -727,10 +758,7 @@ impl SM83 {
         if std::mem::take(&mut self.halt_bug_prefetch) {
             mmio.tick_opcode_fetch_mcycle();
         }
-        cycles += self.execute(op, mmio);
-        self.apply_ime_delay();
-        mmio.set_hdma_resume_lockstep_window(false);
-        cycles
+        Begin::Execute(op)
     }
 
     fn service_interrupt(&mut self, bus: &mut crate::cpu::Bus, just_unhalted: bool) -> u32 {
@@ -908,7 +936,7 @@ impl SM83 {
         self.pending_interrupt(mmio, registers::InterruptFlag::Timer as u8)
     }
 
-    fn execute(&mut self, opcode: u8, mmio: &mut crate::cpu::Bus) -> u32 {
+    pub(crate) fn execute(&mut self, opcode: u8, mmio: &mut crate::cpu::Bus) -> u32 {
         match opcode {
             0x00 => opcodes::nop(self, mmio),
             0x01 => opcodes::ld_bc_imm(self, mmio),
