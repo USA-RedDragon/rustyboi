@@ -191,6 +191,14 @@ pub struct GB {
     // Every AudioOutput sink (platform Output, session CaptureSink) is Send.
     #[serde(skip)]
     audio_output: Option<Box<dyn audio::AudioOutput + Send>>,
+    #[serde(skip)]
+    ext_audio: Option<ExtAudio>,
+}
+
+#[derive(Default)]
+struct ExtAudio {
+    samples: Vec<(f32, f32)>,
+    double_speed: bool,
 }
 
 impl Clone for GB {
@@ -207,6 +215,7 @@ impl Clone for GB {
             breakpoints: self.breakpoints.clone(),
             forced_compat_palette: self.forced_compat_palette,
             audio_output: None, // Don't clone audio output - it will be recreated if needed
+            ext_audio: None,
         }
     }
 }
@@ -482,6 +491,7 @@ impl GB {
             breakpoints: HashSet::new(),
             forced_compat_palette: None,
             audio_output: None, // Audio will be enabled when needed
+            ext_audio: None,
         }
     }
 
@@ -1289,7 +1299,17 @@ impl GB {
         if !collect_audio {
             return;
         }
-        let audio_samples = if self.cpu.stopped {
+        let audio_samples = self.pull_audio(cycles, is_double_speed);
+
+        // Send audio samples directly to output as they're generated
+        if !audio_samples.is_empty()
+            && let Some(audio_output) = &mut self.audio_output {
+                audio_output.add_samples(&audio_samples);
+        }
+    }
+
+    fn pull_audio(&mut self, cycles: u32, is_double_speed: bool) -> Vec<(f32, f32)> {
+        if self.cpu.stopped {
             // STOP freezes the master clock, so the grid does not advance from a
             // sync. Advance it by the STOP wall-time instead (the same `>>(1+ds)`
             // APU-cycle conversion the running path applies), so the per-frame
@@ -1300,12 +1320,6 @@ impl GB {
             // `synth_cc` is already speed-normalized (it advances at `>>(1+ds)`),
             // so the grid pull needs no double-speed halving.
             self.mmio.generate_audio_samples()
-        };
-
-        // Send audio samples directly to output as they're generated
-        if !audio_samples.is_empty()
-            && let Some(audio_output) = &mut self.audio_output {
-                audio_output.add_samples(&audio_samples);
         }
     }
 
@@ -4009,21 +4023,30 @@ mod dmg_compat_boot_duration_tests {
 /// opcode fetch) and the epilogue stay rustyboi's own; only the opcode body
 /// runs outside and issues its bus accesses through `ext_*`, in the order and
 /// M-cycle placement of the matching function in `cpu::opcodes`. The ext path
-/// generates no audio and ignores breakpoints. `tests/ext_lockstep.rs` checks
-/// it against `step_instruction`.
+/// generates audio only after `ext_set_audio(true)` and ignores breakpoints.
+/// `tests/ext_lockstep.rs` checks it against `step_instruction`.
 impl GB {
     /// Instruction boundary. `Some(op)`: the opcode fetch was charged and pc
     /// advanced past it; run its body, then `ext_end`. `None`: the boundary
     /// consumed this step (STOP, HALT idle, DMA stall, interrupt service).
     pub fn ext_begin(&mut self, st: &mut cpu::bus::ExtBusState) -> Option<u8> {
-        self.mmio.set_apu_observing(false);
+        let observing = self.ext_audio.is_some();
+        self.mmio.set_apu_observing(observing);
+        let is_double_speed = self.mmio.is_double_speed_mode();
+        if let Some(audio) = &mut self.ext_audio {
+            audio.double_speed = is_double_speed;
+        }
         if self.cpu.stopped {
-            if self.mmio.read(crate::input::JOYP) & 0x0F != 0x0F {
+            let cycles = if self.mmio.read(crate::input::JOYP) & 0x0F != 0x0F {
                 self.cpu.stopped = false;
                 let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
                 bus.tick_remaining(8);
                 bus.flush_all_lag();
-            }
+                8
+            } else {
+                4
+            };
+            self.ext_emit(cycles);
             return None;
         }
         self.ppu.step_scheduled_stat_events(&mut self.mmio);
@@ -4034,6 +4057,7 @@ impl GB {
                 if self.cpu.stopped {
                     bus.flush_all_lag();
                 }
+                self.ext_emit(c);
                 None
             }
             cpu::sm83::Begin::Execute(op) => {
@@ -4084,6 +4108,7 @@ impl GB {
             bus.flush_all_lag();
         }
         *st = Default::default();
+        self.ext_emit(total);
     }
 
     /// Interpreter fallback for the opcode `ext_begin` returned.
@@ -4096,13 +4121,46 @@ impl GB {
             bus.flush_all_lag();
         }
         *st = Default::default();
+        self.ext_emit(c);
         c
+    }
+
+    /// Start (`true`) or stop (`false`) collecting APU samples on the ext
+    /// path; stopping drops what was collected.
+    pub fn ext_set_audio(&mut self, on: bool) {
+        match (on, self.ext_audio.is_some()) {
+            (true, false) => self.ext_audio = Some(ExtAudio::default()),
+            (false, true) => {
+                self.ext_audio = None;
+                self.mmio.set_apu_observing(false);
+            }
+            _ => {}
+        }
+    }
+
+    /// The samples collected since the last call, as left and right.
+    pub fn ext_take_samples(&mut self) -> Vec<(f32, f32)> {
+        self.ext_audio
+            .as_mut()
+            .map(|audio| std::mem::take(&mut audio.samples))
+            .unwrap_or_default()
+    }
+
+    fn ext_emit(&mut self, cycles: u32) {
+        let Some(double_speed) = self.ext_audio.as_ref().map(|audio| audio.double_speed) else {
+            return;
+        };
+        let samples = self.pull_audio(cycles, double_speed);
+        if let Some(audio) = &mut self.ext_audio {
+            audio.samples.extend(samples);
+        }
     }
 
     /// Advance the devices `dots` master cc with no CPU bus activity.
     pub fn ext_advance(&mut self, dots: u64) {
         let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
         bus.ext_advance(dots);
+        self.ext_emit(dots.min(u32::MAX as u64) as u32);
     }
 
     /// The CPU's true position (resolved cc plus any carried lag).

@@ -21,8 +21,19 @@ use rustyboi_core_lib::cpu::bus::ExtBusState;
 use rustyboi_core_lib::cpu::registers::Registers;
 use rustyboi_core_lib::gb::{GB, Hardware};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct Capture(Arc<Mutex<Vec<(f32, f32)>>>);
+
+impl rustyboi_core_lib::audio::AudioOutput for Capture {
+    fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+    fn add_samples(&mut self, samples: &[(f32, f32)]) {
+        self.0.lock().unwrap().extend_from_slice(samples);
+    }
+}
 
 const ZF: u8 = 0x80;
 const NF: u8 = 0x40;
@@ -501,6 +512,11 @@ fn lockstep(rom: &[u8], hw: Hardware, frames: u64, skew: u32) -> Result<(), Stri
     let (Some(mut native), Some(mut ext)) = (machine(rom, hw), machine(rom, hw)) else {
         return Ok(());
     };
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    native
+        .enable_audio(Box::new(Capture(heard.clone())))
+        .map_err(|e| e.to_string())?;
+    ext.ext_set_audio(true);
     let max_cc = native.ext_now() + frames * FRAME_CC;
     let mut x = Ext {
         gb: &mut ext,
@@ -511,7 +527,7 @@ fn lockstep(rom: &[u8], hw: Hardware, frames: u64, skew: u32) -> Result<(), Stri
         if native.ext_now() >= max_cc {
             break;
         }
-        native.step_instruction(false);
+        native.step_instruction(true);
         x.step();
         let (ra, rb) = (native.get_cpu_registers(), x.gb.get_cpu_registers());
         let (ca, cb) = (native.ext_now(), x.gb.ext_now());
@@ -520,6 +536,10 @@ fn lockstep(rom: &[u8], hw: Hardware, frames: u64, skew: u32) -> Result<(), Stri
                 "step {i}: native pc={:04x} cc={ca}, ext pc={:04x} cc={cb}",
                 ra.pc, rb.pc
             ));
+        }
+        let native_samples = std::mem::take(&mut *heard.lock().unwrap());
+        if native_samples != x.gb.ext_take_samples() {
+            return Err(format!("step {i}: audio samples differ"));
         }
     }
     native.sync_lazy_peripherals();
