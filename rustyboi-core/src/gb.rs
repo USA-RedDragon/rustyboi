@@ -4185,6 +4185,15 @@ impl GB {
         Some(c)
     }
 
+    /// Whether a CPU read of `addr` now may see the OAM DMA rather than
+    /// memory (the DMA is armed or running and `addr` is on its source's
+    /// bus). False guarantees a read of `addr` sees memory until the next
+    /// write that starts a DMA: an embedder that knows the bytes of its
+    /// code ahead of time checks its operand reads with this.
+    pub fn ext_dma_conflict(&self, addr: u16) -> bool {
+        self.mmio.dma_may_conflict(addr)
+    }
+
     /// Advance the devices `dots` master cc with no CPU bus activity.
     pub fn ext_advance(&mut self, dots: u64) {
         let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);

@@ -588,6 +588,13 @@ impl Mmio {
         byte
     }
 
+    /// Whether a CPU read of `addr` may meet the OAM DMA rather than
+    /// memory: the engine is armed or running and `addr` is on the bus of
+    /// its source. False guarantees the read sees memory.
+    pub(crate) fn dma_may_conflict(&self, addr: u16) -> bool {
+        self.dma.oam.active && self.dma_address_conflicts(addr)
+    }
+
     /// Whether a CPU access to `addr` conflicts with the in-progress OAM DMA.
     /// Faithful hardware model: classify the DMA
     /// source into rom/sram/vram/wram/invalid, then test a per-4KB-block
