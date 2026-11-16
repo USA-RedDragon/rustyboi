@@ -1220,6 +1220,19 @@ impl SM83 {
     fn execute_cb(&mut self, mmio: &mut crate::cpu::Bus) -> u32 {
         let opcode = mmio.read(self.registers.pc);
         self.registers.pc = self.registers.pc.wrapping_add(1);
+        self.execute_cb_fetched(opcode, mmio)
+    }
+
+    /// Runs the CB-prefixed instruction whose second byte `opcode` the
+    /// caller already fetched on the bus; pc moves past it.
+    #[cfg(feature = "interpreter")]
+    pub(crate) fn execute_cb_after(&mut self, opcode: u8, mmio: &mut crate::cpu::Bus) -> u32 {
+        self.registers.pc = self.registers.pc.wrapping_add(1);
+        self.execute_cb_fetched(opcode, mmio)
+    }
+
+    #[cfg(feature = "interpreter")]
+    fn execute_cb_fetched(&mut self, opcode: u8, mmio: &mut crate::cpu::Bus) -> u32 {
         match opcode {
             0x00 => opcodes::rlc_b(self, mmio),
             0x01 => opcodes::rlc_c(self, mmio),

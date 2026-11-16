@@ -4132,6 +4132,20 @@ impl GB {
         c
     }
 
+    /// Interpreter fallback for a CB-prefixed instruction whose second byte
+    /// `cb` the embedder already read with [`Self::ext_read`] after
+    /// `ext_begin` returned 0xCB, so the bus sees that fetch once.
+    #[cfg(feature = "interpreter")]
+    pub fn ext_exec_native_cb(&mut self, st: &mut cpu::bus::ExtBusState, cb: u8) -> u32 {
+        let mut bus = cpu::Bus::resume(&mut self.mmio, &mut self.ppu, st);
+        let c = self.cpu.execute_cb_after(cb, &mut bus);
+        self.cpu.finish(&mut bus);
+        bus.tick_remaining(c);
+        *st = Default::default();
+        self.ext_emit(c);
+        c
+    }
+
     /// Start (`true`) or stop (`false`) collecting APU samples on the ext
     /// path; stopping drops what was collected.
     pub fn ext_set_audio(&mut self, on: bool) {
