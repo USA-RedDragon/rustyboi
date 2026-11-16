@@ -4,9 +4,10 @@
 //! issues the body's bus accesses through `ext_read`, `ext_write`,
 //! `ext_internal` and `ext_idu`, between `ext_begin` and `ext_end`. This test
 //! plays that embedder: `body` below is a small SM83 core written against the
-//! ext API with rustyboi's M-cycle placement, falling back to
-//! `ext_exec_native` for the opcodes it does not model (CB prefix, HALT,
-//! STOP, DI, EI, RETI, DAA, the SP+e forms, illegal opcodes). Two machines run
+//! ext API with rustyboi's M-cycle placement, leaving HALT, STOP, DI, EI and
+//! the illegal opcodes to `ext_control` and falling back to
+//! `ext_exec_native` for the others it does not model (CB prefix, RETI, DAA,
+//! the SP+e forms). Two machines run
 //! the same ROM, one on `step_instruction` and one on the ext path; registers
 //! and the cycle position must match after every step, and memory, I/O and the
 //! frame must match at the end.
@@ -83,7 +84,7 @@ impl Ext<'_> {
         if let Some(total) = body(self, &mut r, op) {
             *self.gb.cpu_registers_mut() = r;
             self.gb.ext_end(&mut self.st, total + self.skew);
-        } else {
+        } else if self.gb.ext_control(&mut self.st, op).is_none() {
             self.gb.ext_exec_native(&mut self.st, op);
         }
     }

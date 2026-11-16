@@ -1091,6 +1091,7 @@ impl GB {
     /// HDMA/palettes) regardless of cart support, so CGB features are forced on
     /// for the duration of boot; afterwards they are reconciled to the cart's
     /// actual support (the boot ROM has already latched KEY0 DMG-compat).
+    #[cfg(feature = "interpreter")]
     pub fn run_boot_rom(&mut self) -> usize {
         if !self.has_bios() {
             return 0;
@@ -1210,6 +1211,7 @@ impl GB {
         Ok(())
     }
 
+    #[cfg(feature = "interpreter")]
     pub fn step_instruction(&mut self, collect_audio: bool) -> (bool, u32) {
         // Check for breakpoint at current PC before executing. The is_empty
         // guard keeps the common no-breakpoints case from paying a HashSet
@@ -1295,6 +1297,7 @@ impl GB {
     /// audio sink. The single emission point for both the running and the STOP
     /// paths — the sweep harness drains tap and sink per frame and they must
     /// not desync.
+    #[cfg(feature = "interpreter")]
     fn emit_audio(&mut self, collect_audio: bool, cycles: u32, is_double_speed: bool) {
         if !collect_audio {
             return;
@@ -1348,6 +1351,7 @@ impl GB {
     /// The raw DMG shade indices (0..=3) of the current frame — the
     /// correction/palette-independent representation the test suite compares.
     /// Meaningful only for a monochrome frame (see [`GB::frame_renders_color`]).
+    #[cfg(feature = "interpreter")]
     pub(crate) fn dmg_shade_frame(&self) -> &[u8; ppu::FRAMEBUFFER_SIZE] {
         self.ppu.dmg_shade_frame()
     }
@@ -1437,6 +1441,7 @@ impl GB {
         self.hardware.cpu_hz(self.region)
     }
 
+    #[cfg(feature = "interpreter")]
     pub fn run_until_frame(&mut self, collect_audio: bool) -> (Frame, bool) {
         let mut cpu_cycles_this_frame = 0u32;
         // Normal frame should be 70224 PPU dots (154 scanlines × 456 dots)
@@ -1474,6 +1479,7 @@ impl GB {
         }
     }
 
+    #[cfg(feature = "interpreter")]
     pub fn run_until_lcd_frame(
         &mut self,
         collect_audio: bool,
@@ -4112,6 +4118,7 @@ impl GB {
     }
 
     /// Interpreter fallback for the opcode `ext_begin` returned.
+    #[cfg(feature = "interpreter")]
     pub fn ext_exec_native(&mut self, st: &mut cpu::bus::ExtBusState, op: u8) -> u32 {
         let mut bus = cpu::Bus::resume(&mut self.mmio, &mut self.ppu, st);
         let c = self.cpu.execute(op, &mut bus);
@@ -4154,6 +4161,28 @@ impl GB {
         if let Some(audio) = &mut self.ext_audio {
             audio.samples.extend(samples);
         }
+    }
+
+    /// Runs the body of a control instruction (STOP, HALT, DI, EI, or an
+    /// unused opcode, which locks the CPU) for the opcode `ext_begin`
+    /// returned, then the epilogue, as `step_instruction` does: the
+    /// instruction's cc, fetch included. `None`, with nothing done, for any
+    /// other opcode. These stay rustyboi's because they act on the boundary
+    /// state (`ext_begin`) rather than on data.
+    pub fn ext_control(&mut self, st: &mut cpu::bus::ExtBusState, op: u8) -> Option<u32> {
+        let mut bus = cpu::Bus::resume(&mut self.mmio, &mut self.ppu, st);
+        let Some(c) = self.cpu.control(op, &mut bus) else {
+            bus.suspend(st);
+            return None;
+        };
+        self.cpu.finish(&mut bus);
+        bus.tick_remaining(c);
+        if self.cpu.stopped {
+            bus.flush_all_lag();
+        }
+        *st = Default::default();
+        self.ext_emit(c);
+        Some(c)
     }
 
     /// Advance the devices `dots` master cc with no CPU bus activity.

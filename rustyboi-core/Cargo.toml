@@ -27,8 +27,12 @@ synth-audit = []
 
 # ROM-in-zip loading and bincode savestates. On by default; an embedder that
 # drives the core from its own CPU (see `GB::ext_begin`) can drop both deps.
-default = ["zip", "savestate"]
+default = ["zip", "savestate", "interpreter"]
 zip = ["dep:zip"]
+# The CPU interpreter (`cpu::opcodes`, `GB::step_instruction` and the run
+# loops over it). An embedder that runs every instruction outside rustyboi
+# (`GB::ext_begin`, `GB::ext_control`) leaves it out of its binary.
+interpreter = []
 savestate = ["dep:bincode"]
 
 [dependencies]

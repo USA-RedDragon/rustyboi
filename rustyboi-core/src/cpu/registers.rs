@@ -66,6 +66,7 @@ impl Registers {
         }
     }
 
+    #[cfg(feature = "interpreter")]
     pub(crate) fn get_flag(&self, flag: Flag) -> bool {
         (self.f & (flag as u8)) != 0
     }

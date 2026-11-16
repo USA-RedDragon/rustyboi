@@ -1,4 +1,6 @@
-use crate::{cpu::opcodes, cpu::registers, memory, memory::Addressable};
+use crate::{cpu::control, cpu::registers, memory, memory::Addressable};
+#[cfg(feature = "interpreter")]
+use crate::cpu::opcodes;
 use serde::{Deserialize, Serialize};
 
 /// The five interrupt sources in hardware service priority, highest first.
@@ -108,6 +110,7 @@ impl SM83 {
         *self = Self::new();
     }
 
+    #[cfg(feature = "interpreter")]
     pub fn step(&mut self, mmio: &mut crate::cpu::Bus) -> u32 {
         match self.begin(mmio) {
             Begin::Done(c) => c,
@@ -936,6 +939,22 @@ impl SM83 {
         self.pending_interrupt(mmio, registers::InterruptFlag::Timer as u8)
     }
 
+    /// The body of a control instruction (STOP, HALT, DI, EI, or an unused
+    /// opcode, which locks the CPU), or `None` for any other opcode.
+    pub(crate) fn control(&mut self, opcode: u8, mmio: &mut crate::cpu::Bus) -> Option<u32> {
+        Some(match opcode {
+            0x10 => control::stop(self, mmio),
+            0x76 => control::halt(self, mmio),
+            0xF3 => control::di(self, mmio),
+            0xFB => control::ei(self, mmio),
+            0xD3 | 0xDB | 0xDD | 0xE3 | 0xE4 | 0xEB | 0xEC | 0xED | 0xF4 | 0xFC | 0xFD => {
+                control::undefined(self, mmio)
+            }
+            _ => return None,
+        })
+    }
+
+    #[cfg(feature = "interpreter")]
     pub(crate) fn execute(&mut self, opcode: u8, mmio: &mut crate::cpu::Bus) -> u32 {
         match opcode {
             0x00 => opcodes::nop(self, mmio),
@@ -954,7 +973,7 @@ impl SM83 {
             0x0D => opcodes::dec_c(self, mmio),
             0x0E => opcodes::ld_c_imm(self, mmio),
             0x0F => opcodes::rrca(self, mmio),
-            0x10 => opcodes::stop(self, mmio),
+            0x10 => control::stop(self, mmio),
             0x11 => opcodes::ld_de_imm(self, mmio),
             0x12 => opcodes::ld_memory_de_a(self, mmio),
             0x13 => opcodes::inc_de(self, mmio),
@@ -1056,7 +1075,7 @@ impl SM83 {
             0x73 => opcodes::ld_memory_hl_e(self, mmio),
             0x74 => opcodes::ld_memory_hl_h(self, mmio),
             0x75 => opcodes::ld_memory_hl_l(self, mmio),
-            0x76 => opcodes::halt(self, mmio),
+            0x76 => control::halt(self, mmio),
             0x77 => opcodes::ld_memory_hl_a(self, mmio),
             0x78 => opcodes::ld_a_b(self, mmio),
             0x79 => opcodes::ld_a_c(self, mmio),
@@ -1149,7 +1168,7 @@ impl SM83 {
             0xD0 => opcodes::ret_nc(self, mmio),
             0xD1 => opcodes::pop_de(self, mmio),
             0xD2 => opcodes::jp_nc_imm(self, mmio),
-            0xD3 => opcodes::undefined(self, mmio),
+            0xD3 => control::undefined(self, mmio),
             0xD4 => opcodes::call_nc_imm(self, mmio),
             0xD5 => opcodes::push_de(self, mmio),
             0xD6 => opcodes::sub_imm(self, mmio),
@@ -1157,46 +1176,47 @@ impl SM83 {
             0xD8 => opcodes::ret_c(self, mmio),
             0xD9 => opcodes::reti(self, mmio),
             0xDA => opcodes::jp_c_imm(self, mmio),
-            0xDB => opcodes::undefined(self, mmio),
+            0xDB => control::undefined(self, mmio),
             0xDC => opcodes::call_c_imm(self, mmio),
-            0xDD => opcodes::undefined(self, mmio),
+            0xDD => control::undefined(self, mmio),
             0xDE => opcodes::sbc_a_imm(self, mmio),
             0xDF => opcodes::rst_18(self, mmio),
             0xE0 => opcodes::ldh_memory_imm_a(self, mmio),
             0xE1 => opcodes::pop_hl(self, mmio),
             0xE2 => opcodes::ld_memory_c_a(self, mmio),
-            0xE3 => opcodes::undefined(self, mmio),
-            0xE4 => opcodes::undefined(self, mmio),
+            0xE3 => control::undefined(self, mmio),
+            0xE4 => control::undefined(self, mmio),
             0xE5 => opcodes::push_hl(self, mmio),
             0xE6 => opcodes::and_imm(self, mmio),
             0xE7 => opcodes::rst_20(self, mmio),
             0xE8 => opcodes::add_sp_imm(self, mmio),
             0xE9 => opcodes::jp_hl(self, mmio),
             0xEA => opcodes::ld_memory_imm_a_16(self, mmio),
-            0xEB => opcodes::undefined(self, mmio),
-            0xEC => opcodes::undefined(self, mmio),
-            0xED => opcodes::undefined(self, mmio),
+            0xEB => control::undefined(self, mmio),
+            0xEC => control::undefined(self, mmio),
+            0xED => control::undefined(self, mmio),
             0xEE => opcodes::xor_imm(self, mmio),
             0xEF => opcodes::rst_28(self, mmio),
             0xF0 => opcodes::ldh_a_memory_imm(self, mmio),
             0xF2 => opcodes::ld_a_memory_c(self, mmio),
             0xF1 => opcodes::pop_af(self, mmio),
-            0xF3 => opcodes::di(self, mmio),
-            0xF4 => opcodes::undefined(self, mmio),
+            0xF3 => control::di(self, mmio),
+            0xF4 => control::undefined(self, mmio),
             0xF5 => opcodes::push_af(self, mmio),
             0xF6 => opcodes::or_imm(self, mmio),
             0xF7 => opcodes::rst_30(self, mmio),
             0xF8 => opcodes::ld_hl_sp_imm(self, mmio),
             0xF9 => opcodes::ld_sp_hl(self, mmio),
             0xFA => opcodes::ld_a_memory_imm_16(self, mmio),
-            0xFB => opcodes::ei(self, mmio),
-            0xFC => opcodes::undefined(self, mmio),
-            0xFD => opcodes::undefined(self, mmio),
+            0xFB => control::ei(self, mmio),
+            0xFC => control::undefined(self, mmio),
+            0xFD => control::undefined(self, mmio),
             0xFE => opcodes::cp_imm(self, mmio),
             0xFF => opcodes::rst_38(self, mmio),
         }
     }
 
+    #[cfg(feature = "interpreter")]
     fn execute_cb(&mut self, mmio: &mut crate::cpu::Bus) -> u32 {
         let opcode = mmio.read(self.registers.pc);
         self.registers.pc = self.registers.pc.wrapping_add(1);

@@ -800,11 +800,13 @@ impl Sgb {
 
     /// True if a _TRN command is pending a VBlank VRAM read. The caller feeds the
     /// 4KB VRAM block via `apply_trn` and clears this.
+    #[cfg(feature = "interpreter")]
     pub(crate) fn take_pending_trn(&mut self) -> Option<u8> {
         self.pending_trn.take()
     }
 
     /// Consume a 4KB VRAM block ($8000..$9000) for a pending _TRN command.
+    #[cfg(feature = "interpreter")]
     pub(crate) fn apply_trn(&mut self, command: u8, vram: &[u8]) {
         match command {
             cmd::PAL_TRN => {

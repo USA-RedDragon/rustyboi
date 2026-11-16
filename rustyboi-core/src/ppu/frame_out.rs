@@ -140,6 +140,7 @@ impl Ppu {
     /// The completed DMG shade-index frame (the back buffer `get_frame`
     /// serves). The SGB *_TRN readout captures from this: the real SGB
     /// re-digitizes the displayed video signal, not the GB's VRAM.
+    #[cfg(feature = "interpreter")]
     pub(crate) fn dmg_shade_frame(&self) -> &[u8; FRAMEBUFFER_SIZE] {
         &self.out.fb_b
     }

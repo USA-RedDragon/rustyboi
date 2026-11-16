@@ -2837,6 +2837,7 @@ impl Mmio {
     /// addressing (Donkey Kong '94 transfers with LCDC.4=0), scroll, BGP —
     /// exactly like hardware. Call once per VBlank with the completed frame.
     /// No-op on non-SGB hardware.
+    #[cfg(feature = "interpreter")]
     pub(crate) fn service_sgb_vram_transfer(&mut self, shade_frame: &[u8; crate::ppu::FRAMEBUFFER_SIZE]) {
         let pending = self.input.sgb_mut().and_then(|s| s.take_pending_trn());
         if let Some(command) = pending {
@@ -3142,6 +3143,7 @@ impl Mmio {
     /// the boot ROM executes on top of real power-on contents and any region it
     /// leaves untouched reads back the hardware garbage the dumper references expect.
     /// (CGB clears OAM during boot, so seeding OAM garbage is harmless there.)
+    #[cfg(feature = "interpreter")]
     pub(crate) fn seed_power_on_ram(&mut self, cgb: bool) {
         // Reuses the exact captured OAM/FEAX/HRAM constants. The I/O register
         // seeds it also sets (FF68/FF6A/HDMA5) are harmless: the boot ROM
