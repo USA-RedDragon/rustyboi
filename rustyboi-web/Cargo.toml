@@ -31,13 +31,13 @@ winit = { workspace = true }
 
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
-js-sys = "=0.3.103"
+js-sys = "=0.3.107"
 console_error_panic_hook = "=0.1.7"
 
 serde_json = { workspace = true }
 
 [dependencies.web-sys]
-version = "=0.3.103"
+version = "=0.3.107"
 features = [
     # Main-thread rendering: the egui/wgpu driver draws into this canvas.
     "HtmlCanvasElement",
@@ -87,7 +87,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 ] }
 
 [dev-dependencies]
-wasm-bindgen-test = "=0.3.76"
+wasm-bindgen-test = "=0.3.80"
 
 # WASM code-coverage runtime. `wasm-bindgen-test` pulls minicov itself under the
 # same cfg to provide `__wbgtest_cov_dump`, but the coverage build also

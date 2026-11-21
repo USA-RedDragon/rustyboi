@@ -1,7 +1,7 @@
 // Top-level build file. Plugin versions live here so all modules share them.
 plugins {
-    id("com.android.application") version "9.3.1" apply false
+    id("com.android.application") version "9.5.1" apply false
     // Matches the Kotlin AGP 9.3.0 bundles for the app's built-in Kotlin, so the
     // pure-JVM :romscan module compiles against the same stdlib.
-    id("org.jetbrains.kotlin.jvm") version "2.4.20" apply false
+    id("org.jetbrains.kotlin.jvm") version "2.4.21" apply false
 }
